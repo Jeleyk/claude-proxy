@@ -1,0 +1,11 @@
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+node_modules/
+dist/
+.env
+*.db
+*.db-*
+data/
+.DS_Store
+local.properties
