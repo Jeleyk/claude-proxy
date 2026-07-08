@@ -8,6 +8,9 @@ import org.claudeproxy.model.AccountHealth
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.model.LimitState
 import org.claudeproxy.model.LimitStatus
+import org.claudeproxy.model.WindowKind
+import org.claudeproxy.model.WindowLimit
+import org.claudeproxy.model.WindowLimitDto
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
@@ -17,11 +20,15 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import java.time.Instant
 
+/** Cumulative token counters for an account. */
+data class TokenCounts(val requests: Long = 0, val input: Long = 0, val output: Long = 0)
+
 /** Full config + secret + live limit state for one account, as held in the pool. */
 data class AccountRuntime(
     val id: Int,
     val name: String,
     val type: AccountType,
+    val groupId: Int?,
     val priority: Int,
     val threshold: Double,
     val coefficient: Double,
@@ -30,23 +37,35 @@ data class AccountRuntime(
     val secret: AccountSecret,
     val limit: LimitState,
 ) {
-    fun toDto(createdAt: String): AccountDto {
+    fun toDto(createdAt: String, counts: TokenCounts): AccountDto {
         val usage = limit.usageFraction()
         val effRemaining = usage?.let { coefficient * (1.0 - it) }
             ?: if (type == AccountType.API_KEY) coefficient else null
         return AccountDto(
-            id = id, name = name, type = type.name, priority = priority,
+            id = id, name = name, type = type.name, groupId = groupId, priority = priority,
             threshold = threshold, coefficient = coefficient, enabled = enabled,
             health = health.name,
+            fiveHour = limit.window(WindowKind.FIVE_HOUR)?.toDto(),
+            weekly = limit.window(WindowKind.WEEKLY)?.toDto(),
             usageFraction = usage,
-            remaining = limit.remaining, limitTotal = limit.limitTotal,
-            resetAt = limit.resetAt?.toString(), status = limit.status.name.takeIf { limit.status != LimitStatus.UNKNOWN },
             rateLimitedUntil = limit.rateLimitedUntil?.toString(),
             effectiveRemaining = effRemaining,
+            totalInputTokens = counts.input,
+            totalOutputTokens = counts.output,
+            totalRequests = counts.requests,
             createdAt = createdAt,
         )
     }
 }
+
+private fun WindowLimit.toDto() = WindowLimitDto(
+    usageFraction = usageFraction(),
+    remaining = remaining,
+    limitTotal = limitTotal,
+    resetAt = resetAt?.toString(),
+    status = status.name.takeIf { status != LimitStatus.UNKNOWN },
+    updatedAt = updatedAt?.toString(),
+)
 
 object AccountRepo {
 
@@ -56,21 +75,22 @@ object AccountRepo {
             val secretBlob = AccountSecrets.selectAll().where { AccountSecrets.accountId eq id }
                 .firstOrNull()?.get(AccountSecrets.cipherBlob)
             val secret = secretBlob?.let { Secrets.decode(it) } ?: AccountSecret()
-            val limitRow = AccountLimits.selectAll().where { AccountLimits.accountId eq id }.firstOrNull()
-            val limit = limitRow?.let {
-                LimitState(
-                    remaining = it[AccountLimits.remaining],
-                    limitTotal = it[AccountLimits.limitTotal],
-                    resetAt = it[AccountLimits.resetAt],
-                    status = runCatching { LimitStatus.valueOf(it[AccountLimits.status]) }.getOrDefault(LimitStatus.UNKNOWN),
-                    rateLimitedUntil = it[AccountLimits.rateLimitedUntil],
-                    updatedAt = it[AccountLimits.updatedAt],
+            val windows = AccountLimits.selectAll().where { AccountLimits.accountId eq id }.mapNotNull { lr ->
+                val kind = WindowKind.fromCode(lr[AccountLimits.windowKind]) ?: return@mapNotNull null
+                kind to WindowLimit(
+                    remaining = lr[AccountLimits.remaining],
+                    limitTotal = lr[AccountLimits.limitTotal],
+                    resetAt = lr[AccountLimits.resetAt],
+                    status = runCatching { LimitStatus.valueOf(lr[AccountLimits.status]) }.getOrDefault(LimitStatus.UNKNOWN),
+                    updatedAt = lr[AccountLimits.updatedAt],
                 )
-            } ?: LimitState()
+            }.toMap()
+            val limit = LimitState(windows = windows, rateLimitedUntil = row[Accounts.rateLimitedUntil])
             val rt = AccountRuntime(
                 id = id,
                 name = row[Accounts.name],
                 type = AccountType.fromString(row[Accounts.type]) ?: AccountType.API_KEY,
+                groupId = row[Accounts.groupId],
                 priority = row[Accounts.priority],
                 threshold = row[Accounts.threshold],
                 coefficient = row[Accounts.coefficient],
@@ -83,21 +103,18 @@ object AccountRepo {
         }
     }
 
-    fun createdAtOf(id: Int): Instant? = transaction {
-        Accounts.selectAll().where { Accounts.id eq id }.firstOrNull()?.get(Accounts.createdAt)
-    }
-
     fun createdAtMap(): Map<Int, Instant> = transaction {
         Accounts.selectAll().associate { it[Accounts.id] to it[Accounts.createdAt] }
     }
 
     fun create(
-        name: String, type: AccountType, priority: Int, threshold: Double, coefficient: Double,
+        name: String, type: AccountType, groupId: Int?, priority: Int, threshold: Double, coefficient: Double,
         secret: AccountSecret, createdBy: Int?,
     ): Int = transaction {
         val id = Accounts.insert {
             it[Accounts.name] = name
             it[Accounts.type] = type.name
+            it[Accounts.groupId] = groupId
             it[Accounts.priority] = priority
             it[Accounts.threshold] = threshold
             it[Accounts.coefficient] = coefficient
@@ -114,10 +131,12 @@ object AccountRepo {
     }
 
     fun updateConfig(
-        id: Int, name: String?, priority: Int?, threshold: Double?, coefficient: Double?, enabled: Boolean?,
+        id: Int, name: String?, groupId: Int?, priority: Int?, threshold: Double?, coefficient: Double?,
+        enabled: Boolean?, clearGroup: Boolean = false,
     ) = transaction {
         Accounts.update({ Accounts.id eq id }) {
             if (name != null) it[Accounts.name] = name
+            if (clearGroup) it[Accounts.groupId] = null else if (groupId != null) it[Accounts.groupId] = groupId
             if (priority != null) it[Accounts.priority] = priority
             if (threshold != null) it[Accounts.threshold] = threshold
             if (coefficient != null) it[Accounts.coefficient] = coefficient
@@ -143,14 +162,19 @@ object AccountRepo {
     }
 
     fun persistLimit(id: Int, limit: LimitState) = transaction {
-        AccountLimits.replace {
-            it[accountId] = id
-            it[remaining] = limit.remaining
-            it[limitTotal] = limit.limitTotal
-            it[resetAt] = limit.resetAt
-            it[status] = limit.status.name
+        limit.windows.forEach { (kind, w) ->
+            AccountLimits.replace {
+                it[accountId] = id
+                it[windowKind] = kind.code
+                it[remaining] = w.remaining
+                it[limitTotal] = w.limitTotal
+                it[resetAt] = w.resetAt
+                it[status] = w.status.name
+                it[updatedAt] = w.updatedAt ?: Instant.now()
+            }
+        }
+        Accounts.update({ Accounts.id eq id }) {
             it[rateLimitedUntil] = limit.rateLimitedUntil
-            it[updatedAt] = limit.updatedAt ?: Instant.now()
         }
     }
 }

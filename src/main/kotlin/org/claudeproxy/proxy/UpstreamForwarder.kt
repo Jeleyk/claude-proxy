@@ -99,7 +99,8 @@ class UpstreamForwarder(
 
             val status = response.status
             if (status == HttpStatusCode.TooManyRequests) {
-                val until = resetInstantFrom(headerMap) ?: newLimit.resetAt
+                val until = resetInstantFrom(headerMap)
+                    ?: newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull()
                 pool.markRateLimited(account.id, until)
                 // drain body so the connection can be reused, but do not respond yet
                 runCatching { response.readRawBytes() }
@@ -134,22 +135,7 @@ class UpstreamForwarder(
     }
 
     private fun applyAuth(builder: io.ktor.client.request.HttpRequestBuilder, account: AccountRuntime) {
-        when (account.type) {
-            AccountType.API_KEY -> {
-                account.secret.apiKey?.let { builder.header("x-api-key", it) }
-            }
-            AccountType.OAUTH, AccountType.OAUTH_STATIC -> {
-                account.secret.accessToken?.let { builder.header("Authorization", "Bearer $it") }
-                // Ensure the OAuth beta flag is present (Claude Code sets it; add if missing).
-                val existingBeta = builder.headers["anthropic-beta"]
-                if (existingBeta == null) {
-                    builder.header("anthropic-beta", "oauth-2025-04-20")
-                } else if (!existingBeta.contains("oauth-2025-04-20")) {
-                    builder.headers.remove("anthropic-beta")
-                    builder.header("anthropic-beta", "$existingBeta,oauth-2025-04-20")
-                }
-            }
-        }
+        org.claudeproxy.accounts.UpstreamAuth.apply(builder, account.type, account.secret)
     }
 
     private fun resetInstantFrom(headers: Map<String, String>): Instant? {

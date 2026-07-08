@@ -46,6 +46,9 @@ class ProxyEngine(
             call.respond(HttpStatusCode.Forbidden, ProxyError(ProxyErrorBody("permission_error", "Token lacks proxy.use")))
             return
         }
+        // Admins may use any account; others are scoped to their granted groups
+        // (ungrouped accounts are always available).
+        val allowedGroups: Set<Int>? = if (Permission.ADMIN in perms) null else UserRepo.allowedGroupsOf(userId)
 
         val bodyBytes = runCatching { call.receive<ByteArray>() }.getOrDefault(ByteArray(0))
         val pathAndQuery = call.request.uri
@@ -53,7 +56,7 @@ class ProxyEngine(
         val maxAttempts = maxOf(1, pool.snapshot().size)
         val tried = HashSet<Int>()
         repeat(maxAttempts) {
-            val account = pool.select() ?: run {
+            val account = pool.select(allowedGroups) ?: run {
                 respondExhausted(call)
                 return
             }

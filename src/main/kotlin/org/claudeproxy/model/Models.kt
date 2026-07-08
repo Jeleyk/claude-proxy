@@ -32,6 +32,16 @@ enum class AccountHealth { OK, REFRESH_FAILED, DEAD }
 
 enum class LimitStatus { ALLOWED, ALLOWED_WARNING, REJECTED, UNKNOWN }
 
+/** Rolling limit windows Anthropic exposes for subscription accounts. */
+enum class WindowKind(val code: String, val label: String) {
+    FIVE_HOUR("5h", "5-hour"),
+    WEEKLY("7d", "weekly");
+
+    companion object {
+        fun fromCode(s: String): WindowKind? = entries.firstOrNull { it.code == s }
+    }
+}
+
 // ---- API DTOs ----
 
 @Serializable
@@ -41,6 +51,28 @@ data class UserDto(
     val enabled: Boolean,
     val roles: List<String>,
     val permissions: List<String>,
+    // ids of account-groups this user may route through (empty = only ungrouped accounts,
+    // unless the user is an admin, who may use everything)
+    val allowedGroups: List<Int> = emptyList(),
+    val allGroups: Boolean = false,
+)
+
+@Serializable
+data class AccountGroupDto(
+    val id: Int,
+    val name: String,
+    val accountCount: Int,
+    val createdAt: String,
+)
+
+@Serializable
+data class WindowLimitDto(
+    val usageFraction: Double?,
+    val remaining: Double?,
+    val limitTotal: Double?,
+    val resetAt: String?,
+    val status: String?,
+    val updatedAt: String?,
 )
 
 @Serializable
@@ -48,19 +80,23 @@ data class AccountDto(
     val id: Int,
     val name: String,
     val type: String,
+    val groupId: Int?,
     val priority: Int,
     val threshold: Double,
     val coefficient: Double,
     val enabled: Boolean,
     val health: String,
-    // live limit state (nullable when never observed)
-    val usageFraction: Double?,      // 0..1 self-normalized usage of the active window
-    val remaining: Double?,
-    val limitTotal: Double?,
-    val resetAt: String?,
-    val status: String?,
+    // live limit state per window (nullable when never observed)
+    val fiveHour: WindowLimitDto?,
+    val weekly: WindowLimitDto?,
+    // usage fraction driving selection (max across windows), 0..1
+    val usageFraction: Double?,
     val rateLimitedUntil: String?,
     val effectiveRemaining: Double?, // coefficient-weighted remaining capacity
+    // cumulative token counters for this account (all-time)
+    val totalInputTokens: Long,
+    val totalOutputTokens: Long,
+    val totalRequests: Long,
     val createdAt: String,
 )
 
@@ -82,16 +118,22 @@ data class PoolStatsDto(
     val activeAccountId: Int?,
     val totalEffectiveRemaining: Double,   // Σ coefficient-weighted remaining
     val totalEffectiveCapacity: Double,    // Σ coefficient
+    // pool-wide token counters (all-time)
+    val totalInputTokens: Long,
+    val totalOutputTokens: Long,
+    val totalRequests: Long,
+    // nearest reset times across the pool, per window
+    val nextFiveHourReset: String?,
+    val nextWeeklyReset: String?,
     val accounts: List<AccountDto>,
 )
 
-/** Immutable snapshot of an account's live limit state, held in memory + persisted. */
-data class LimitState(
+/** Live limit state for a single rolling window. */
+data class WindowLimit(
     val remaining: Double? = null,
     val limitTotal: Double? = null,
     val resetAt: Instant? = null,
     val status: LimitStatus = LimitStatus.UNKNOWN,
-    val rateLimitedUntil: Instant? = null,
     val updatedAt: Instant? = null,
 ) {
     /** Self-normalized usage fraction 0..1, or null if unknown. */
@@ -101,4 +143,20 @@ data class LimitState(
         if (t <= 0.0) return null
         return (1.0 - (r / t)).coerceIn(0.0, 1.0)
     }
+
+    fun isEmpty(): Boolean =
+        remaining == null && limitTotal == null && resetAt == null && status == LimitStatus.UNKNOWN
+}
+
+/** Immutable snapshot of an account's live limit state across all windows. */
+data class LimitState(
+    val windows: Map<WindowKind, WindowLimit> = emptyMap(),
+    val rateLimitedUntil: Instant? = null,
+    val updatedAt: Instant? = null,
+) {
+    fun window(kind: WindowKind): WindowLimit? = windows[kind]
+
+    /** Usage fraction that drives selection: the max across known windows. */
+    fun usageFraction(): Double? =
+        windows.values.mapNotNull { it.usageFraction() }.maxOrNull()
 }

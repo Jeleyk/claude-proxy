@@ -17,6 +17,8 @@ import io.ktor.server.routing.routing
 import kotlinx.coroutines.GlobalScope
 import kotlinx.serialization.json.Json
 import org.claudeproxy.accounts.AccountPool
+import org.claudeproxy.accounts.LimitProbe
+import org.claudeproxy.accounts.LimitScheduler
 import org.claudeproxy.accounts.TokenRefresher
 import org.claudeproxy.api.MessageResponse
 import org.claudeproxy.api.adminRoutes
@@ -42,11 +44,13 @@ fun main() {
     val forwarder = UpstreamForwarder(pool, config.upstreamBaseUrl)
     val engine = ProxyEngine(pool, forwarder)
     val refresher = TokenRefresher(pool)
+    val probe = LimitProbe(pool, config.upstreamBaseUrl)
+    val scheduler = LimitScheduler(pool, probe)
 
     log.info("Starting claude-proxy on {}:{} (upstream {})", config.bindHost, config.port, config.upstreamBaseUrl)
 
     embeddedServer(Netty, host = config.bindHost, port = config.port) {
-        module(config, pool, engine, refresher)
+        module(config, pool, engine, refresher, probe, scheduler)
     }.start(wait = true)
 }
 
@@ -56,6 +60,8 @@ fun Application.module(
     pool: AccountPool,
     engine: ProxyEngine,
     refresher: TokenRefresher,
+    probe: LimitProbe,
+    scheduler: LimitScheduler,
 ) {
     install(ContentNegotiation) {
         json(Json {
@@ -92,9 +98,10 @@ fun Application.module(
 
     installSecurity(config.sessionSecret)
 
-    // Load accounts and start the background token refresher.
+    // Load accounts and start the background token refresher + limit scheduler.
     kotlinx.coroutines.runBlocking { pool.reload() }
     refresher.start(GlobalScope)
+    scheduler.start(GlobalScope)
 
     routing {
         get("/healthz") { call.respond(MessageResponse("ok")) }
@@ -103,7 +110,7 @@ fun Application.module(
         proxyRoutes(engine)
 
         // Management REST API.
-        adminRoutes(pool)
+        adminRoutes(pool, probe, config.publicBaseUrl)
 
         // React SPA (built into resources/static). Declared last so it only catches
         // unmatched GETs and falls back to index.html for client-side routes.

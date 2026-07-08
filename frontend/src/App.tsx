@@ -46,7 +46,7 @@ export function App() {
   return (
     <div className="app">
       <div className="sidebar">
-        <div className="brand">claude-proxy</div>
+        <div className="brand"><span className="dot" />claude-proxy</div>
         {allowed.map((n) => (
           <div
             key={n.key}

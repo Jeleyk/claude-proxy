@@ -3,6 +3,7 @@ package org.claudeproxy.repo
 import org.claudeproxy.auth.Passwords
 import org.claudeproxy.db.RolePermissions
 import org.claudeproxy.db.Roles
+import org.claudeproxy.db.UserGroupAccess
 import org.claudeproxy.db.UserRoles
 import org.claudeproxy.db.Users
 import org.claudeproxy.model.Permission
@@ -57,23 +58,44 @@ object UserRepo {
     fun list(): List<UserDto> = transaction {
         Users.selectAll().map { row ->
             val uid = row[Users.id]
-            UserDto(
-                id = uid,
-                username = row[Users.username],
-                enabled = row[Users.enabled],
-                roles = rolesOf(uid),
-                permissions = permissionsOf(uid).map { it.name },
-            )
+            toDto(uid, row[Users.username], row[Users.enabled])
         }
     }
 
     fun get(userId: Int): UserDto? = transaction {
         val row = Users.selectAll().where { Users.id eq userId }.firstOrNull() ?: return@transaction null
-        val uid = row[Users.id]
-        UserDto(uid, row[Users.username], row[Users.enabled], rolesOf(uid), permissionsOf(uid).map { it.name })
+        toDto(row[Users.id], row[Users.username], row[Users.enabled])
     }
 
-    fun create(username: String, password: String, roleNames: List<String>): Int = transaction {
+    private fun toDto(uid: Int, username: String, enabled: Boolean): UserDto {
+        val perms = permissionsOf(uid)
+        return UserDto(
+            id = uid,
+            username = username,
+            enabled = enabled,
+            roles = rolesOf(uid),
+            permissions = perms.map { it.name },
+            allowedGroups = allowedGroupsOf(uid).toList(),
+            allGroups = Permission.ADMIN in perms,
+        )
+    }
+
+    fun allowedGroupsOf(userId: Int): Set<Int> = transaction {
+        UserGroupAccess.selectAll().where { UserGroupAccess.userId eq userId }
+            .map { it[UserGroupAccess.groupId] }.toSet()
+    }
+
+    fun setAllowedGroups(userId: Int, groupIds: List<Int>) = transaction {
+        UserGroupAccess.deleteWhere { UserGroupAccess.userId eq userId }
+        groupIds.distinct().forEach { gid ->
+            UserGroupAccess.insert {
+                it[UserGroupAccess.userId] = userId
+                it[groupId] = gid
+            }
+        }
+    }
+
+    fun create(username: String, password: String, roleNames: List<String>, groupIds: List<Int>): Int = transaction {
         val uid = Users.insert {
             it[Users.username] = username
             it[passwordHash] = Passwords.hash(password)
@@ -81,10 +103,11 @@ object UserRepo {
             it[createdAt] = Instant.now()
         }[Users.id]
         setRoles(uid, roleNames)
+        setAllowedGroups(uid, groupIds)
         uid
     }
 
-    fun update(userId: Int, password: String?, enabled: Boolean?, roleNames: List<String>?) = transaction {
+    fun update(userId: Int, password: String?, enabled: Boolean?, roleNames: List<String>?, groupIds: List<Int>?) = transaction {
         if (password != null || enabled != null) {
             Users.update({ Users.id eq userId }) {
                 if (password != null) it[passwordHash] = Passwords.hash(password)
@@ -92,9 +115,11 @@ object UserRepo {
             }
         }
         if (roleNames != null) setRoles(userId, roleNames)
+        if (groupIds != null) setAllowedGroups(userId, groupIds)
     }
 
     fun delete(userId: Int) = transaction {
+        UserGroupAccess.deleteWhere { UserGroupAccess.userId eq userId }
         UserRoles.deleteWhere { UserRoles.userId eq userId }
         Users.deleteWhere { Users.id eq userId }
     }

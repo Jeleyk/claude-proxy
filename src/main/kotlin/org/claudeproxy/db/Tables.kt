@@ -40,15 +40,32 @@ object ProxyTokens : Table("proxy_tokens") {
     override val primaryKey = PrimaryKey(id)
 }
 
+/** Named groups of upstream accounts, used to scope which users may use which accounts. */
+object AccountGroups : Table("account_groups") {
+    val id = integer("id").autoIncrement()
+    val name = varchar("name", 128).uniqueIndex()
+    val createdAt = timestamp("created_at")
+    override val primaryKey = PrimaryKey(id)
+}
+
+/** Grants a user access to all accounts in a group. */
+object UserGroupAccess : Table("user_group_access") {
+    val userId = integer("user_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    val groupId = integer("group_id").references(AccountGroups.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    override val primaryKey = PrimaryKey(userId, groupId)
+}
+
 object Accounts : Table("accounts") {
     val id = integer("id").autoIncrement()
     val name = varchar("name", 128)
     val type = varchar("type", 32)
+    val groupId = integer("group_id").references(AccountGroups.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.SET_NULL).nullable()
     val priority = integer("priority").default(100)
     val threshold = double("threshold").default(0.9)
     val coefficient = double("coefficient").default(1.0)
     val enabled = bool("enabled").default(true)
     val health = varchar("health", 32).default("OK")
+    val rateLimitedUntil = timestamp("rate_limited_until").nullable()
     val createdBy = integer("created_by").references(Users.id).nullable()
     val createdAt = timestamp("created_at")
     override val primaryKey = PrimaryKey(id)
@@ -61,16 +78,16 @@ object AccountSecrets : Table("account_secrets") {
     override val primaryKey = PrimaryKey(accountId)
 }
 
-/** Live limit state per account, persisted so it survives restarts. */
+/** Live limit state per account per window, persisted so it survives restarts. */
 object AccountLimits : Table("account_limits") {
     val accountId = integer("account_id").references(Accounts.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    val windowKind = varchar("window_kind", 8)   // "5h" | "7d"
     val remaining = double("remaining").nullable()
     val limitTotal = double("limit_total").nullable()
     val resetAt = timestamp("reset_at").nullable()
     val status = varchar("status", 32).default("UNKNOWN")
-    val rateLimitedUntil = timestamp("rate_limited_until").nullable()
     val updatedAt = timestamp("updated_at").nullable()
-    override val primaryKey = PrimaryKey(accountId)
+    override val primaryKey = PrimaryKey(accountId, windowKind)
 }
 
 object UsageEvents : Table("usage_events") {
@@ -95,5 +112,6 @@ object OAuthAddSessions : Table("oauth_add_sessions") {
 
 val ALL_TABLES = arrayOf(
     Users, Roles, RolePermissions, UserRoles, ProxyTokens,
+    AccountGroups, UserGroupAccess,
     Accounts, AccountSecrets, AccountLimits, UsageEvents, OAuthAddSessions,
 )

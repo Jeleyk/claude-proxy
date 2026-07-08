@@ -49,6 +49,29 @@ object UsageRepo {
         }
     }
 
+    /** All-time [requests, input, output] per account. */
+    fun totalsPerAccount(): Map<Int, LongArray> = transaction {
+        val acc = HashMap<Int, LongArray>()
+        UsageEvents.selectAll().forEach { row ->
+            val a = acc.getOrPut(row[UsageEvents.accountId]) { LongArray(3) }
+            a[0] += 1
+            a[1] += row[UsageEvents.inputTokens]
+            a[2] += row[UsageEvents.outputTokens]
+        }
+        acc
+    }
+
+    /** All-time pool totals [requests, input, output]. */
+    fun poolTotals(): LongArray = transaction {
+        val a = LongArray(3)
+        UsageEvents.selectAll().forEach { row ->
+            a[0] += 1
+            a[1] += row[UsageEvents.inputTokens]
+            a[2] += row[UsageEvents.outputTokens]
+        }
+        a
+    }
+
     fun recent(limit: Int = 200): List<UsageEventDto> = transaction {
         val names = Accounts.selectAll().associate { it[Accounts.id] to it[Accounts.name] }
         UsageEvents.selectAll()

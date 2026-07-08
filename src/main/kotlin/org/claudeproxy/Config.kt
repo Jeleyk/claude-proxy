@@ -17,6 +17,9 @@ data class Config(
     val adminUser: String,
     val adminPassword: String,
     val upstreamBaseUrl: String,
+    // Canonical URL clients use to reach the proxy (shown on the Tokens page).
+    // Empty => the UI falls back to the browser's current origin.
+    val publicBaseUrl: String,
 ) {
     companion object {
         fun load(): Config {
@@ -27,17 +30,22 @@ data class Config(
             val masterKey = env("MASTER_KEY")
                 ?: error("MASTER_KEY is required (32+ char secret used to encrypt account credentials at rest)")
             val sessionSecret = env("SESSION_SECRET") ?: masterKey
+            val publicDomain = env("PUBLIC_DOMAIN")
+            val publicBaseUrl = env("PUBLIC_BASE_URL")
+                ?: publicDomain?.let { "https://$it" }
+                ?: ""
 
             return Config(
                 bindHost = env("BIND_HOST", "127.0.0.1")!!,
                 port = env("PORT", "8787")!!.toInt(),
-                publicDomain = env("PUBLIC_DOMAIN"),
+                publicDomain = publicDomain,
                 dbPath = env("DB_PATH", "data/claude-proxy.db")!!,
                 masterKey = masterKey,
                 sessionSecret = sessionSecret,
                 adminUser = env("ADMIN_USER", "admin")!!,
                 adminPassword = env("ADMIN_PASSWORD", "admin")!!,
                 upstreamBaseUrl = env("UPSTREAM_BASE_URL", "https://api.anthropic.com")!!.trimEnd('/'),
+                publicBaseUrl = publicBaseUrl.trimEnd('/'),
             )
         }
 

@@ -9,6 +9,7 @@ data class LoginRequest(val username: String, val password: String)
 data class CreateAccountRequest(
     val name: String,
     val type: String,               // API_KEY | OAUTH | OAUTH_STATIC
+    val groupId: Int? = null,
     val priority: Int = 100,
     val threshold: Double = 0.9,
     val coefficient: Double = 1.0,
@@ -21,11 +22,19 @@ data class CreateAccountRequest(
 @Serializable
 data class UpdateAccountRequest(
     val name: String? = null,
+    val groupId: Int? = null,
+    val clearGroup: Boolean = false,
     val priority: Int? = null,
     val threshold: Double? = null,
     val coefficient: Double? = null,
     val enabled: Boolean? = null,
 )
+
+@Serializable
+data class CreateGroupRequest(val name: String)
+
+@Serializable
+data class UpdateGroupRequest(val name: String)
 
 @Serializable
 data class OAuthStartResponse(val authorizeUrl: String, val state: String)
@@ -35,6 +44,7 @@ data class OAuthCompleteRequest(
     val state: String,
     val code: String,
     val name: String,
+    val groupId: Int? = null,
     val priority: Int = 100,
     val threshold: Double = 0.9,
     val coefficient: Double = 1.0,
@@ -45,6 +55,7 @@ data class CreateUserRequest(
     val username: String,
     val password: String,
     val roles: List<String> = emptyList(),
+    val allowedGroups: List<Int> = emptyList(),
 )
 
 @Serializable
@@ -52,7 +63,11 @@ data class UpdateUserRequest(
     val password: String? = null,
     val enabled: Boolean? = null,
     val roles: List<String>? = null,
+    val allowedGroups: List<Int>? = null,
 )
+
+@Serializable
+data class ConfigDto(val publicBaseUrl: String)
 
 @Serializable
 data class CreateRoleRequest(val name: String, val permissions: List<String> = emptyList())

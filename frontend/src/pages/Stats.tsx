@@ -25,43 +25,47 @@ export function Stats() {
   }
 
   return (
-    <div>
+    <div className="main-inner">
       <h1>Statistics</h1>
       <p className="sub">Usage over the last 24h. Refreshes every 8s.</p>
 
       <h2>Per account (24h)</h2>
-      <table>
-        <thead><tr><th>Account</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th></tr></thead>
-        <tbody>
-          {summary.map((s) => (
-            <tr key={s.accountId}>
-              <td>{s.accountName ?? `#${s.accountId}`}</td>
-              <td className="num">{s.requests}</td>
-              <td className="num">{s.inputTokens.toLocaleString()}</td>
-              <td className="num">{s.outputTokens.toLocaleString()}</td>
-            </tr>
-          ))}
-          {summary.length === 0 && <tr><td colSpan={4} className="hint">No usage yet.</td></tr>}
-        </tbody>
-      </table>
+      <div className="tablewrap">
+        <table>
+          <thead><tr><th>Account</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th></tr></thead>
+          <tbody>
+            {summary.map((s) => (
+              <tr key={s.accountId}>
+                <td>{s.accountName ?? `#${s.accountId}`}</td>
+                <td className="num">{s.requests}</td>
+                <td className="num">{s.inputTokens.toLocaleString()}</td>
+                <td className="num">{s.outputTokens.toLocaleString()}</td>
+              </tr>
+            ))}
+            {summary.length === 0 && <tr><td colSpan={4} className="hint">No usage yet.</td></tr>}
+          </tbody>
+        </table>
+      </div>
 
       <h2>Recent requests</h2>
-      <table>
-        <thead><tr><th>Time</th><th>Account</th><th>Model</th><th>In</th><th>Out</th><th>Status</th></tr></thead>
-        <tbody>
-          {recent.map((e) => (
-            <tr key={e.id}>
-              <td className="hint">{new Date(e.ts).toLocaleTimeString()}</td>
-              <td>{e.accountName ?? '—'}</td>
-              <td className="hint">{e.model ?? '—'}</td>
-              <td className="num">{e.inputTokens}</td>
-              <td className="num">{e.outputTokens}</td>
-              <td>{statusBadge(e.httpStatus)}</td>
-            </tr>
-          ))}
-          {recent.length === 0 && <tr><td colSpan={6} className="hint">No requests yet.</td></tr>}
-        </tbody>
-      </table>
+      <div className="tablewrap">
+        <table>
+          <thead><tr><th>Time</th><th>Account</th><th>Model</th><th>In</th><th>Out</th><th>Status</th></tr></thead>
+          <tbody>
+            {recent.map((e) => (
+              <tr key={e.id}>
+                <td className="hint">{new Date(e.ts).toLocaleTimeString()}</td>
+                <td>{e.accountName ?? '—'}</td>
+                <td className="hint">{e.model ?? '—'}</td>
+                <td className="num">{e.inputTokens}</td>
+                <td className="num">{e.outputTokens}</td>
+                <td>{statusBadge(e.httpStatus)}</td>
+              </tr>
+            ))}
+            {recent.length === 0 && <tr><td colSpan={6} className="hint">No requests yet.</td></tr>}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

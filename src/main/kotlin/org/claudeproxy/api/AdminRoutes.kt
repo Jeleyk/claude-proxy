@@ -12,6 +12,8 @@ import io.ktor.server.routing.route
 import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.accounts.AccountRepo
 import org.claudeproxy.accounts.AccountSecret
+import org.claudeproxy.accounts.LimitProbe
+import org.claudeproxy.accounts.TokenCounts
 import org.claudeproxy.auth.clearUserSession
 import org.claudeproxy.auth.currentUser
 import org.claudeproxy.auth.requirePermission
@@ -21,8 +23,10 @@ import org.claudeproxy.model.AccountType
 import org.claudeproxy.model.Permission
 import org.claudeproxy.model.PoolStatsDto
 import org.claudeproxy.model.UserDto
+import org.claudeproxy.model.WindowKind
 import org.claudeproxy.oauth.ClaudeOAuth
 import org.claudeproxy.proxy.Http
+import org.claudeproxy.repo.GroupRepo
 import org.claudeproxy.repo.OAuthAddRepo
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.RoleRepo
@@ -30,10 +34,15 @@ import org.claudeproxy.repo.UsageRepo
 import org.claudeproxy.repo.UserRepo
 import java.time.Instant
 
-fun Route.adminRoutes(pool: AccountPool) {
+fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: String) {
     route("/api") {
-        authRoutes(pool)
-        accountRoutes(pool)
+        get("/config") {
+            call.requireUser()
+            call.respond(ConfigDto(publicBaseUrl))
+        }
+        authRoutes()
+        accountRoutes(pool, probe)
+        groupRoutes(pool)
         userRoutes()
         roleRoutes()
         proxyTokenRoutes()
@@ -43,29 +52,39 @@ fun Route.adminRoutes(pool: AccountPool) {
 
 // ---- helpers ----
 
-private fun userToDto(user: org.claudeproxy.repo.UserAuth): UserDto =
-    UserDto(user.id, user.username, user.enabled, UserRepo.rolesOf(user.id), user.permissions.map { it.name })
+private fun userToDto(user: org.claudeproxy.repo.UserAuth): UserDto = UserRepo.get(user.id)!!
 
 private suspend fun buildPoolStats(pool: AccountPool): PoolStatsDto {
     val createdAt = AccountRepo.createdAtMap()
     val runtimes = pool.snapshot()
-    val accounts = runtimes.map { it.toDto(createdAt[it.id]?.toString() ?: Instant.now().toString()) }
+    val perAcc = UsageRepo.totalsPerAccount()
+    val accounts = runtimes.map { rt ->
+        val a = perAcc[rt.id]
+        val counts = if (a != null) TokenCounts(a[0], a[1], a[2]) else TokenCounts()
+        rt.toDto(createdAt[rt.id]?.toString() ?: Instant.now().toString(), counts)
+    }
     val healthy = runtimes.count { it.enabled && it.health == org.claudeproxy.model.AccountHealth.OK }
     val effRemaining = accounts.sumOf { it.effectiveRemaining ?: 0.0 }
     val effCapacity = runtimes.sumOf { it.coefficient }
+    val pool3 = UsageRepo.poolTotals()
     return PoolStatsDto(
         totalAccounts = runtimes.size,
         healthyAccounts = healthy,
         activeAccountId = pool.activeAccountId,
         totalEffectiveRemaining = effRemaining,
         totalEffectiveCapacity = effCapacity,
+        totalRequests = pool3[0],
+        totalInputTokens = pool3[1],
+        totalOutputTokens = pool3[2],
+        nextFiveHourReset = pool.nextReset(WindowKind.FIVE_HOUR)?.toString(),
+        nextWeeklyReset = pool.nextReset(WindowKind.WEEKLY)?.toString(),
         accounts = accounts,
     )
 }
 
 // ---- auth ----
 
-private fun Route.authRoutes(pool: AccountPool) {
+private fun Route.authRoutes() {
     post("/auth/login") {
         val req = call.receive<LoginRequest>()
         val user = UserRepo.authenticate(req.username, req.password)
@@ -89,7 +108,7 @@ private fun Route.authRoutes(pool: AccountPool) {
 
 // ---- accounts ----
 
-private fun Route.accountRoutes(pool: AccountPool) {
+private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
     get("/accounts") {
         call.requirePermission(Permission.ACCOUNTS_VIEW)
         call.respond(buildPoolStats(pool))
@@ -110,8 +129,9 @@ private fun Route.accountRoutes(pool: AccountPool) {
                 AccountSecret(accessToken = access, refreshToken = req.refreshToken, expiresAt = req.expiresAt)
             }
         }
-        AccountRepo.create(req.name, type, req.priority, req.threshold, req.coefficient, secret, user.id)
+        val id = AccountRepo.create(req.name, type, req.groupId, req.priority, req.threshold, req.coefficient, secret, user.id)
         pool.reload()
+        runCatching { probe.probe(id) } // scrape limits on add (best effort)
         call.respond(buildPoolStats(pool))
     }
 
@@ -120,7 +140,7 @@ private fun Route.accountRoutes(pool: AccountPool) {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateAccountRequest>()
-        AccountRepo.updateConfig(id, req.name, req.priority, req.threshold, req.coefficient, req.enabled)
+        AccountRepo.updateConfig(id, req.name, req.groupId, req.priority, req.threshold, req.coefficient, req.enabled, req.clearGroup)
         pool.reload()
         call.respond(buildPoolStats(pool))
     }
@@ -132,6 +152,22 @@ private fun Route.accountRoutes(pool: AccountPool) {
         AccountRepo.delete(id)
         pool.reload()
         call.respond(OkResponse())
+    }
+
+    // Refresh live limits for one account.
+    post("/accounts/{id}/refresh-limits") {
+        call.requirePermission(Permission.ACCOUNTS_VIEW)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        probe.probe(id)
+        call.respond(buildPoolStats(pool))
+    }
+
+    // Refresh live limits for every account.
+    post("/accounts/refresh-limits") {
+        call.requirePermission(Permission.ACCOUNTS_VIEW)
+        probe.probeAll()
+        call.respond(buildPoolStats(pool))
     }
 
     // OAuth "Login with Claude" add flow
@@ -157,12 +193,44 @@ private fun Route.accountRoutes(pool: AccountPool) {
                 expiresAt = result.expiresAtMillis,
             )
             val type = if (result.refreshToken != null) AccountType.OAUTH else AccountType.OAUTH_STATIC
-            AccountRepo.create(req.name, type, req.priority, req.threshold, req.coefficient, secret, user.id)
+            val id = AccountRepo.create(req.name, type, req.groupId, req.priority, req.threshold, req.coefficient, secret, user.id)
             pool.reload()
+            runCatching { probe.probe(id) }
             call.respond(buildPoolStats(pool))
         } catch (e: Exception) {
             call.respond(HttpStatusCode.BadGateway, MessageResponse("OAuth exchange failed: ${e.message}"))
         }
+    }
+}
+
+// ---- groups ----
+
+private fun Route.groupRoutes(pool: AccountPool) {
+    get("/groups") {
+        call.requirePermission(Permission.ACCOUNTS_VIEW)
+        call.respond(GroupRepo.list())
+    }
+    post("/groups") {
+        call.requirePermission(Permission.ACCOUNTS_MANAGE)
+        val req = call.receive<CreateGroupRequest>()
+        GroupRepo.create(req.name)
+        call.respond(GroupRepo.list())
+    }
+    patch("/groups/{id}") {
+        call.requirePermission(Permission.ACCOUNTS_MANAGE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val req = call.receive<UpdateGroupRequest>()
+        GroupRepo.rename(id, req.name)
+        call.respond(GroupRepo.list())
+    }
+    delete("/groups/{id}") {
+        call.requirePermission(Permission.ACCOUNTS_MANAGE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@delete call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        GroupRepo.delete(id)
+        pool.reload()
+        call.respond(OkResponse())
     }
 }
 
@@ -176,7 +244,7 @@ private fun Route.userRoutes() {
     post("/users") {
         call.requirePermission(Permission.USERS_MANAGE)
         val req = call.receive<CreateUserRequest>()
-        val id = UserRepo.create(req.username, req.password, req.roles)
+        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups)
         call.respond(UserRepo.get(id) ?: MessageResponse("created"))
     }
     patch("/users/{id}") {
@@ -184,7 +252,7 @@ private fun Route.userRoutes() {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateUserRequest>()
-        UserRepo.update(id, req.password, req.enabled, req.roles)
+        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups)
         call.respond(UserRepo.get(id) ?: MessageResponse("updated"))
     }
     delete("/users/{id}") {

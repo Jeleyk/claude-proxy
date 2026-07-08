@@ -40,13 +40,13 @@ class AccountPool {
      * Fallback mode: if all are at/over threshold, highest-priority healthy account
      * that is not hard rate-limited, ignoring the threshold.
      */
-    suspend fun select(now: Instant = Instant.now()): AccountRuntime? = mutex.withLock {
+    suspend fun select(allowedGroups: Set<Int>?, now: Instant = Instant.now()): AccountRuntime? = mutex.withLock {
         val candidates = accounts.values
             .filter { it.enabled && it.health == AccountHealth.OK && !it.isHardLimited(now) }
+            .filter { canUse(it, allowedGroups) }
             .sortedWith(compareBy({ it.priority }, { it.id }))
 
         if (candidates.isEmpty()) {
-            activeAccountId = null
             return@withLock null
         }
         val underThreshold = candidates.firstOrNull { it.usageForSelection() < it.threshold }
@@ -55,11 +55,23 @@ class AccountPool {
         chosen
     }
 
+    /** A user may use an ungrouped account always, or a grouped one only if its group is allowed. */
+    private fun canUse(a: AccountRuntime, allowedGroups: Set<Int>?): Boolean {
+        if (allowedGroups == null) return true          // null = all groups (admin)
+        val g = a.groupId ?: return true                // ungrouped accounts are open to all
+        return g in allowedGroups
+    }
+
     /** Earliest reset time across hard-limited accounts (for the client-facing 429 hint). */
     suspend fun earliestReset(now: Instant = Instant.now()): Instant? = mutex.withLock {
-        accounts.values.mapNotNull { it.limit.rateLimitedUntil ?: it.limit.resetAt }
-            .filter { it.isAfter(now) }
-            .minOrNull()
+        accounts.values.mapNotNull { rt ->
+            rt.limit.rateLimitedUntil ?: rt.limit.windows.values.mapNotNull { it.resetAt }.minOrNull()
+        }.filter { it.isAfter(now) }.minOrNull()
+    }
+
+    /** Nearest upcoming reset for a given window across the pool (dashboard hint). */
+    suspend fun nextReset(kind: org.claudeproxy.model.WindowKind, now: Instant = Instant.now()): Instant? = mutex.withLock {
+        accounts.values.mapNotNull { it.limit.window(kind)?.resetAt }.filter { it.isAfter(now) }.minOrNull()
     }
 
     /** Merge freshly-observed limit state into an account and persist it. */
@@ -80,7 +92,6 @@ class AccountPool {
             val cur = accounts[id] ?: return@withLock null
             val merged = cur.copy(
                 limit = cur.limit.copy(
-                    status = LimitStatus.REJECTED,
                     rateLimitedUntil = until ?: cur.limit.rateLimitedUntil,
                     updatedAt = Instant.now(),
                 ),

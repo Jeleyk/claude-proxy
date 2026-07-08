@@ -1,0 +1,11 @@
+.git
+.gradle
+build
+frontend/node_modules
+frontend/dist
+src/main/resources/static/assets
+data
+*.db
+*.db-*
+.env
+.idea
