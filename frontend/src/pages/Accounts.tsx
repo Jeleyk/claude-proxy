@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { AccountDto, api, GroupDto, has, PoolStats, UserDto } from '../api';
-import { Switch } from '../ui';
+import { Modal, Switch } from '../ui';
 
 export function Accounts({ user }: { user: UserDto }) {
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [groups, setGroups] = useState<GroupDto[]>([]);
+  const [editing, setEditing] = useState<AccountDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const canManage = has(user, 'ACCOUNTS_MANAGE');
 
@@ -42,13 +43,50 @@ export function Accounts({ user }: { user: UserDto }) {
           </thead>
           <tbody>
             {stats.accounts.map((a) => (
-              <AccountRow key={a.id} a={a} groups={groups} canManage={canManage} onChange={setStats} />
+              <AccountRow key={a.id} a={a} groups={groups} canManage={canManage} onChange={setStats} onEdit={() => setEditing(a)} />
             ))}
             {stats.accounts.length === 0 && <tr><td colSpan={9} className="hint">No accounts yet.</td></tr>}
           </tbody>
         </table>
       </div>
+
+      {editing && (
+        <AccountModal a={editing} groups={groups} onClose={() => setEditing(null)}
+          onSaved={(s) => { setStats(s); setEditing(null); }} />
+      )}
     </div>
+  );
+}
+
+function AccountModal({ a, groups, onClose, onSaved }: { a: AccountDto; groups: GroupDto[]; onClose: () => void; onSaved: (s: PoolStats) => void }) {
+  const [name, setName] = useState(a.name);
+  const [prio, setPrio] = useState(a.priority);
+  const [thr, setThr] = useState(a.threshold);
+  const [coef, setCoef] = useState(a.coefficient);
+  const [group, setGroup] = useState<number | null>(a.groupId);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function save() {
+    setBusy(true); setErr(null);
+    try {
+      onSaved(await api.updateAccount(a.id, { name, priority: prio, threshold: thr, coefficient: coef, groupId: group, clearGroup: group == null }));
+    } catch (e: any) { setErr(e.message); setBusy(false); }
+  }
+
+  return (
+    <Modal title={`Edit ${a.name}`} onClose={onClose}
+      footer={<><button className="ghost" onClick={onClose}>Cancel</button><button disabled={busy} onClick={save}>{busy ? '…' : 'Save'}</button></>}>
+      <label className="field"><span>Name</span><input value={name} onChange={(e) => setName(e.target.value)} /></label>
+      <div className="grid2">
+        <label className="field"><span>Priority (lower = used first)</span><input type="number" value={prio} onChange={(e) => setPrio(Math.trunc(+e.target.value))} /></label>
+        <label className="field"><span>Group</span><GroupSelect value={group} groups={groups} onChange={setGroup} /></label>
+        <label className="field"><span>Threshold (0–1)</span><input type="number" step="0.05" min="0" max="1" value={thr} onChange={(e) => setThr(+e.target.value)} /></label>
+        <label className="field"><span>Coefficient (×1 / ×5 / ×20)</span><input type="number" step="0.5" min="0" value={coef} onChange={(e) => setCoef(+e.target.value)} /></label>
+      </div>
+      <p className="hint">Type <b>{a.type.toLowerCase()}</b> · created {new Date(a.createdAt).toLocaleString()}</p>
+      {err && <div className="err">{err}</div>}
+    </Modal>
   );
 }
 
@@ -93,18 +131,7 @@ function GroupSelect({ value, groups, onChange }: { value: number | null; groups
   );
 }
 
-function AccountRow({ a, groups, canManage, onChange }: { a: AccountDto; groups: GroupDto[]; canManage: boolean; onChange: (s: PoolStats) => void }) {
-  const [prio, setPrio] = useState(a.priority);
-  const [thr, setThr] = useState(a.threshold);
-  const [coef, setCoef] = useState(a.coefficient);
-  const [group, setGroup] = useState<number | null>(a.groupId);
-  const [dirty, setDirty] = useState(false);
-  const mark = (fn: () => void) => { fn(); setDirty(true); };
-
-  async function save() {
-    onChange(await api.updateAccount(a.id, { priority: prio, threshold: thr, coefficient: coef, groupId: group, clearGroup: group == null }));
-    setDirty(false);
-  }
+function AccountRow({ a, groups, canManage, onChange, onEdit }: { a: AccountDto; groups: GroupDto[]; canManage: boolean; onChange: (s: PoolStats) => void; onEdit: () => void }) {
   async function toggle(v: boolean) { onChange(await api.updateAccount(a.id, { enabled: v })); }
   async function refresh() { onChange(await api.refreshOne(a.id)); }
   async function del() { if (confirm(`Delete account "${a.name}"?`)) { await api.deleteAccount(a.id); onChange(await api.accounts()); } }
@@ -112,18 +139,18 @@ function AccountRow({ a, groups, canManage, onChange }: { a: AccountDto; groups:
   const gname = groups.find((g) => g.id === a.groupId)?.name;
   return (
     <tr>
-      <td style={{ width: 66 }}>{canManage ? <input className="num" type="number" value={prio} onChange={(e) => mark(() => setPrio(+e.target.value))} /> : <span className="num">{a.priority}</span>}</td>
-      <td>{a.name}</td>
-      <td style={{ minWidth: 130 }}>{canManage ? <GroupSelect value={group} groups={groups} onChange={(v) => mark(() => setGroup(v))} /> : (a.groupId ? <span className="grouptag">{gname}</span> : <span className="hint">—</span>)}</td>
+      <td className="num" style={{ width: 56 }}>{a.priority}</td>
+      <td><b>{a.name}</b></td>
+      <td>{a.groupId ? <span className="grouptag">{gname ?? `#${a.groupId}`}</span> : <span className="hint">—</span>}</td>
       <td><span className="badge muted">{a.type.toLowerCase()}</span></td>
-      <td style={{ width: 84 }}>{canManage ? <input className="num" type="number" step="0.05" min="0" max="1" value={thr} onChange={(e) => mark(() => setThr(+e.target.value))} /> : <span className="num">{a.threshold}</span>}</td>
-      <td style={{ width: 74 }}>{canManage ? <input className="num" type="number" step="0.5" min="0" value={coef} onChange={(e) => mark(() => setCoef(+e.target.value))} /> : <span className="num">×{a.coefficient}</span>}</td>
+      <td className="num">{Math.round(a.threshold * 100)}%</td>
+      <td className="num">×{a.coefficient}</td>
       <td>{canManage ? <Switch checked={a.enabled} onChange={toggle} /> : <span className={`badge ${a.enabled ? 'ok' : 'muted'}`}>{a.enabled ? 'on' : 'off'}</span>}</td>
       <td><span className={`badge ${a.health === 'OK' ? 'ok' : a.health === 'DEAD' ? 'bad' : 'warn'}`}>{a.health.toLowerCase().replace('_', ' ')}</span></td>
       {canManage && (
         <td>
           <div className="row">
-            {dirty && <button className="sm" onClick={save}>Save</button>}
+            <button className="sm ghost" onClick={onEdit}>Edit</button>
             <button className="sm ghost" onClick={refresh} title="Refresh limits">↻</button>
             <button className="sm danger" onClick={del}>Delete</button>
           </div>

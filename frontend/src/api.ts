@@ -8,6 +8,8 @@ export interface UserDto {
   permissions: string[];
   allowedGroups: number[];
   allGroups: boolean;
+  dailyTokenLimit: number | null;
+  todayTokens: number;
 }
 
 export interface WindowLimitDto {
@@ -90,7 +92,8 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 }
 
 export const api = {
-  config: () => req<{ publicBaseUrl: string }>('GET', '/api/config'),
+  config: () => req<{ publicBaseUrl: string; tokensPerWindowPercent: number }>('GET', '/api/config'),
+  updateSettings: (b: unknown) => req<{ publicBaseUrl: string; tokensPerWindowPercent: number }>('PATCH', '/api/settings', b),
 
   login: (username: string, password: string) =>
     req<UserDto>('POST', '/api/auth/login', { username, password }),

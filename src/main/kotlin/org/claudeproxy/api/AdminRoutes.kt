@@ -30,6 +30,7 @@ import org.claudeproxy.repo.GroupRepo
 import org.claudeproxy.repo.OAuthAddRepo
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.RoleRepo
+import org.claudeproxy.repo.SettingsRepo
 import org.claudeproxy.repo.UsageRepo
 import org.claudeproxy.repo.UserRepo
 import java.time.Instant
@@ -38,7 +39,13 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
     route("/api") {
         get("/config") {
             call.requireUser()
-            call.respond(ConfigDto(publicBaseUrl))
+            call.respond(ConfigDto(publicBaseUrl, SettingsRepo.tokensPerWindowPercent()))
+        }
+        patch("/settings") {
+            call.requirePermission(Permission.ADMIN)
+            val req = call.receive<UpdateSettingsRequest>()
+            req.tokensPerWindowPercent?.let { if (it > 0) SettingsRepo.setTokensPerWindowPercent(it) }
+            call.respond(ConfigDto(publicBaseUrl, SettingsRepo.tokensPerWindowPercent()))
         }
         authRoutes()
         accountRoutes(pool, probe)
@@ -244,7 +251,7 @@ private fun Route.userRoutes() {
     post("/users") {
         call.requirePermission(Permission.USERS_MANAGE)
         val req = call.receive<CreateUserRequest>()
-        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups)
+        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyTokenLimit)
         call.respond(UserRepo.get(id) ?: MessageResponse("created"))
     }
     patch("/users/{id}") {
@@ -252,7 +259,7 @@ private fun Route.userRoutes() {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateUserRequest>()
-        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups)
+        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyTokenLimit, req.clearDailyLimit)
         call.respond(UserRepo.get(id) ?: MessageResponse("updated"))
     }
     delete("/users/{id}") {

@@ -57,17 +57,21 @@ object UserRepo {
 
     fun list(): List<UserDto> = transaction {
         Users.selectAll().map { row ->
-            val uid = row[Users.id]
-            toDto(uid, row[Users.username], row[Users.enabled])
+            toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyTokenLimit])
         }
     }
 
     fun get(userId: Int): UserDto? = transaction {
         val row = Users.selectAll().where { Users.id eq userId }.firstOrNull() ?: return@transaction null
-        toDto(row[Users.id], row[Users.username], row[Users.enabled])
+        toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyTokenLimit])
     }
 
-    private fun toDto(uid: Int, username: String, enabled: Boolean): UserDto {
+    /** Per-day token budget for a user, or null if unlimited. */
+    fun dailyLimitOf(userId: Int): Long? = transaction {
+        Users.selectAll().where { Users.id eq userId }.firstOrNull()?.get(Users.dailyTokenLimit)
+    }
+
+    private fun toDto(uid: Int, username: String, enabled: Boolean, dailyLimit: Long?): UserDto {
         val perms = permissionsOf(uid)
         return UserDto(
             id = uid,
@@ -77,8 +81,13 @@ object UserRepo {
             permissions = perms.map { it.name },
             allowedGroups = allowedGroupsOf(uid).toList(),
             allGroups = Permission.ADMIN in perms,
+            dailyTokenLimit = dailyLimit,
+            todayTokens = UsageRepo.tokensByUserSince(uid, startOfUtcDay()),
         )
     }
+
+    fun startOfUtcDay(): Instant =
+        java.time.LocalDate.now(java.time.ZoneOffset.UTC).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
 
     fun allowedGroupsOf(userId: Int): Set<Int> = transaction {
         UserGroupAccess.selectAll().where { UserGroupAccess.userId eq userId }
@@ -95,11 +104,12 @@ object UserRepo {
         }
     }
 
-    fun create(username: String, password: String, roleNames: List<String>, groupIds: List<Int>): Int = transaction {
+    fun create(username: String, password: String, roleNames: List<String>, groupIds: List<Int>, dailyLimit: Long?): Int = transaction {
         val uid = Users.insert {
             it[Users.username] = username
             it[passwordHash] = Passwords.hash(password)
             it[enabled] = true
+            it[dailyTokenLimit] = dailyLimit
             it[createdAt] = Instant.now()
         }[Users.id]
         setRoles(uid, roleNames)
@@ -107,12 +117,14 @@ object UserRepo {
         uid
     }
 
-    fun update(userId: Int, password: String?, enabled: Boolean?, roleNames: List<String>?, groupIds: List<Int>?) = transaction {
-        if (password != null || enabled != null) {
-            Users.update({ Users.id eq userId }) {
-                if (password != null) it[passwordHash] = Passwords.hash(password)
-                if (enabled != null) it[Users.enabled] = enabled
-            }
+    fun update(
+        userId: Int, password: String?, enabled: Boolean?, roleNames: List<String>?, groupIds: List<Int>?,
+        dailyLimit: Long?, clearDailyLimit: Boolean,
+    ) = transaction {
+        Users.update({ Users.id eq userId }) {
+            if (password != null) it[passwordHash] = Passwords.hash(password)
+            if (enabled != null) it[Users.enabled] = enabled
+            if (clearDailyLimit) it[dailyTokenLimit] = null else if (dailyLimit != null) it[dailyTokenLimit] = dailyLimit
         }
         if (roleNames != null) setRoles(userId, roleNames)
         if (groupIds != null) setAllowedGroups(userId, groupIds)

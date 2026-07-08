@@ -14,7 +14,9 @@ import io.ktor.server.request.httpMethod
 import io.ktor.server.request.receive
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondBytesWriter
-import io.ktor.utils.io.copyTo
+import io.ktor.utils.io.readRemaining
+import io.ktor.utils.io.writeFully
+import kotlinx.io.readByteArray
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -119,11 +121,24 @@ class UpstreamForwarder(
             val isEventStream = contentType?.match(ContentType.Text.EventStream) == true
 
             if (isEventStream) {
-                // Stream SSE straight through; rely on headers for usage accounting.
-                UsageRepo.record(account.id, userId, 0, 0, status.value, modelFromRequest(bodyBytes))
+                // Stream SSE through to the client while teeing token usage out of the stream.
+                val model = modelFromRequest(bodyBytes)
+                val scanner = SseUsageScanner()
+                val src = response.bodyAsChannel()
                 call.respondBytesWriter(status = status, contentType = contentType) {
-                    response.bodyAsChannel().copyTo(this)
+                    while (!src.isClosedForRead) {
+                        val packet = src.readRemaining(16 * 1024L)
+                        while (!packet.exhausted()) {
+                            val bytes = packet.readByteArray()
+                            if (bytes.isNotEmpty()) {
+                                writeFully(bytes)
+                                scanner.feed(bytes, 0, bytes.size)
+                            }
+                        }
+                        flush()
+                    }
                 }
+                UsageRepo.record(account.id, userId, scanner.totalInput(), scanner.output, status.value, model)
             } else {
                 // Buffer JSON (single message) so we can extract token usage.
                 val bytes = response.readRawBytes()

@@ -20,19 +20,47 @@ import java.time.format.DateTimeParseException
 object RateLimitHeaders {
     private val log = LoggerFactory.getLogger("RateLimitHeaders")
 
-    // Per-window candidate key names, most specific first.
+    // Remembers header-key signatures already logged, so calibration logging is one-shot per shape.
+    private val loggedSignatures = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    // Per-window candidate key names, most specific first. Covers the unified subscription
+    // family (5h / 7d) plus the standard per-key families as a fallback for API keys.
     private val KEYS: Map<WindowKind, WindowKeys> = mapOf(
         WindowKind.FIVE_HOUR to WindowKeys(
-            remaining = listOf("anthropic-ratelimit-unified-5h-remaining", "anthropic-ratelimit-unified-remaining"),
-            limit = listOf("anthropic-ratelimit-unified-5h-limit", "anthropic-ratelimit-unified-limit"),
-            reset = listOf("anthropic-ratelimit-unified-5h-reset", "anthropic-ratelimit-unified-reset"),
-            status = listOf("anthropic-ratelimit-unified-5h-status", "anthropic-ratelimit-unified-status"),
+            remaining = listOf(
+                "anthropic-ratelimit-unified-5h-remaining", "anthropic-ratelimit-unified-remaining",
+                "anthropic-ratelimit-unified-fivehour-remaining", "anthropic-ratelimit-tokens-remaining",
+            ),
+            limit = listOf(
+                "anthropic-ratelimit-unified-5h-limit", "anthropic-ratelimit-unified-limit",
+                "anthropic-ratelimit-unified-fivehour-limit", "anthropic-ratelimit-tokens-limit",
+            ),
+            reset = listOf(
+                "anthropic-ratelimit-unified-5h-reset", "anthropic-ratelimit-unified-reset",
+                "anthropic-ratelimit-unified-fivehour-reset", "anthropic-ratelimit-tokens-reset",
+            ),
+            status = listOf(
+                "anthropic-ratelimit-unified-5h-status", "anthropic-ratelimit-unified-status",
+                "anthropic-ratelimit-unified-fivehour-status",
+            ),
         ),
         WindowKind.WEEKLY to WindowKeys(
-            remaining = listOf("anthropic-ratelimit-unified-7d-remaining", "anthropic-ratelimit-unified-week-remaining"),
-            limit = listOf("anthropic-ratelimit-unified-7d-limit", "anthropic-ratelimit-unified-week-limit"),
-            reset = listOf("anthropic-ratelimit-unified-7d-reset", "anthropic-ratelimit-unified-week-reset"),
-            status = listOf("anthropic-ratelimit-unified-7d-status", "anthropic-ratelimit-unified-week-status"),
+            remaining = listOf(
+                "anthropic-ratelimit-unified-7d-remaining", "anthropic-ratelimit-unified-week-remaining",
+                "anthropic-ratelimit-unified-weekly-remaining",
+            ),
+            limit = listOf(
+                "anthropic-ratelimit-unified-7d-limit", "anthropic-ratelimit-unified-week-limit",
+                "anthropic-ratelimit-unified-weekly-limit",
+            ),
+            reset = listOf(
+                "anthropic-ratelimit-unified-7d-reset", "anthropic-ratelimit-unified-week-reset",
+                "anthropic-ratelimit-unified-weekly-reset",
+            ),
+            status = listOf(
+                "anthropic-ratelimit-unified-7d-status", "anthropic-ratelimit-unified-week-status",
+                "anthropic-ratelimit-unified-weekly-status",
+            ),
         ),
     )
 
@@ -47,6 +75,12 @@ object RateLimitHeaders {
         val lower = headers.mapKeys { it.key.lowercase() }
         val rl = lower.filterKeys { it.startsWith("anthropic-ratelimit") }
         if (rl.isNotEmpty()) {
+            // Log the raw rate-limit headers once per distinct header-shape, at INFO, so the
+            // real Anthropic header names can be calibrated straight from production logs.
+            val signature = rl.keys.sorted().joinToString(",")
+            if (loggedSignatures.add(signature)) {
+                log.info("observed rate-limit headers: {}", rl.entries.joinToString(", ") { "${it.key}=${it.value}" })
+            }
             if (log.isDebugEnabled) rl.forEach { (k, v) -> log.debug("ratelimit header {} = {}", k, v) }
         }
 

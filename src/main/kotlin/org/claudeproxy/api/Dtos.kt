@@ -56,6 +56,7 @@ data class CreateUserRequest(
     val password: String,
     val roles: List<String> = emptyList(),
     val allowedGroups: List<Int> = emptyList(),
+    val dailyTokenLimit: Long? = null,
 )
 
 @Serializable
@@ -64,10 +65,15 @@ data class UpdateUserRequest(
     val enabled: Boolean? = null,
     val roles: List<String>? = null,
     val allowedGroups: List<Int>? = null,
+    val dailyTokenLimit: Long? = null,
+    val clearDailyLimit: Boolean = false,
 )
 
 @Serializable
-data class ConfigDto(val publicBaseUrl: String)
+data class ConfigDto(val publicBaseUrl: String, val tokensPerWindowPercent: Double)
+
+@Serializable
+data class UpdateSettingsRequest(val tokensPerWindowPercent: Double? = null)
 
 @Serializable
 data class CreateRoleRequest(val name: String, val permissions: List<String> = emptyList())

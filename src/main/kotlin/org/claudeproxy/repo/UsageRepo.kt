@@ -4,6 +4,7 @@ import kotlinx.serialization.Serializable
 import org.claudeproxy.db.Accounts
 import org.claudeproxy.db.UsageEvents
 import org.jetbrains.exposed.sql.SortOrder
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -47,6 +48,15 @@ object UsageRepo {
                 }
             }
         }
+    }
+
+    /** Total input+output tokens a user has spent since [since]. */
+    fun tokensByUserSince(userId: Int, since: Instant): Long = transaction {
+        var total = 0L
+        UsageEvents.selectAll()
+            .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
+            .forEach { total += it[UsageEvents.inputTokens] + it[UsageEvents.outputTokens] }
+        total
     }
 
     /** All-time [requests, input, output] per account. */

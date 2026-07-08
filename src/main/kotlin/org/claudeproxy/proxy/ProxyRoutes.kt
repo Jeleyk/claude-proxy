@@ -11,6 +11,7 @@ import kotlinx.serialization.Serializable
 import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.model.Permission
 import org.claudeproxy.repo.ProxyTokenRepo
+import org.claudeproxy.repo.UsageRepo
 import org.claudeproxy.repo.UserRepo
 import org.slf4j.LoggerFactory
 
@@ -46,6 +47,21 @@ class ProxyEngine(
             call.respond(HttpStatusCode.Forbidden, ProxyError(ProxyErrorBody("permission_error", "Token lacks proxy.use")))
             return
         }
+        // Per-user daily token budget.
+        val dailyLimit = UserRepo.dailyLimitOf(userId)
+        if (dailyLimit != null) {
+            val used = UsageRepo.tokensByUserSince(userId, UserRepo.startOfUtcDay())
+            if (used >= dailyLimit) {
+                call.response.headers.append("x-claude-proxy-daily-limit", dailyLimit.toString())
+                call.response.headers.append("x-claude-proxy-daily-used", used.toString())
+                call.respond(
+                    HttpStatusCode.TooManyRequests,
+                    ProxyError(ProxyErrorBody("rate_limit_error", "Daily token budget reached ($used/$dailyLimit); resets at 00:00 UTC")),
+                )
+                return
+            }
+        }
+
         // Admins may use any account; others are scoped to their granted groups
         // (ungrouped accounts are always available).
         val allowedGroups: Set<Int>? = if (Permission.ADMIN in perms) null else UserRepo.allowedGroupsOf(userId)

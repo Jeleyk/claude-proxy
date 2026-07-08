@@ -69,7 +69,7 @@ export function App() {
         {activeView === 'accounts' && <Accounts user={user} />}
         {activeView === 'stats' && <Stats />}
         {activeView === 'tokens' && <Tokens />}
-        {activeView === 'users' && <Users />}
+        {activeView === 'users' && <Users isAdmin={has(user, 'ADMIN')} />}
       </div>
     </div>
   );

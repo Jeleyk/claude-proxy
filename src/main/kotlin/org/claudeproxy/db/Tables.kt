@@ -8,8 +8,17 @@ object Users : Table("users") {
     val username = varchar("username", 128).uniqueIndex()
     val passwordHash = varchar("password_hash", 256)
     val enabled = bool("enabled").default(true)
+    // optional per-day token budget (input+output). null = unlimited.
+    val dailyTokenLimit = long("daily_token_limit").nullable()
     val createdAt = timestamp("created_at")
     override val primaryKey = PrimaryKey(id)
+}
+
+/** Simple key/value settings store (admin-tunable). */
+object Settings : Table("settings") {
+    val key = varchar("key", 64)
+    val value = varchar("value", 256)
+    override val primaryKey = PrimaryKey(key)
 }
 
 object Roles : Table("roles") {
@@ -111,7 +120,7 @@ object OAuthAddSessions : Table("oauth_add_sessions") {
 }
 
 val ALL_TABLES = arrayOf(
-    Users, Roles, RolePermissions, UserRoles, ProxyTokens,
+    Users, Settings, Roles, RolePermissions, UserRoles, ProxyTokens,
     AccountGroups, UserGroupAccess,
     Accounts, AccountSecrets, AccountLimits, UsageEvents, OAuthAddSessions,
 )

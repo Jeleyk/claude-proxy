@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, ProxyTokenDto } from '../api';
+import { api, fmtTokens, ProxyTokenDto, UserDto } from '../api';
 import { CodeBlock, Copy } from '../ui';
 
 export function Tokens() {
@@ -7,16 +7,20 @@ export function Tokens() {
   const [name, setName] = useState('');
   const [revealed, setRevealed] = useState<ProxyTokenDto | null>(null);
   const [base, setBase] = useState(window.location.origin);
+  const [me, setMe] = useState<UserDto | null>(null);
+  const [tpp, setTpp] = useState(10000);
   const [err, setErr] = useState<string | null>(null);
 
   async function load() {
     try {
       setTokens(await api.tokens());
-      const c = await api.config().catch(() => ({ publicBaseUrl: '' }));
+      const c = await api.config().catch(() => ({ publicBaseUrl: '', tokensPerWindowPercent: 10000 }));
       if (c.publicBaseUrl) setBase(c.publicBaseUrl);
+      setTpp(c.tokensPerWindowPercent);
+      setMe(await api.me().catch(() => null));
     } catch (e: any) { setErr(e.message); }
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, []);
 
   async function create() {
     setErr(null);
@@ -43,6 +47,25 @@ export function Tokens() {
     <div className="main-inner">
       <h1>Proxy Tokens</h1>
       <p className="sub">Tokens you put into Claude Code to route through this proxy.</p>
+
+      {me && (
+        <div className="panel narrow">
+          <h2 style={{ marginTop: 0 }}>Your usage today</h2>
+          {me.dailyTokenLimit == null ? (
+            <p style={{ margin: 0 }}>
+              <b>{fmtTokens(me.todayTokens)}</b> tokens today <span className="hint">≈ {(me.todayTokens / tpp).toFixed(1)}% of a normal window · no daily limit</span>
+            </p>
+          ) : (
+            <>
+              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+                <span><b>{fmtTokens(me.todayTokens)}</b> / {fmtTokens(me.dailyTokenLimit)} tokens</span>
+                <span className="hint">≈ {(me.todayTokens / tpp).toFixed(1)}% / {(me.dailyTokenLimit / tpp).toFixed(1)}% window · resets 00:00 UTC</span>
+              </div>
+              <div className="bar"><span style={{ width: `${Math.min(100, Math.round((me.todayTokens / me.dailyTokenLimit) * 100))}%` }} /></div>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="panel narrow">
         <h2 style={{ marginTop: 0 }}>Connect Claude Code</h2>

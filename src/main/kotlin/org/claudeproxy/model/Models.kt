@@ -55,6 +55,10 @@ data class UserDto(
     // unless the user is an admin, who may use everything)
     val allowedGroups: List<Int> = emptyList(),
     val allGroups: Boolean = false,
+    // per-day token budget (input+output); null = unlimited
+    val dailyTokenLimit: Long? = null,
+    // tokens the user has spent since the start of the current UTC day
+    val todayTokens: Long = 0,
 )
 
 @Serializable

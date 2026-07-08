@@ -1,7 +1,7 @@
 # ---- Stage 1: build the React UI ----
-FROM node:20-slim AS frontend
+FROM node:22-slim AS frontend
 WORKDIR /app/frontend
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 COPY frontend/package.json ./
 RUN pnpm install --no-frozen-lockfile
 COPY frontend/ ./
