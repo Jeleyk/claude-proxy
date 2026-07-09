@@ -44,6 +44,7 @@ object RoleRepo {
     }
 
     fun delete(roleId: Int): Boolean = transaction {
+        org.claudeproxy.db.UserRoles.deleteWhere { org.claudeproxy.db.UserRoles.roleId eq roleId }
         RolePermissions.deleteWhere { RolePermissions.roleId eq roleId }
         Roles.deleteWhere { Roles.id eq roleId } > 0
     }

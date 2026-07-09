@@ -134,6 +134,11 @@ object UserRepo {
     }
 
     fun delete(userId: Int) = transaction {
+        // clear rows that reference the user (Postgres enforces these FKs)
+        org.claudeproxy.db.ProxyTokens.deleteWhere { org.claudeproxy.db.ProxyTokens.userId eq userId }
+        org.claudeproxy.db.UsageEvents.update({ org.claudeproxy.db.UsageEvents.userId eq userId }) {
+            it[org.claudeproxy.db.UsageEvents.userId] = null
+        }
         UserGroupAccess.deleteWhere { UserGroupAccess.userId eq userId }
         UserRoles.deleteWhere { UserRoles.userId eq userId }
         Users.deleteWhere { Users.id eq userId }

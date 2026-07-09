@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AccountDto, api, fmtReset, fmtTokens, fmtUsd, GroupDto, PoolStats, UserDto, WindowLimitDto } from '../api';
+import { AccountDto, api, fmtReset, fmtTokens, fmtUsd, GroupDto, PoolStats, WindowLimitDto } from '../api';
 
 function WindowCell({ w, isApi }: { w: WindowLimitDto | null; isApi: boolean }) {
   if (isApi) return <span className="hint">n/a</span>;
@@ -29,16 +29,12 @@ function healthBadge(a: AccountDto) {
 export function Dashboard() {
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [groups, setGroups] = useState<GroupDto[]>([]);
-  const [me, setMe] = useState<UserDto | null>(null);
-  const [canViewPool, setCanViewPool] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   async function load() {
     try {
-      setMe(await api.me().catch(() => null));
-      const s = await api.accounts().catch(() => { setCanViewPool(false); return null; });
-      if (s) { setStats(s); setCanViewPool(true); }
+      setStats(await api.accounts());
       setGroups(await api.groups().catch(() => []));
     } catch (e: any) { setErr(e.message); }
   }
@@ -49,7 +45,7 @@ export function Dashboard() {
     try { setStats(await api.refreshAll()); } catch (e: any) { setErr(e.message); } finally { setRefreshing(false); }
   }
 
-  if (err && !me) return <div className="err">{err}</div>;
+  if (err) return <div className="err">{err}</div>;
 
   const groupName = (id: number | null) => groups.find((g) => g.id === id)?.name;
   const capPct = stats && stats.totalEffectiveCapacity > 0 ? stats.totalEffectiveRemaining / stats.totalEffectiveCapacity : 0;
@@ -60,14 +56,12 @@ export function Dashboard() {
       <div className="section-head" style={{ marginTop: 0 }}>
         <div>
           <h1>Dashboard</h1>
-          <p className="sub" style={{ margin: 0 }}>Your usage and the live account pool.</p>
+          <p className="sub" style={{ margin: 0 }}>Live account pool.</p>
         </div>
-        {canViewPool && <button className="ghost" disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Refreshing…' : '↻ Refresh limits'}</button>}
+        <button className="ghost" disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Refreshing…' : '↻ Refresh limits'}</button>
       </div>
 
-      {me && <MyUsage me={me} />}
-
-      {!stats ? (canViewPool ? <div className="hint">Loading pool…</div> : null) : (
+      {!stats ? (<div className="hint">Loading pool…</div>) : (
       <>
       <div className="cards" style={{ marginTop: 18 }}>
         <div className="card"><div className="label">Accounts healthy</div><div className="value">{stats.healthyAccounts}/{stats.totalAccounts}</div></div>
@@ -121,25 +115,6 @@ export function Dashboard() {
       </div>
       </>
       )}
-    </div>
-  );
-}
-
-function MyUsage({ me }: { me: UserDto }) {
-  const cap = me.dailyCostLimit;
-  const frac = cap && cap > 0 ? Math.min(1, me.todayCost / cap) : 0;
-  return (
-    <div className="cards" style={{ marginTop: 18 }}>
-      <div className="card"><div className="label">You — spent today</div><div className="value">{fmtUsd(me.todayCost)}</div><div className="hint">{fmtTokens(me.todayInputTokens)} in / {fmtTokens(me.todayOutputTokens)} out</div></div>
-      <div className="card" style={{ minWidth: 220 }}>
-        <div className="label">Your daily limit</div>
-        {cap == null ? <div className="value" style={{ fontSize: 20 }}>unlimited</div> : (
-          <>
-            <div className="value" style={{ fontSize: 18 }}>{fmtUsd(me.todayCost)} / {fmtUsd(cap)}</div>
-            <div className="bar" style={{ marginTop: 8 }}><span style={{ width: `${Math.round(frac * 100)}%` }} /></div>
-          </>
-        )}
-      </div>
     </div>
   );
 }

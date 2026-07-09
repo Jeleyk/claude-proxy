@@ -66,10 +66,15 @@ object ModelPriceRepo {
         return list().firstOrNull { m.contains(it.pattern) }
     }
 
-    /** USD cost of a request: (input×inPrice + output×outPrice) / 1M. Unknown model => 0. */
-    fun costOf(model: String?, inputTokens: Long, outputTokens: Long): Double {
+    /**
+     * USD cost from the response's own token breakdown. Cache reads bill at 0.1× the input
+     * price and cache writes at 1.25×, matching Anthropic prompt-caching pricing; base input
+     * and output at their list prices. Unknown model => 0.
+     */
+    fun costOf(model: String?, input: Long, cacheRead: Long, cacheCreation: Long, output: Long): Double {
         val p = priceFor(model) ?: return 0.0
-        return (inputTokens * p.inputPrice + outputTokens * p.outputPrice) / 1_000_000.0
+        val inputUnits = input + cacheRead * 0.1 + cacheCreation * 1.25
+        return (inputUnits * p.inputPrice + output * p.outputPrice) / 1_000_000.0
     }
 
     private fun invalidate() { cache = null }

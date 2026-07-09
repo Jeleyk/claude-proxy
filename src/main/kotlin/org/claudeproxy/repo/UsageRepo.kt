@@ -47,15 +47,18 @@ class Totals(val requests: Long = 0, val input: Long = 0, val output: Long = 0, 
 
 object UsageRepo {
 
-    fun record(accountId: Int, userId: Int?, input: Long, output: Long, status: Int, model: String?) {
-        val cost = ModelPriceRepo.costOf(model, input, output)
+    fun record(
+        accountId: Int, userId: Int?, input: Long, cacheRead: Long, cacheCreation: Long, output: Long,
+        status: Int, model: String?,
+    ) {
+        val cost = ModelPriceRepo.costOf(model, input, cacheRead, cacheCreation, output)
         runCatching {
             transaction {
                 UsageEvents.insert {
                     it[UsageEvents.accountId] = accountId
                     it[UsageEvents.userId] = userId
                     it[ts] = Instant.now()
-                    it[inputTokens] = input
+                    it[inputTokens] = input + cacheRead + cacheCreation
                     it[outputTokens] = output
                     it[UsageEvents.cost] = cost
                     it[httpStatus] = status

@@ -112,7 +112,7 @@ class UpstreamForwarder(
                     ?: newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull()
                 pool.markRateLimited(account.id, until)
                 runCatching { response.readRawBytes() }
-                UsageRepo.record(account.id, userId, 0, 0, status.value, null)
+                UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
                 return@execute ForwardResult.Retry(RetryKind.RATE_LIMITED, until)
             }
             // Account's credentials were rejected — flag lost access and try another account.
@@ -120,13 +120,13 @@ class UpstreamForwarder(
                 pool.setHealth(account.id, org.claudeproxy.model.AccountHealth.REFRESH_FAILED)
                 runCatching { AccountRepo.updateHealth(account.id, org.claudeproxy.model.AccountHealth.REFRESH_FAILED) }
                 runCatching { response.readRawBytes() }
-                UsageRepo.record(account.id, userId, 0, 0, status.value, null)
+                UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
                 return@execute ForwardResult.Retry(RetryKind.LOST_ACCESS, null)
             }
             // Transient upstream errors (overloaded/5xx) — try the next account.
             if (status.value in intArrayOf(500, 502, 503, 529)) {
                 runCatching { response.readRawBytes() }
-                UsageRepo.record(account.id, userId, 0, 0, status.value, null)
+                UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
                 return@execute ForwardResult.Retry(RetryKind.UPSTREAM_ERROR, null)
             }
 
@@ -165,7 +165,7 @@ class UpstreamForwarder(
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     log.debug("client disconnected mid-stream for account {}: {}", account.id, e.message)
                 }
-                UsageRepo.record(account.id, userId, scanner.totalInput(), scanner.output, status.value, model)
+                UsageRepo.record(account.id, userId, scanner.input, scanner.cacheRead, scanner.cacheCreation, scanner.output, status.value, model)
             } else {
                 // Buffer JSON (single message) so we can extract token usage.
                 val bytes = response.readRawBytes()
@@ -195,8 +195,7 @@ class UpstreamForwarder(
     }
 
     private fun recordUsageFromJson(accountId: Int, userId: Int?, status: Int, bytes: ByteArray) {
-        var input = 0L
-        var output = 0L
+        var input = 0L; var output = 0L; var cacheRead = 0L; var cacheCreation = 0L
         var model: String? = null
         try {
             val obj = json.parseToJsonElement(bytes.decodeToString()) as? JsonObject
@@ -204,9 +203,11 @@ class UpstreamForwarder(
             val usage = obj?.get("usage")?.jsonObject
             input = usage?.get("input_tokens")?.jsonPrimitive?.longOrNull ?: 0L
             output = usage?.get("output_tokens")?.jsonPrimitive?.longOrNull ?: 0L
+            cacheRead = usage?.get("cache_read_input_tokens")?.jsonPrimitive?.longOrNull ?: 0L
+            cacheCreation = usage?.get("cache_creation_input_tokens")?.jsonPrimitive?.longOrNull ?: 0L
         } catch (_: Exception) {
             // non-JSON error body; still record the event
         }
-        UsageRepo.record(accountId, userId, input, output, status, model)
+        UsageRepo.record(accountId, userId, input, cacheRead, cacheCreation, output, status, model)
     }
 }
