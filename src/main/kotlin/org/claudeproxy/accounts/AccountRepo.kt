@@ -14,7 +14,7 @@ import org.claudeproxy.model.WindowLimitDto
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.replace
+import org.jetbrains.exposed.sql.upsert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
@@ -150,7 +150,7 @@ object AccountRepo {
     }
 
     fun updateSecret(id: Int, secret: AccountSecret) = transaction {
-        AccountSecrets.replace {
+        AccountSecrets.upsert {
             it[accountId] = id
             it[cipherBlob] = Secrets.encode(secret)
         }
@@ -168,7 +168,7 @@ object AccountRepo {
 
     fun persistLimit(id: Int, limit: LimitState) = transaction {
         limit.windows.forEach { (kind, w) ->
-            AccountLimits.replace {
+            AccountLimits.upsert {
                 it[accountId] = id
                 it[windowKind] = kind.code
                 it[utilization] = w.utilization

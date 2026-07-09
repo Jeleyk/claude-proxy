@@ -6,8 +6,9 @@ import java.time.Instant
 /** Permissions a user can hold (directly, via roles). */
 enum class Permission {
     PROXY_USE,        // may route requests through the proxy
+    STATS_VIEW_OWN,   // may view only their own usage statistics
     ACCOUNTS_VIEW,    // may view upstream accounts + their limits
-    STATS_VIEW,       // may view usage statistics
+    STATS_VIEW,       // may view usage statistics for all accounts/users
     ACCOUNTS_MANAGE,  // may create/edit/delete upstream accounts
     USERS_MANAGE,     // may create/edit/delete users and roles
     ADMIN;            // superuser: implies everything

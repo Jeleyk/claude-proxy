@@ -1,12 +1,37 @@
+version: "2.4"
+
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: claude-proxy-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: claudeproxy
+      POSTGRES_USER: claudeproxy
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-claudeproxy}
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claudeproxy"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
   claude-proxy:
     build: .
     image: claude-proxy:latest
     container_name: claude-proxy
     restart: unless-stopped
-    # Bind to localhost only; a reverse proxy (nginx) fronts it with the domain.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Bind to localhost only; nginx fronts it with the domain + TLS.
     ports:
       - "127.0.0.1:8787:8787"
     env_file: .env
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/claudeproxy
+      DATABASE_USER: claudeproxy
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-claudeproxy}
     volumes:
       - ./data:/data

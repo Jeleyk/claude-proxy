@@ -5,7 +5,7 @@ import org.claudeproxy.db.ModelCoeffs
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insertIgnore
-import org.jetbrains.exposed.sql.replace
+import org.jetbrains.exposed.sql.upsert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 
@@ -41,7 +41,7 @@ object ModelCoeffRepo {
     }
 
     fun set(pattern: String, coefficient: Double) {
-        transaction { ModelCoeffs.replace { it[ModelCoeffs.pattern] = pattern.trim().lowercase(); it[ModelCoeffs.coefficient] = coefficient } }
+        transaction { ModelCoeffs.upsert { it[ModelCoeffs.pattern] = pattern.trim().lowercase(); it[ModelCoeffs.coefficient] = coefficient } }
         invalidate()
     }
 

@@ -23,24 +23,27 @@ object Db {
         private set
 
     fun init(config: Config) {
-        File(config.dbPath).absoluteFile.parentFile?.mkdirs()
-        val hikari = HikariConfig().apply {
-            jdbcUrl = "jdbc:sqlite:${config.dbPath}"
-            driverClassName = "org.sqlite.JDBC"
-            // SQLite + connection pool: keep it single-writer friendly.
-            maximumPoolSize = 8
-            // WAL for better read/write concurrency.
-            addDataSourceProperty("journal_mode", "WAL")
-        }
-        val ds = HikariDataSource(hikari)
-        // Enable WAL + foreign keys per connection.
-        ds.connection.use { c ->
-            c.createStatement().use { st ->
-                st.execute("PRAGMA journal_mode=WAL;")
-                st.execute("PRAGMA foreign_keys=ON;")
-                st.execute("PRAGMA busy_timeout=5000;")
+        val hikari = if (config.databaseUrl.isNotBlank()) {
+            // PostgreSQL — proper concurrent writes, no lock contention.
+            HikariConfig().apply {
+                jdbcUrl = config.databaseUrl
+                driverClassName = "org.postgresql.Driver"
+                username = config.databaseUser
+                password = config.databasePassword
+                maximumPoolSize = 10
+            }
+        } else {
+            // SQLite fallback. Pragmas in the URL apply to every pooled connection so
+            // writers wait for the lock (busy_timeout) instead of failing with SQLITE_BUSY.
+            File(config.dbPath).absoluteFile.parentFile?.mkdirs()
+            HikariConfig().apply {
+                jdbcUrl = "jdbc:sqlite:${config.dbPath}?journal_mode=WAL&synchronous=NORMAL&busy_timeout=15000&foreign_keys=on"
+                driverClassName = "org.sqlite.JDBC"
+                maximumPoolSize = 4
+                connectionInitSql = "PRAGMA busy_timeout=15000;"
             }
         }
+        val ds = HikariDataSource(hikari)
         database = Database.connect(ds)
 
         transaction(database) {
@@ -49,16 +52,16 @@ object Db {
             seedAdmin(config)
         }
         org.claudeproxy.repo.ModelCoeffRepo.seedDefaults()
-        log.info("Database ready at {}", config.dbPath)
+        log.info("Database ready ({})", if (config.databaseUrl.isNotBlank()) "PostgreSQL" else "SQLite ${config.dbPath}")
     }
 
     /** Default roles bundling permissions. Idempotent. */
     private fun seedRoles() {
         val defaults = mapOf(
             "admin" to Permission.entries.toList(),
-            "manager" to listOf(Permission.ACCOUNTS_MANAGE, Permission.ACCOUNTS_VIEW, Permission.STATS_VIEW, Permission.PROXY_USE),
-            "viewer" to listOf(Permission.ACCOUNTS_VIEW, Permission.STATS_VIEW),
-            "user" to listOf(Permission.PROXY_USE),
+            "manager" to listOf(Permission.ACCOUNTS_MANAGE, Permission.ACCOUNTS_VIEW, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN, Permission.PROXY_USE),
+            "viewer" to listOf(Permission.ACCOUNTS_VIEW, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN),
+            "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN),
         )
         defaults.forEach { (roleName, perms) ->
             val roleId = Roles.select(Roles.id).where { Roles.name eq roleName }.firstOrNull()?.get(Roles.id)

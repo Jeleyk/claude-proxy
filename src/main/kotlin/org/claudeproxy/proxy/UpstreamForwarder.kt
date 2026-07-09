@@ -145,18 +145,25 @@ class UpstreamForwarder(
                 val model = modelFromRequest(bodyBytes)
                 val scanner = SseUsageScanner()
                 val src = response.bodyAsChannel()
-                call.respondBytesWriter(status = status, contentType = contentType) {
-                    while (!src.isClosedForRead) {
-                        val packet = src.readRemaining(16 * 1024L)
-                        while (!packet.exhausted()) {
-                            val bytes = packet.readByteArray()
-                            if (bytes.isNotEmpty()) {
-                                writeFully(bytes)
-                                scanner.feed(bytes, 0, bytes.size)
+                // A client that disconnects mid-stream closes the write channel; that's normal,
+                // not an error. Swallow it and still record whatever usage we scanned.
+                try {
+                    call.respondBytesWriter(status = status, contentType = contentType) {
+                        while (!src.isClosedForRead) {
+                            val packet = src.readRemaining(16 * 1024L)
+                            while (!packet.exhausted()) {
+                                val bytes = packet.readByteArray()
+                                if (bytes.isNotEmpty()) {
+                                    scanner.feed(bytes, 0, bytes.size)
+                                    writeFully(bytes)
+                                }
                             }
+                            flush()
                         }
-                        flush()
                     }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    log.debug("client disconnected mid-stream for account {}: {}", account.id, e.message)
                 }
                 UsageRepo.record(account.id, userId, scanner.totalInput(), scanner.output, status.value, model)
             } else {

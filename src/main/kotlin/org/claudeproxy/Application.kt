@@ -90,9 +90,16 @@ fun Application.module(
         exception<ForbiddenException> { call, cause ->
             call.respond(HttpStatusCode.Forbidden, MessageResponse(cause.message ?: "Forbidden"))
         }
+        exception<io.ktor.util.cio.ChannelWriteException> { _, cause ->
+            // Client disconnected before we finished writing — expected, not an error.
+            log.debug("client write channel closed: {}", cause.message)
+        }
         exception<Throwable> { call, cause ->
+            if (cause is kotlinx.coroutines.CancellationException) return@exception
             log.error("Unhandled error", cause)
-            call.respond(HttpStatusCode.InternalServerError, MessageResponse(cause.message ?: "Internal error"))
+            runCatching {
+                call.respond(HttpStatusCode.InternalServerError, MessageResponse(cause.message ?: "Internal error"))
+            }
         }
     }
 

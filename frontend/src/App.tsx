@@ -7,8 +7,9 @@ import { Users } from './pages/Users';
 import { Tokens } from './pages/Tokens';
 import { TokenRules } from './pages/TokenRules';
 import { Stats } from './pages/Stats';
+import { MyStats } from './pages/MyStats';
 
-type View = 'dashboard' | 'accounts' | 'users' | 'tokens' | 'tokenrules' | 'stats';
+type View = 'dashboard' | 'accounts' | 'users' | 'tokens' | 'tokenrules' | 'stats' | 'mystats';
 
 interface NavDef {
   key: View;
@@ -19,6 +20,7 @@ interface NavDef {
 const NAV: NavDef[] = [
   { key: 'dashboard', label: 'Dashboard', perm: 'ACCOUNTS_VIEW' },
   { key: 'accounts', label: 'Accounts', perm: 'ACCOUNTS_VIEW' },
+  { key: 'mystats', label: 'My Stats', perm: 'STATS_VIEW_OWN' },
   { key: 'stats', label: 'Statistics', perm: 'STATS_VIEW' },
   { key: 'tokens', label: 'Proxy Tokens', perm: 'PROXY_USE' },
   { key: 'tokenrules', label: 'Token Rules', perm: 'ADMIN' },
@@ -69,6 +71,7 @@ export function App() {
       <div className="main">
         {activeView === 'dashboard' && <Dashboard />}
         {activeView === 'accounts' && <Accounts user={user} />}
+        {activeView === 'mystats' && <MyStats />}
         {activeView === 'stats' && <Stats />}
         {activeView === 'tokens' && <Tokens />}
         {activeView === 'tokenrules' && <TokenRules />}

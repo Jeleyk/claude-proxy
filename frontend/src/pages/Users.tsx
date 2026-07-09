@@ -29,7 +29,10 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
     <div className="main-inner">
       <div className="section-head" style={{ marginTop: 0 }}>
         <div><h1>Users &amp; Roles</h1><p className="sub" style={{ margin: 0 }}>Access, permissions, group scope, and daily budgets.</p></div>
-        <button onClick={() => setEditing('new')}>+ New user</button>
+        <div className="row">
+          <button className="ghost" onClick={async () => { if (confirm('Reset usage statistics for ALL users? This cannot be undone.')) { const r = await api.resetAllStats(); alert(r.message); load(); } }}>Reset all stats</button>
+          <button onClick={() => setEditing('new')}>+ New user</button>
+        </div>
       </div>
 
       <h2>Users</h2>
@@ -52,6 +55,7 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
                 <td>
                   <div className="row">
                     <button className="sm ghost" onClick={() => setEditing(u)}>Edit</button>
+                    <button className="sm ghost" onClick={async () => { if (confirm(`Reset ${u.username}'s statistics?`)) { const r = await api.resetUserStats(u.id); alert(r.message); load(); } }}>Reset stats</button>
                     <button className="sm danger" onClick={async () => { if (confirm(`Delete ${u.username}?`)) { await api.deleteUser(u.id); load(); } }}>Delete</button>
                   </div>
                 </td>

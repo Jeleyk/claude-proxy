@@ -3,7 +3,7 @@ package org.claudeproxy.repo
 import org.claudeproxy.db.Settings
 import org.claudeproxy.envOrProp
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.replace
+import org.jetbrains.exposed.sql.upsert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 
@@ -30,7 +30,7 @@ object SettingsRepo {
     fun get(key: String): String? = all()[key]
 
     fun set(key: String, value: String) {
-        transaction { Settings.replace { it[Settings.key] = key; it[Settings.value] = value } }
+        transaction { Settings.upsert { it[Settings.key] = key; it[Settings.value] = value } }
         all()[key] = value
     }
 

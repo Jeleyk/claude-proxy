@@ -20,6 +20,10 @@ data class Config(
     // Canonical URL clients use to reach the proxy (shown on the Tokens page).
     // Empty => the UI falls back to the browser's current origin.
     val publicBaseUrl: String,
+    // Postgres JDBC URL (jdbc:postgresql://host:port/db). Empty => use SQLite at dbPath.
+    val databaseUrl: String,
+    val databaseUser: String,
+    val databasePassword: String,
 ) {
     companion object {
         fun load(): Config {
@@ -46,6 +50,9 @@ data class Config(
                 adminPassword = env("ADMIN_PASSWORD", "admin")!!,
                 upstreamBaseUrl = env("UPSTREAM_BASE_URL", "https://api.anthropic.com")!!.trimEnd('/'),
                 publicBaseUrl = publicBaseUrl.trimEnd('/'),
+                databaseUrl = env("DATABASE_URL", "")!!,
+                databaseUser = env("DATABASE_USER", "claudeproxy")!!,
+                databasePassword = env("DATABASE_PASSWORD", "")!!,
             )
         }
 

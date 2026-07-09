@@ -351,4 +351,42 @@ private fun Route.statsRoutes() {
         val since = Instant.now().minusSeconds(sinceHours * 3600)
         call.respond(StatsPayload(UsageRepo.summarySince(since), UsageRepo.recent(200)))
     }
+    // Reset usage statistics for ALL users.
+    post("/stats/reset") {
+        call.requirePermission(Permission.STATS_VIEW)
+        val n = UsageRepo.clearAll()
+        call.respond(MessageResponse("Cleared $n usage records for all users"))
+    }
+    // Reset usage statistics for one user.
+    post("/users/{id}/stats/reset") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val n = UsageRepo.clearUser(id)
+        call.respond(MessageResponse("Cleared $n usage records"))
+    }
+    // Reset the caller's own statistics.
+    post("/stats/mine/reset") {
+        val user = call.requireUser()
+        val ok = user.permissions.any { it == Permission.STATS_VIEW_OWN || it == Permission.STATS_VIEW || it == Permission.ADMIN }
+        if (!ok) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
+        val n = UsageRepo.clearUser(user.id)
+        call.respond(MessageResponse("Cleared $n of your usage records"))
+    }
+    // A user's own statistics — gated by STATS_VIEW_OWN (STATS_VIEW / ADMIN also allowed).
+    get("/stats/mine") {
+        val user = call.requireUser()
+        val ok = user.permissions.any { it == Permission.STATS_VIEW_OWN || it == Permission.STATS_VIEW || it == Permission.ADMIN }
+        if (!ok) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
+        val today = UsageRepo.userTotals(user.id, UserRepo.startOfUtcDay())
+        val total = UsageRepo.userTotals(user.id)
+        call.respond(
+            MyStatsPayload(
+                todayClean = today.clean, todayDirty = today.dirty, todayRequests = today.requests,
+                totalClean = total.clean, totalDirty = total.dirty, totalRequests = total.requests,
+                perModel = UsageRepo.userPerModel(user.id),
+                recent = UsageRepo.recentForUser(user.id, 100),
+            ),
+        )
+    }
 }

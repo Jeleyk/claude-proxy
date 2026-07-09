@@ -100,6 +100,18 @@ data class StatsPayload(
 )
 
 @Serializable
+data class MyStatsPayload(
+    val todayClean: Long,
+    val todayDirty: Long,
+    val todayRequests: Long,
+    val totalClean: Long,
+    val totalDirty: Long,
+    val totalRequests: Long,
+    val perModel: List<org.claudeproxy.repo.ModelUsageDto>,
+    val recent: List<org.claudeproxy.repo.UsageEventDto>,
+)
+
+@Serializable
 data class OkResponse(val ok: Boolean = true)
 
 @Serializable

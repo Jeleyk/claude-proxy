@@ -142,7 +142,19 @@ export const api = {
   deleteToken: (id: number) => req<unknown>('DELETE', `/api/proxy-tokens/${id}`),
 
   stats: () => req<any>('GET', '/api/stats/usage'),
+  myStats: () => req<MyStats>('GET', '/api/stats/mine'),
+  resetAllStats: () => req<{ message: string }>('POST', '/api/stats/reset'),
+  resetUserStats: (id: number) => req<{ message: string }>('POST', `/api/users/${id}/stats/reset`),
+  resetMyStats: () => req<{ message: string }>('POST', '/api/stats/mine/reset'),
 };
+
+export interface ModelUsage { model: string | null; requests: number; cleanTokens: number; dirtyTokens: number; }
+export interface MyStatsEvent { id: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; dirtyTokens: number; httpStatus: number; model: string | null; }
+export interface MyStats {
+  todayClean: number; todayDirty: number; todayRequests: number;
+  totalClean: number; totalDirty: number; totalRequests: number;
+  perModel: ModelUsage[]; recent: MyStatsEvent[];
+}
 
 export function has(user: UserDto | null, perm: string): boolean {
   return !!user && user.permissions.includes(perm);

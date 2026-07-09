@@ -26,8 +26,10 @@ export function Stats() {
 
   return (
     <div className="main-inner">
-      <h1>Statistics</h1>
-      <p className="sub">Usage over the last 24h. Refreshes every 8s.</p>
+      <div className="section-head" style={{ marginTop: 0 }}>
+        <div><h1>Statistics</h1><p className="sub" style={{ margin: 0 }}>Usage over the last 24h. Refreshes every 8s.</p></div>
+        <button className="ghost" onClick={async () => { if (confirm('Reset usage statistics for ALL users? This cannot be undone.')) { await api.resetAllStats(); load(); } }}>Reset all stats</button>
+      </div>
 
       <h2>Per account (24h)</h2>
       <div className="tablewrap">

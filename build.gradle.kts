@@ -38,6 +38,7 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed-jdbc:$exposedVersion")
     implementation("org.jetbrains.exposed:exposed-java-time:$exposedVersion")
     implementation("org.xerial:sqlite-jdbc:3.50.1.0")
+    implementation("org.postgresql:postgresql:42.7.4")
     implementation("com.zaxxer:HikariCP:6.3.0")
 
     // Security
