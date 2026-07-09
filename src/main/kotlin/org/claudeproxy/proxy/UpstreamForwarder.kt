@@ -150,7 +150,7 @@ class UpstreamForwarder(
     }
 
     private fun applyAuth(builder: io.ktor.client.request.HttpRequestBuilder, account: AccountRuntime) {
-        org.claudeproxy.accounts.UpstreamAuth.apply(builder, account.type, account.secret)
+        org.claudeproxy.accounts.UpstreamAuth.apply(builder, account.type, account.secret, account.clientId)
     }
 
     private fun resetInstantFrom(headers: Map<String, String>): Instant? {

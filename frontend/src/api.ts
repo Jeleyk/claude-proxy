@@ -9,7 +9,14 @@ export interface UserDto {
   allowedGroups: number[];
   allGroups: boolean;
   dailyTokenLimit: number | null;
-  todayTokens: number;
+  dailyLimitBasis: string; // CLEAN | DIRTY | PERCENT
+  todayCleanTokens: number;
+  todayDirtyTokens: number;
+}
+
+export interface ModelCoeff {
+  pattern: string;
+  coefficient: number;
 }
 
 export interface WindowLimitDto {
@@ -38,7 +45,9 @@ export interface AccountDto {
   effectiveRemaining: number | null;
   totalInputTokens: number;
   totalOutputTokens: number;
+  totalDirtyTokens: number;
   totalRequests: number;
+  clientId: string | null;
   createdAt: string;
 }
 
@@ -50,6 +59,7 @@ export interface PoolStats {
   totalEffectiveCapacity: number;
   totalInputTokens: number;
   totalOutputTokens: number;
+  totalDirtyTokens: number;
   totalRequests: number;
   nextFiveHourReset: string | null;
   nextWeeklyReset: string | null;
@@ -94,6 +104,9 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 export const api = {
   config: () => req<{ publicBaseUrl: string; tokensPerWindowPercent: number }>('GET', '/api/config'),
   updateSettings: (b: unknown) => req<{ publicBaseUrl: string; tokensPerWindowPercent: number }>('PATCH', '/api/settings', b),
+  modelCoeffs: () => req<ModelCoeff[]>('GET', '/api/model-coeffs'),
+  setModelCoeff: (pattern: string, coefficient: number) => req<ModelCoeff[]>('POST', '/api/model-coeffs', { pattern, coefficient }),
+  deleteModelCoeff: (pattern: string) => req<ModelCoeff[]>('DELETE', `/api/model-coeffs/${encodeURIComponent(pattern)}`),
 
   login: (username: string, password: string) =>
     req<UserDto>('POST', '/api/auth/login', { username, password }),

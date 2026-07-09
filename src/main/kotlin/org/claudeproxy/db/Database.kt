@@ -48,6 +48,7 @@ object Db {
             seedRoles()
             seedAdmin(config)
         }
+        org.claudeproxy.repo.ModelCoeffRepo.seedDefaults()
         log.info("Database ready at {}", config.dbPath)
     }
 

@@ -64,15 +64,17 @@ function AccountModal({ a, groups, onClose, onSaved }: { a: AccountDto; groups: 
   const [thr, setThr] = useState(a.threshold);
   const [coef, setCoef] = useState(a.coefficient);
   const [group, setGroup] = useState<number | null>(a.groupId);
+  const [clientId, setClientId] = useState(a.clientId ?? '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   async function save() {
     setBusy(true); setErr(null);
     try {
-      onSaved(await api.updateAccount(a.id, { name, priority: prio, threshold: thr, coefficient: coef, groupId: group, clearGroup: group == null }));
+      onSaved(await api.updateAccount(a.id, { name, priority: prio, threshold: thr, coefficient: coef, groupId: group, clearGroup: group == null, clientId: clientId.trim() || undefined }));
     } catch (e: any) { setErr(e.message); setBusy(false); }
   }
+  function regen() { setClientId(crypto.randomUUID()); }
 
   return (
     <Modal title={`Edit ${a.name}`} onClose={onClose}
@@ -84,6 +86,9 @@ function AccountModal({ a, groups, onClose, onSaved }: { a: AccountDto; groups: 
         <label className="field"><span>Threshold (0–1)</span><input type="number" step="0.05" min="0" max="1" value={thr} onChange={(e) => setThr(+e.target.value)} /></label>
         <label className="field"><span>Coefficient (×1 / ×5 / ×20)</span><input type="number" step="0.5" min="0" value={coef} onChange={(e) => setCoef(+e.target.value)} /></label>
       </div>
+      <label className="field"><span>Client ID (per-account device identity sent upstream)</span>
+        <div className="row"><input className="mono" value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="uuid" /><button className="ghost sm" onClick={regen} type="button">Regenerate</button></div>
+      </label>
       <p className="hint">Type <b>{a.type.toLowerCase()}</b> · created {new Date(a.createdAt).toLocaleString()}</p>
       {err && <div className="err">{err}</div>}
     </Modal>

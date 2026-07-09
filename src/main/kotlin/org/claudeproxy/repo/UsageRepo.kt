@@ -19,6 +19,7 @@ data class UsageEventDto(
     val ts: String,
     val inputTokens: Long,
     val outputTokens: Long,
+    val dirtyTokens: Long,
     val httpStatus: Int,
     val model: String?,
 )
@@ -30,11 +31,19 @@ data class UsageSummaryDto(
     val requests: Long,
     val inputTokens: Long,
     val outputTokens: Long,
+    val dirtyTokens: Long,
 )
+
+/** [requests, input, output, dirty] bundle. */
+class Totals(val requests: Long = 0, val input: Long = 0, val output: Long = 0, val dirty: Long = 0) {
+    val clean: Long get() = input + output
+}
 
 object UsageRepo {
 
     fun record(accountId: Int, userId: Int?, input: Long, output: Long, status: Int, model: String?) {
+        val coeff = ModelCoeffRepo.coeffFor(model)
+        val dirty = Math.round((input + output) * coeff)
         runCatching {
             transaction {
                 UsageEvents.insert {
@@ -43,6 +52,7 @@ object UsageRepo {
                     it[ts] = Instant.now()
                     it[inputTokens] = input
                     it[outputTokens] = output
+                    it[dirtyTokens] = dirty
                     it[httpStatus] = status
                     it[UsageEvents.model] = model
                 }
@@ -50,36 +60,30 @@ object UsageRepo {
         }
     }
 
-    /** Total input+output tokens a user has spent since [since]. */
-    fun tokensByUserSince(userId: Int, since: Instant): Long = transaction {
-        var total = 0L
+    /** [clean, dirty] tokens a user has spent since [since]. */
+    fun userTotalsSince(userId: Int, since: Instant): LongArray = transaction {
+        var clean = 0L; var dirty = 0L
         UsageEvents.selectAll()
             .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
-            .forEach { total += it[UsageEvents.inputTokens] + it[UsageEvents.outputTokens] }
-        total
+            .forEach { clean += it[UsageEvents.inputTokens] + it[UsageEvents.outputTokens]; dirty += it[UsageEvents.dirtyTokens] }
+        longArrayOf(clean, dirty)
     }
 
-    /** All-time [requests, input, output] per account. */
-    fun totalsPerAccount(): Map<Int, LongArray> = transaction {
+    fun totalsPerAccount(): Map<Int, Totals> = transaction {
         val acc = HashMap<Int, LongArray>()
         UsageEvents.selectAll().forEach { row ->
-            val a = acc.getOrPut(row[UsageEvents.accountId]) { LongArray(3) }
-            a[0] += 1
-            a[1] += row[UsageEvents.inputTokens]
-            a[2] += row[UsageEvents.outputTokens]
+            val a = acc.getOrPut(row[UsageEvents.accountId]) { LongArray(4) }
+            a[0] += 1; a[1] += row[UsageEvents.inputTokens]; a[2] += row[UsageEvents.outputTokens]; a[3] += row[UsageEvents.dirtyTokens]
         }
-        acc
+        acc.mapValues { (_, a) -> Totals(a[0], a[1], a[2], a[3]) }
     }
 
-    /** All-time pool totals [requests, input, output]. */
-    fun poolTotals(): LongArray = transaction {
-        val a = LongArray(3)
+    fun poolTotals(): Totals = transaction {
+        val a = LongArray(4)
         UsageEvents.selectAll().forEach { row ->
-            a[0] += 1
-            a[1] += row[UsageEvents.inputTokens]
-            a[2] += row[UsageEvents.outputTokens]
+            a[0] += 1; a[1] += row[UsageEvents.inputTokens]; a[2] += row[UsageEvents.outputTokens]; a[3] += row[UsageEvents.dirtyTokens]
         }
-        a
+        Totals(a[0], a[1], a[2], a[3])
     }
 
     fun recent(limit: Int = 200): List<UsageEventDto> = transaction {
@@ -97,24 +101,22 @@ object UsageRepo {
                     ts = row[UsageEvents.ts].toString(),
                     inputTokens = row[UsageEvents.inputTokens],
                     outputTokens = row[UsageEvents.outputTokens],
+                    dirtyTokens = row[UsageEvents.dirtyTokens],
                     httpStatus = row[UsageEvents.httpStatus],
                     model = row[UsageEvents.model],
                 )
             }
     }
 
-    /** Aggregate usage since a given instant, grouped per account (computed in-app for simplicity). */
     fun summarySince(since: Instant): List<UsageSummaryDto> = transaction {
         val names = Accounts.selectAll().associate { it[Accounts.id] to it[Accounts.name] }
-        val acc = HashMap<Int, LongArray>() // [requests, input, output]
+        val acc = HashMap<Int, LongArray>() // [requests, input, output, dirty]
         UsageEvents.selectAll().where { UsageEvents.ts greaterEq since }.forEach { row ->
             val aid = row[UsageEvents.accountId]
-            val a = acc.getOrPut(aid) { LongArray(3) }
-            a[0] += 1
-            a[1] += row[UsageEvents.inputTokens]
-            a[2] += row[UsageEvents.outputTokens]
+            val a = acc.getOrPut(aid) { LongArray(4) }
+            a[0] += 1; a[1] += row[UsageEvents.inputTokens]; a[2] += row[UsageEvents.outputTokens]; a[3] += row[UsageEvents.dirtyTokens]
         }
-        acc.map { (aid, a) -> UsageSummaryDto(aid, names[aid], a[0], a[1], a[2]) }
+        acc.map { (aid, a) -> UsageSummaryDto(aid, names[aid], a[0], a[1], a[2], a[3]) }
             .sortedByDescending { it.requests }
     }
 }

@@ -1,15 +1,18 @@
 import { useEffect, useState } from 'react';
-import { AccountDto, api, fmtReset, fmtTokens, GroupDto, PoolStats, WindowLimitDto } from '../api';
+import { AccountDto, api, fmtReset, fmtTokens, GroupDto, PoolStats, UserDto, WindowLimitDto } from '../api';
 
-function WindowCell({ w }: { w: WindowLimitDto | null }) {
-  if (!w || (w.usageFraction == null && w.status == null && w.resetAt == null)) {
+function WindowCell({ w, isApi }: { w: WindowLimitDto | null; isApi: boolean }) {
+  if (isApi) return <span className="hint">n/a</span>;
+  if (!w || (w.usageFraction == null && w.resetAt == null && w.status !== 'REJECTED')) {
     return <span className="hint">—</span>;
   }
+  // Prefer the real percentage; only fall back to a "limited" flag if that's all we know.
+  const hasPct = w.usageFraction != null;
   const frac = w.usageFraction ?? (w.status === 'REJECTED' ? 1 : 0);
   return (
     <div className="win">
       <div className="win-top">
-        <span>{w.usageFraction != null ? `${Math.round(frac * 100)}%` : (w.status?.toLowerCase() ?? '—')}</span>
+        <span>{hasPct ? `${Math.round(frac * 100)}%` : (w.status === 'REJECTED' ? 'limited' : '—')}</span>
         <span>reset <b>{fmtReset(w.resetAt)}</b></span>
       </div>
       <div className="bar"><span style={{ width: `${Math.round(frac * 100)}%` }} /></div>
@@ -26,12 +29,18 @@ function healthBadge(a: AccountDto) {
 export function Dashboard() {
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [groups, setGroups] = useState<GroupDto[]>([]);
+  const [me, setMe] = useState<UserDto | null>(null);
+  const [tpp, setTpp] = useState(10000);
+  const [canViewPool, setCanViewPool] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   async function load() {
     try {
-      setStats(await api.accounts());
+      setMe(await api.me().catch(() => null));
+      setTpp((await api.config().catch(() => ({ tokensPerWindowPercent: 10000 }))).tokensPerWindowPercent);
+      const s = await api.accounts().catch(() => { setCanViewPool(false); return null; });
+      if (s) { setStats(s); setCanViewPool(true); }
       setGroups(await api.groups().catch(() => []));
     } catch (e: any) { setErr(e.message); }
   }
@@ -42,23 +51,26 @@ export function Dashboard() {
     try { setStats(await api.refreshAll()); } catch (e: any) { setErr(e.message); } finally { setRefreshing(false); }
   }
 
-  if (err) return <div className="err">{err}</div>;
-  if (!stats) return <div className="hint">Loading…</div>;
+  if (err && !me) return <div className="err">{err}</div>;
 
   const groupName = (id: number | null) => groups.find((g) => g.id === id)?.name;
-  const capPct = stats.totalEffectiveCapacity > 0 ? stats.totalEffectiveRemaining / stats.totalEffectiveCapacity : 0;
-  const activeName = stats.activeAccountId ? stats.accounts.find((a) => a.id === stats.activeAccountId)?.name ?? `#${stats.activeAccountId}` : '—';
+  const capPct = stats && stats.totalEffectiveCapacity > 0 ? stats.totalEffectiveRemaining / stats.totalEffectiveCapacity : 0;
+  const activeName = stats?.activeAccountId ? stats.accounts.find((a) => a.id === stats.activeAccountId)?.name ?? `#${stats.activeAccountId}` : '—';
 
   return (
     <div className="main-inner">
       <div className="section-head" style={{ marginTop: 0 }}>
         <div>
           <h1>Dashboard</h1>
-          <p className="sub" style={{ margin: 0 }}>Live view of the upstream account pool.</p>
+          <p className="sub" style={{ margin: 0 }}>Your usage and the live account pool.</p>
         </div>
-        <button className="ghost" disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Refreshing…' : '↻ Refresh limits'}</button>
+        {canViewPool && <button className="ghost" disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Refreshing…' : '↻ Refresh limits'}</button>}
       </div>
 
+      {me && <MyUsage me={me} tpp={tpp} />}
+
+      {!stats ? (canViewPool ? <div className="hint">Loading pool…</div> : null) : (
+      <>
       <div className="cards" style={{ marginTop: 18 }}>
         <div className="card"><div className="label">Accounts healthy</div><div className="value">{stats.healthyAccounts}/{stats.totalAccounts}</div></div>
         <div className="card"><div className="label">Active now</div><div className="value" style={{ fontSize: 20 }}>{activeName}</div></div>
@@ -95,8 +107,8 @@ export function Dashboard() {
                 <td>{a.name} {a.id === stats.activeAccountId && <span className="badge active">active</span>}</td>
                 <td>{a.groupId ? <span className="grouptag">{groupName(a.groupId) ?? `#${a.groupId}`}</span> : <span className="hint">—</span>}</td>
                 <td><span className="badge muted">{a.type.toLowerCase()}</span></td>
-                <td><WindowCell w={a.fiveHour} /></td>
-                <td><WindowCell w={a.weekly} /></td>
+                <td><WindowCell w={a.fiveHour} isApi={a.type === 'API_KEY'} /></td>
+                <td><WindowCell w={a.weekly} isApi={a.type === 'API_KEY'} /></td>
                 <td className="num">×{a.coefficient}</td>
                 <td className="num">{a.effectiveRemaining == null ? '—' : a.effectiveRemaining.toFixed(2)}</td>
                 <td className="num">{fmtTokens(a.totalInputTokens)} / {fmtTokens(a.totalOutputTokens)}</td>
@@ -106,6 +118,30 @@ export function Dashboard() {
             {stats.accounts.length === 0 && <tr><td colSpan={10} className="hint">No accounts yet. Add one on the Accounts page.</td></tr>}
           </tbody>
         </table>
+      </div>
+      </>
+      )}
+    </div>
+  );
+}
+
+function MyUsage({ me, tpp }: { me: UserDto; tpp: number }) {
+  const basis = me.dailyLimitBasis;
+  const used = basis === 'CLEAN' ? me.todayCleanTokens : me.todayDirtyTokens;
+  const capTokens = me.dailyTokenLimit == null ? null : (basis === 'PERCENT' ? me.dailyTokenLimit * tpp : me.dailyTokenLimit);
+  const frac = capTokens && capTokens > 0 ? Math.min(1, used / capTokens) : 0;
+  return (
+    <div className="cards" style={{ marginTop: 18 }}>
+      <div className="card"><div className="label">You — clean tokens today</div><div className="value" style={{ fontSize: 22 }}>{fmtTokens(me.todayCleanTokens)}</div></div>
+      <div className="card"><div className="label">You — dirty tokens today</div><div className="value" style={{ fontSize: 22 }}>{fmtTokens(me.todayDirtyTokens)}</div><div className="hint">≈ {(me.todayDirtyTokens / tpp).toFixed(1)}% window</div></div>
+      <div className="card" style={{ minWidth: 220 }}>
+        <div className="label">Your daily budget</div>
+        {capTokens == null ? <div className="value" style={{ fontSize: 20 }}>unlimited</div> : (
+          <>
+            <div className="value" style={{ fontSize: 18 }}>{fmtTokens(used)} / {fmtTokens(capTokens)}</div>
+            <div className="bar" style={{ marginTop: 8 }}><span style={{ width: `${Math.round(frac * 100)}%` }} /></div>
+          </>
+        )}
       </div>
     </div>
   );

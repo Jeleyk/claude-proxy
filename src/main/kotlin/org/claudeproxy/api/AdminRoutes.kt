@@ -13,7 +13,7 @@ import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.accounts.AccountRepo
 import org.claudeproxy.accounts.AccountSecret
 import org.claudeproxy.accounts.LimitProbe
-import org.claudeproxy.accounts.TokenCounts
+import org.claudeproxy.repo.Totals
 import org.claudeproxy.auth.clearUserSession
 import org.claudeproxy.auth.currentUser
 import org.claudeproxy.auth.requirePermission
@@ -27,6 +27,7 @@ import org.claudeproxy.model.WindowKind
 import org.claudeproxy.oauth.ClaudeOAuth
 import org.claudeproxy.proxy.Http
 import org.claudeproxy.repo.GroupRepo
+import org.claudeproxy.repo.ModelCoeffRepo
 import org.claudeproxy.repo.OAuthAddRepo
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.RoleRepo
@@ -47,6 +48,24 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
             req.tokensPerWindowPercent?.let { if (it > 0) SettingsRepo.setTokensPerWindowPercent(it) }
             call.respond(ConfigDto(publicBaseUrl, SettingsRepo.tokensPerWindowPercent()))
         }
+        // model dirty-token coefficients (admin-managed)
+        get("/model-coeffs") {
+            call.requireUser()
+            call.respond(ModelCoeffRepo.list())
+        }
+        post("/model-coeffs") {
+            call.requirePermission(Permission.ADMIN)
+            val req = call.receive<ModelCoeffRequest>()
+            if (req.pattern.isBlank()) return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("pattern required"))
+            ModelCoeffRepo.set(req.pattern, req.coefficient)
+            call.respond(ModelCoeffRepo.list())
+        }
+        delete("/model-coeffs/{pattern}") {
+            call.requirePermission(Permission.ADMIN)
+            val p = call.parameters["pattern"] ?: return@delete call.respond(HttpStatusCode.BadRequest, MessageResponse("bad pattern"))
+            ModelCoeffRepo.delete(p)
+            call.respond(ModelCoeffRepo.list())
+        }
         authRoutes()
         accountRoutes(pool, probe)
         groupRoutes(pool)
@@ -66,23 +85,23 @@ private suspend fun buildPoolStats(pool: AccountPool): PoolStatsDto {
     val runtimes = pool.snapshot()
     val perAcc = UsageRepo.totalsPerAccount()
     val accounts = runtimes.map { rt ->
-        val a = perAcc[rt.id]
-        val counts = if (a != null) TokenCounts(a[0], a[1], a[2]) else TokenCounts()
+        val counts = perAcc[rt.id] ?: Totals()
         rt.toDto(createdAt[rt.id]?.toString() ?: Instant.now().toString(), counts)
     }
     val healthy = runtimes.count { it.enabled && it.health == org.claudeproxy.model.AccountHealth.OK }
     val effRemaining = accounts.sumOf { it.effectiveRemaining ?: 0.0 }
     val effCapacity = runtimes.sumOf { it.coefficient }
-    val pool3 = UsageRepo.poolTotals()
+    val pt = UsageRepo.poolTotals()
     return PoolStatsDto(
         totalAccounts = runtimes.size,
         healthyAccounts = healthy,
         activeAccountId = pool.activeAccountId,
         totalEffectiveRemaining = effRemaining,
         totalEffectiveCapacity = effCapacity,
-        totalRequests = pool3[0],
-        totalInputTokens = pool3[1],
-        totalOutputTokens = pool3[2],
+        totalRequests = pt.requests,
+        totalInputTokens = pt.input,
+        totalOutputTokens = pt.output,
+        totalDirtyTokens = pt.dirty,
         nextFiveHourReset = pool.nextReset(WindowKind.FIVE_HOUR)?.toString(),
         nextWeeklyReset = pool.nextReset(WindowKind.WEEKLY)?.toString(),
         accounts = accounts,
@@ -147,7 +166,7 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateAccountRequest>()
-        AccountRepo.updateConfig(id, req.name, req.groupId, req.priority, req.threshold, req.coefficient, req.enabled, req.clearGroup)
+        AccountRepo.updateConfig(id, req.name, req.groupId, req.priority, req.threshold, req.coefficient, req.enabled, req.clientId, req.clearGroup)
         pool.reload()
         call.respond(buildPoolStats(pool))
     }
@@ -251,7 +270,7 @@ private fun Route.userRoutes() {
     post("/users") {
         call.requirePermission(Permission.USERS_MANAGE)
         val req = call.receive<CreateUserRequest>()
-        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyTokenLimit)
+        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyTokenLimit, req.dailyLimitBasis)
         call.respond(UserRepo.get(id) ?: MessageResponse("created"))
     }
     patch("/users/{id}") {
@@ -259,7 +278,7 @@ private fun Route.userRoutes() {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateUserRequest>()
-        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyTokenLimit, req.clearDailyLimit)
+        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyTokenLimit, req.dailyLimitBasis, req.clearDailyLimit)
         call.respond(UserRepo.get(id) ?: MessageResponse("updated"))
     }
     delete("/users/{id}") {

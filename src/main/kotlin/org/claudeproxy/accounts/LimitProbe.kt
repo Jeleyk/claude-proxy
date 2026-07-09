@@ -36,7 +36,7 @@ class LimitProbe(
             val resp: HttpResponse = Http.client.post("$upstreamBaseUrl$probePath") {
                 contentType(ContentType.Application.Json)
                 header("anthropic-version", "2023-06-01")
-                UpstreamAuth.apply(this, account.type, account.secret)
+                UpstreamAuth.apply(this, account.type, account.secret, account.clientId)
                 setBody(probeBody)
             }
             val headerMap = HashMap<String, String>()

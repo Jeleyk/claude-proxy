@@ -18,10 +18,8 @@ import org.jetbrains.exposed.sql.replace
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
+import org.claudeproxy.repo.Totals
 import java.time.Instant
-
-/** Cumulative token counters for an account. */
-data class TokenCounts(val requests: Long = 0, val input: Long = 0, val output: Long = 0)
 
 /** Full config + secret + live limit state for one account, as held in the pool. */
 data class AccountRuntime(
@@ -34,10 +32,11 @@ data class AccountRuntime(
     val coefficient: Double,
     val enabled: Boolean,
     val health: AccountHealth,
+    val clientId: String?,
     val secret: AccountSecret,
     val limit: LimitState,
 ) {
-    fun toDto(createdAt: String, counts: TokenCounts): AccountDto {
+    fun toDto(createdAt: String, counts: Totals): AccountDto {
         val usage = limit.usageFraction()
         val effRemaining = usage?.let { coefficient * (1.0 - it) }
             ?: if (type == AccountType.API_KEY) coefficient else null
@@ -52,7 +51,9 @@ data class AccountRuntime(
             effectiveRemaining = effRemaining,
             totalInputTokens = counts.input,
             totalOutputTokens = counts.output,
+            totalDirtyTokens = counts.dirty,
             totalRequests = counts.requests,
+            clientId = clientId,
             createdAt = createdAt,
         )
     }
@@ -96,6 +97,7 @@ object AccountRepo {
                 coefficient = row[Accounts.coefficient],
                 enabled = row[Accounts.enabled],
                 health = runCatching { AccountHealth.valueOf(row[Accounts.health]) }.getOrDefault(AccountHealth.OK),
+                clientId = row[Accounts.clientId],
                 secret = secret,
                 limit = limit,
             )
@@ -109,7 +111,7 @@ object AccountRepo {
 
     fun create(
         name: String, type: AccountType, groupId: Int?, priority: Int, threshold: Double, coefficient: Double,
-        secret: AccountSecret, createdBy: Int?,
+        secret: AccountSecret, createdBy: Int?, clientId: String? = java.util.UUID.randomUUID().toString(),
     ): Int = transaction {
         val id = Accounts.insert {
             it[Accounts.name] = name
@@ -120,6 +122,7 @@ object AccountRepo {
             it[Accounts.coefficient] = coefficient
             it[enabled] = true
             it[health] = AccountHealth.OK.name
+            it[Accounts.clientId] = clientId
             it[Accounts.createdBy] = createdBy
             it[createdAt] = Instant.now()
         }[Accounts.id]
@@ -132,7 +135,7 @@ object AccountRepo {
 
     fun updateConfig(
         id: Int, name: String?, groupId: Int?, priority: Int?, threshold: Double?, coefficient: Double?,
-        enabled: Boolean?, clearGroup: Boolean = false,
+        enabled: Boolean?, clientId: String?, clearGroup: Boolean = false,
     ) = transaction {
         Accounts.update({ Accounts.id eq id }) {
             if (name != null) it[Accounts.name] = name
@@ -141,6 +144,7 @@ object AccountRepo {
             if (threshold != null) it[Accounts.threshold] = threshold
             if (coefficient != null) it[Accounts.coefficient] = coefficient
             if (enabled != null) it[Accounts.enabled] = enabled
+            if (clientId != null) it[Accounts.clientId] = clientId
         }
     }
 

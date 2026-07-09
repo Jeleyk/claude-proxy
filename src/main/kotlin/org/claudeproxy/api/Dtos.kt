@@ -28,6 +28,7 @@ data class UpdateAccountRequest(
     val threshold: Double? = null,
     val coefficient: Double? = null,
     val enabled: Boolean? = null,
+    val clientId: String? = null,
 )
 
 @Serializable
@@ -57,6 +58,7 @@ data class CreateUserRequest(
     val roles: List<String> = emptyList(),
     val allowedGroups: List<Int> = emptyList(),
     val dailyTokenLimit: Long? = null,
+    val dailyLimitBasis: String = "DIRTY",
 )
 
 @Serializable
@@ -66,8 +68,12 @@ data class UpdateUserRequest(
     val roles: List<String>? = null,
     val allowedGroups: List<Int>? = null,
     val dailyTokenLimit: Long? = null,
+    val dailyLimitBasis: String? = null,
     val clearDailyLimit: Boolean = false,
 )
+
+@Serializable
+data class ModelCoeffRequest(val pattern: String, val coefficient: Double)
 
 @Serializable
 data class ConfigDto(val publicBaseUrl: String, val tokensPerWindowPercent: Double)

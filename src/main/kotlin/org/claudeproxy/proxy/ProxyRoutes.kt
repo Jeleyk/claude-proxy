@@ -11,6 +11,7 @@ import kotlinx.serialization.Serializable
 import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.model.Permission
 import org.claudeproxy.repo.ProxyTokenRepo
+import org.claudeproxy.repo.SettingsRepo
 import org.claudeproxy.repo.UsageRepo
 import org.claudeproxy.repo.UserRepo
 import org.slf4j.LoggerFactory
@@ -47,20 +48,6 @@ class ProxyEngine(
             call.respond(HttpStatusCode.Forbidden, ProxyError(ProxyErrorBody("permission_error", "Token lacks proxy.use")))
             return
         }
-        // Per-user daily token budget.
-        val dailyLimit = UserRepo.dailyLimitOf(userId)
-        if (dailyLimit != null) {
-            val used = UsageRepo.tokensByUserSince(userId, UserRepo.startOfUtcDay())
-            if (used >= dailyLimit) {
-                call.response.headers.append("x-claude-proxy-daily-limit", dailyLimit.toString())
-                call.response.headers.append("x-claude-proxy-daily-used", used.toString())
-                call.respond(
-                    HttpStatusCode.TooManyRequests,
-                    ProxyError(ProxyErrorBody("rate_limit_error", "Daily token budget reached ($used/$dailyLimit); resets at 00:00 UTC")),
-                )
-                return
-            }
-        }
 
         // Admins may use any account; others are scoped to their granted groups
         // (ungrouped accounts are always available).
@@ -69,32 +56,75 @@ class ProxyEngine(
         val bodyBytes = runCatching { call.receive<ByteArray>() }.getOrDefault(ByteArray(0))
         val pathAndQuery = call.request.uri
 
+        // Requests that don't consume subscription quota (token counting, model listing)
+        // should always work if any account exists — no limit checks, ignore rate-limit.
+        if (isFreePath(pathAndQuery)) {
+            val account = pool.selectAny(allowedGroups)
+            if (account == null) { respondExhausted(call, allowedGroups); return }
+            forwarder.forward(call, account, pathAndQuery, bodyBytes, userId)
+            return
+        }
+
+        // Per-user daily budget (clean tokens / dirty tokens / % of window).
+        val (limitValue, basis) = UserRepo.dailyLimitOf(userId)
+        if (limitValue != null) {
+            val today = UsageRepo.userTotalsSince(userId, UserRepo.startOfUtcDay())
+            val (used, cap, unit) = when (basis) {
+                "CLEAN" -> Triple(today[0], limitValue, "clean tokens")
+                "PERCENT" -> Triple(today[1], SettingsRepo.percentToTokens(limitValue.toDouble()), "% window")
+                else -> Triple(today[1], limitValue, "tokens")   // DIRTY
+            }
+            if (used >= cap) {
+                call.response.headers.append("x-claude-proxy-daily-limit", cap.toString())
+                call.response.headers.append("x-claude-proxy-daily-used", used.toString())
+                call.respond(
+                    HttpStatusCode.TooManyRequests,
+                    ProxyError(ProxyErrorBody("rate_limit_error", "Daily budget reached ($used/$cap $unit); resets at 00:00 UTC")),
+                )
+                return
+            }
+        }
+
         val maxAttempts = maxOf(1, pool.snapshot().size)
         val tried = HashSet<Int>()
         repeat(maxAttempts) {
-            val account = pool.select(allowedGroups) ?: run {
-                respondExhausted(call)
+            val account = pool.select(allowedGroups)
+            if (account == null || !tried.add(account.id)) {
+                respondExhausted(call, allowedGroups)
                 return
             }
-            if (!tried.add(account.id)) {
-                respondExhausted(call)
-                return
-            }
-            when (val result = forwarder.forward(call, account, pathAndQuery, bodyBytes, userId)) {
+            when (forwarder.forward(call, account, pathAndQuery, bodyBytes, userId)) {
                 is ForwardResult.Served -> return
-                is ForwardResult.RateLimited -> {
-                    log.info("Account {} rate-limited, trying next", account.id)
-                    // loop continues, next select() excludes this account
-                }
+                is ForwardResult.RateLimited -> log.info("Account {} rate-limited, trying next", account.id)
             }
         }
-        respondExhausted(call)
+        respondExhausted(call, allowedGroups)
     }
 
-    private suspend fun respondExhausted(call: ApplicationCall) {
+    /** Paths that don't consume subscription usage. */
+    private fun isFreePath(pathAndQuery: String): Boolean {
+        val p = pathAndQuery.substringBefore('?')
+        return p.contains("count_tokens") || p.endsWith("/v1/models") || p.contains("/v1/models/")
+    }
+
+    private suspend fun respondExhausted(call: ApplicationCall, allowedGroups: Set<Int>?) {
+        val a = pool.availability(allowedGroups)
+        // Some accounts lost access (refresh failed / dead) but aren't merely rate-limited:
+        // return a retryable overloaded error so Claude Code retries (a refresh may recover them).
+        if (a.lostAccess > 0 && a.rateLimited == 0 && a.healthy == 0) {
+            call.response.headers.append("x-claude-proxy-lost-access", a.lostAccess.toString())
+            call.respond(
+                HttpStatusCode.fromValue(529),
+                ProxyError(ProxyErrorBody("overloaded_error", "One of the accounts lost access — retrying")),
+            )
+            return
+        }
         val reset = pool.earliestReset()
-        val msg = if (reset != null) "All accounts are at their limit; earliest reset at $reset"
-        else "No available account to serve the request"
+        val msg = when {
+            a.enabledInScope == 0 -> "No account is available for this token"
+            reset != null -> "All accounts are exhausted; earliest reset at $reset"
+            else -> "All accounts are exhausted"
+        }
         call.response.headers.append("x-claude-proxy-exhausted", "true")
         reset?.let { call.response.headers.append("x-claude-proxy-reset", it.toString()) }
         call.respond(HttpStatusCode.TooManyRequests, ProxyError(ProxyErrorBody("rate_limit_error", msg)))

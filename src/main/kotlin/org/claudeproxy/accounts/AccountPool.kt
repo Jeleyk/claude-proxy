@@ -55,6 +55,30 @@ class AccountPool {
         chosen
     }
 
+    /**
+     * Pick any enabled+healthy account in scope, ignoring threshold and rate-limit.
+     * Used for requests that don't consume subscription quota (token counting, model list).
+     */
+    suspend fun selectAny(allowedGroups: Set<Int>?): AccountRuntime? = mutex.withLock {
+        accounts.values
+            .filter { it.enabled && it.health == AccountHealth.OK && canUse(it, allowedGroups) }
+            .minWithOrNull(compareBy({ it.priority }, { it.id }))
+            ?.also { activeAccountId = it.id }
+    }
+
+    /** Why the pool couldn't serve, for choosing a client-facing status. */
+    data class Availability(val enabledInScope: Int, val healthy: Int, val rateLimited: Int, val lostAccess: Int)
+
+    suspend fun availability(allowedGroups: Set<Int>?, now: Instant = Instant.now()): Availability = mutex.withLock {
+        val inScope = accounts.values.filter { it.enabled && canUse(it, allowedGroups) }
+        Availability(
+            enabledInScope = inScope.size,
+            healthy = inScope.count { it.health == AccountHealth.OK && !it.isHardLimited(now) },
+            rateLimited = inScope.count { it.health == AccountHealth.OK && it.isHardLimited(now) },
+            lostAccess = inScope.count { it.health != AccountHealth.OK },
+        )
+    }
+
     /** A user may use an ungrouped account always, or a grouped one only if its group is allowed. */
     private fun canUse(a: AccountRuntime, allowedGroups: Set<Int>?): Boolean {
         if (allowedGroups == null) return true          // null = all groups (admin)

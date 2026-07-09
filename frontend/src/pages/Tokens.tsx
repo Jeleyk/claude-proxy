@@ -48,24 +48,29 @@ export function Tokens() {
       <h1>Proxy Tokens</h1>
       <p className="sub">Tokens you put into Claude Code to route through this proxy.</p>
 
-      {me && (
-        <div className="panel narrow">
-          <h2 style={{ marginTop: 0 }}>Your usage today</h2>
-          {me.dailyTokenLimit == null ? (
-            <p style={{ margin: 0 }}>
-              <b>{fmtTokens(me.todayTokens)}</b> tokens today <span className="hint">≈ {(me.todayTokens / tpp).toFixed(1)}% of a normal window · no daily limit</span>
-            </p>
-          ) : (
-            <>
-              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
-                <span><b>{fmtTokens(me.todayTokens)}</b> / {fmtTokens(me.dailyTokenLimit)} tokens</span>
-                <span className="hint">≈ {(me.todayTokens / tpp).toFixed(1)}% / {(me.dailyTokenLimit / tpp).toFixed(1)}% window · resets 00:00 UTC</span>
-              </div>
-              <div className="bar"><span style={{ width: `${Math.min(100, Math.round((me.todayTokens / me.dailyTokenLimit) * 100))}%` }} /></div>
-            </>
-          )}
-        </div>
-      )}
+      {me && (() => {
+        const basis = me.dailyLimitBasis;
+        const usedClean = me.todayCleanTokens, usedDirty = me.todayDirtyTokens;
+        const used = basis === 'CLEAN' ? usedClean : usedDirty;
+        const capTokens = me.dailyTokenLimit == null ? null : (basis === 'PERCENT' ? me.dailyTokenLimit * tpp : me.dailyTokenLimit);
+        return (
+          <div className="panel narrow">
+            <h2 style={{ marginTop: 0 }}>Your usage today</h2>
+            <p className="hint" style={{ marginTop: -6 }}>clean <b>{fmtTokens(usedClean)}</b> · dirty <b>{fmtTokens(usedDirty)}</b> · ≈ {(usedDirty / tpp).toFixed(1)}% window</p>
+            {capTokens == null ? (
+              <p style={{ margin: 0 }} className="hint">No daily limit.</p>
+            ) : (
+              <>
+                <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span><b>{fmtTokens(used)}</b> / {fmtTokens(capTokens)} {basis.toLowerCase()} used today</span>
+                  <span className="hint">resets 00:00 UTC</span>
+                </div>
+                <div className="bar"><span style={{ width: `${Math.min(100, Math.round((used / capTokens) * 100))}%` }} /></div>
+              </>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="panel narrow">
         <h2 style={{ marginTop: 0 }}>Connect Claude Code</h2>

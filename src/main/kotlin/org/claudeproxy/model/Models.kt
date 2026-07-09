@@ -55,10 +55,12 @@ data class UserDto(
     // unless the user is an admin, who may use everything)
     val allowedGroups: List<Int> = emptyList(),
     val allGroups: Boolean = false,
-    // per-day token budget (input+output); null = unlimited
+    // per-day budget value (interpreted per basis); null = unlimited
     val dailyTokenLimit: Long? = null,
+    val dailyLimitBasis: String = "DIRTY",   // CLEAN | DIRTY | PERCENT
     // tokens the user has spent since the start of the current UTC day
-    val todayTokens: Long = 0,
+    val todayCleanTokens: Long = 0,
+    val todayDirtyTokens: Long = 0,
 )
 
 @Serializable
@@ -100,7 +102,9 @@ data class AccountDto(
     // cumulative token counters for this account (all-time)
     val totalInputTokens: Long,
     val totalOutputTokens: Long,
+    val totalDirtyTokens: Long,
     val totalRequests: Long,
+    val clientId: String?,
     val createdAt: String,
 )
 
@@ -125,6 +129,7 @@ data class PoolStatsDto(
     // pool-wide token counters (all-time)
     val totalInputTokens: Long,
     val totalOutputTokens: Long,
+    val totalDirtyTokens: Long,
     val totalRequests: Long,
     // nearest reset times across the pool, per window
     val nextFiveHourReset: String?,

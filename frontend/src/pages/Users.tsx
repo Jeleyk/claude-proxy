@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { api, fmtTokens, GroupDto, RoleDto, UserDto } from '../api';
 import { Check, Modal, Switch } from '../ui';
 
+type Basis = 'CLEAN' | 'DIRTY' | 'PERCENT';
+
 export function Users({ isAdmin }: { isAdmin: boolean }) {
   const [users, setUsers] = useState<UserDto[]>([]);
   const [roles, setRoles] = useState<RoleDto[]>([]);
@@ -16,7 +18,7 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
       setUsers(await api.users());
       const r = await api.roles(); setRoles(r.roles); setAllPerms(r.allPermissions);
       setGroups(await api.groups().catch(() => []));
-      const c = await api.config(); setTpp(c.tokensPerWindowPercent);
+      setTpp((await api.config()).tokensPerWindowPercent);
     } catch (e: any) { setErr(e.message); }
   }
   useEffect(() => { load(); }, []);
@@ -26,16 +28,14 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
   return (
     <div className="main-inner">
       <div className="section-head" style={{ marginTop: 0 }}>
-        <div><h1>Users &amp; Roles</h1><p className="sub" style={{ margin: 0 }}>Who can sign in, what they can do, which groups they use, and daily token budgets.</p></div>
+        <div><h1>Users &amp; Roles</h1><p className="sub" style={{ margin: 0 }}>Access, permissions, group scope, and daily budgets.</p></div>
         <button onClick={() => setEditing('new')}>+ New user</button>
       </div>
-
-      {isAdmin && <TokenFactor tpp={tpp} onChange={setTpp} />}
 
       <h2>Users</h2>
       <div className="tablewrap">
         <table>
-          <thead><tr><th>Username</th><th>Roles</th><th>Group access</th><th>Daily budget (today)</th><th>Enabled</th><th></th></tr></thead>
+          <thead><tr><th>Username</th><th>Roles</th><th>Group access</th><th>Today (clean / dirty)</th><th>Daily budget</th><th>On</th><th></th></tr></thead>
           <tbody>
             {users.map((u) => (
               <tr key={u.id}>
@@ -46,11 +46,8 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
                     : u.allowedGroups.length ? <div className="pillrow">{u.allowedGroups.map((gid) => <span key={gid} className="grouptag">{groups.find((g) => g.id === gid)?.name ?? `#${gid}`}</span>)}</div>
                     : <span className="hint">ungrouped only</span>}
                 </td>
-                <td>
-                  {u.dailyTokenLimit == null
-                    ? <span className="hint">unlimited · {fmtTokens(u.todayTokens)} today</span>
-                    : <BudgetCell used={u.todayTokens} limit={u.dailyTokenLimit} tpp={tpp} />}
-                </td>
+                <td className="num">{fmtTokens(u.todayCleanTokens)} / {fmtTokens(u.todayDirtyTokens)}</td>
+                <td><BudgetCell u={u} tpp={tpp} /></td>
                 <td><Switch checked={u.enabled} onChange={async (v) => { await api.updateUser(u.id, { enabled: v }); load(); }} /></td>
                 <td>
                   <div className="row">
@@ -76,32 +73,17 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
   );
 }
 
-function BudgetCell({ used, limit, tpp }: { used: number; limit: number; tpp: number }) {
-  const frac = Math.min(1, used / limit);
+function BudgetCell({ u, tpp }: { u: UserDto; tpp: number }) {
+  if (u.dailyTokenLimit == null) return <span className="hint">unlimited</span>;
+  const basis = u.dailyLimitBasis as Basis;
+  const used = basis === 'CLEAN' ? u.todayCleanTokens : u.todayDirtyTokens;
+  const capTokens = basis === 'PERCENT' ? u.dailyTokenLimit * tpp : u.dailyTokenLimit;
+  const label = basis === 'PERCENT' ? `${(used / tpp).toFixed(1)}% / ${u.dailyTokenLimit}%` : `${fmtTokens(used)} / ${fmtTokens(u.dailyTokenLimit)}`;
+  const frac = capTokens > 0 ? Math.min(1, used / capTokens) : 0;
   return (
-    <div className="win" style={{ minWidth: 150 }}>
-      <div className="win-top"><span><b>{fmtTokens(used)}</b> / {fmtTokens(limit)}</span><span>≈{(used / tpp).toFixed(1)}%</span></div>
+    <div className="win" style={{ minWidth: 140 }}>
+      <div className="win-top"><span><b>{label}</b></span><span>{basis.toLowerCase()}</span></div>
       <div className="bar"><span style={{ width: `${Math.round(frac * 100)}%` }} /></div>
-    </div>
-  );
-}
-
-function TokenFactor({ tpp, onChange }: { tpp: number; onChange: (v: number) => void }) {
-  const [val, setVal] = useState(tpp);
-  useEffect(() => { setVal(tpp); }, [tpp]);
-  const [saved, setSaved] = useState(false);
-  return (
-    <div className="panel narrow">
-      <h2 style={{ marginTop: 0 }}>Token ↔ window-percent factor</h2>
-      <p className="hint" style={{ marginTop: -4 }}>
-        Approximate tokens spent per <b>1%</b> of a normal (×1) account window. Used to translate token budgets to/from
-        pseudo session-percent. A ×5 account is treated as 5× this. This is an estimate — tune it as you learn real usage.
-      </p>
-      <div className="row">
-        <input type="number" style={{ maxWidth: 160 }} value={val} onChange={(e) => setVal(+e.target.value)} />
-        <span className="hint">tokens = 1% · so 100% ≈ {fmtTokens(val * 100)} tokens</span>
-        <button className="right" onClick={async () => { await api.updateSettings({ tokensPerWindowPercent: val }); onChange(val); setSaved(true); setTimeout(() => setSaved(false), 1400); }}>{saved ? '✓ Saved' : 'Save'}</button>
-      </div>
     </div>
   );
 }
@@ -115,7 +97,7 @@ function UserModal({ user, roles, groups, tpp, onClose, onSaved }: {
   const [selRoles, setSelRoles] = useState<string[]>(user?.roles ?? []);
   const [selGroups, setSelGroups] = useState<number[]>(user?.allowedGroups ?? []);
   const [limitOn, setLimitOn] = useState(user?.dailyTokenLimit != null);
-  const [limitMode, setLimitMode] = useState<'tokens' | 'percent'>('tokens');
+  const [basis, setBasis] = useState<Basis>((user?.dailyLimitBasis as Basis) ?? 'DIRTY');
   const [limitVal, setLimitVal] = useState<number>(user?.dailyTokenLimit ?? 100000);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -124,18 +106,22 @@ function UserModal({ user, roles, groups, tpp, onClose, onSaved }: {
   const toggleGroup = (g: number) => setSelGroups((s) => s.includes(g) ? s.filter((x) => x !== g) : [...s, g]);
   const isAdmin = selRoles.some((rn) => roles.find((r) => r.name === rn)?.permissions.includes('ADMIN'));
 
-  // The stored value is always tokens. When entering percent, convert.
-  const limitTokens = limitMode === 'percent' ? Math.round(limitVal * tpp) : Math.round(limitVal);
-  const limitPercent = limitTokens / tpp;
+  // Preview in tokens & percent.
+  const asTokens = basis === 'PERCENT' ? Math.round(limitVal * tpp) : Math.round(limitVal);
+  const asPercent = asTokens / tpp;
 
   async function save() {
     setErr(null); setBusy(true);
     try {
-      const body: any = { roles: selRoles, allowedGroups: selGroups };
-      if (password) body.password = password;
-      if (limitOn) body.dailyTokenLimit = limitTokens; else body.clearDailyLimit = true;
-      if (isNew) await api.createUser({ username, password, roles: selRoles, allowedGroups: selGroups, dailyTokenLimit: limitOn ? limitTokens : null });
-      else await api.updateUser(user!.id, body);
+      const common = { roles: selRoles, allowedGroups: selGroups };
+      if (isNew) {
+        await api.createUser({ ...common, username, password, dailyTokenLimit: limitOn ? Math.round(limitVal) : null, dailyLimitBasis: basis });
+      } else {
+        const body: any = { ...common };
+        if (password) body.password = password;
+        if (limitOn) { body.dailyTokenLimit = Math.round(limitVal); body.dailyLimitBasis = basis; } else body.clearDailyLimit = true;
+        await api.updateUser(user!.id, body);
+      }
       onSaved();
     } catch (e: any) { setErr(e.message); setBusy(false); }
   }
@@ -162,21 +148,23 @@ function UserModal({ user, roles, groups, tpp, onClose, onSaved }: {
 
       <div className="field">
         <div className="row" style={{ justifyContent: 'space-between' }}>
-          <span style={{ margin: 0 }}>Daily token budget</span>
+          <span style={{ margin: 0 }}>Daily budget</span>
           <Switch checked={limitOn} onChange={setLimitOn} />
         </div>
         {limitOn && (
           <div style={{ marginTop: 10 }}>
             <div className="row">
               <input type="number" value={limitVal} onChange={(e) => setLimitVal(+e.target.value)} />
-              <select style={{ maxWidth: 130 }} value={limitMode} onChange={(e) => setLimitMode(e.target.value as any)}>
-                <option value="tokens">tokens / day</option>
-                <option value="percent">% window / day</option>
+              <select style={{ maxWidth: 170 }} value={basis} onChange={(e) => setBasis(e.target.value as Basis)}>
+                <option value="DIRTY">dirty tokens / day</option>
+                <option value="CLEAN">clean tokens / day</option>
+                <option value="PERCENT">% window / day</option>
               </select>
             </div>
             <p className="hint" style={{ marginTop: 8 }}>
-              = <b>{fmtTokens(limitTokens)} tokens/day</b> ≈ <b>{limitPercent.toFixed(1)}%</b> of a normal window
-              <span> (at {fmtTokens(tpp)} tokens per 1%).</span>
+              {basis === 'CLEAN' && <>Counts raw input+output tokens.</>}
+              {basis === 'DIRTY' && <>Counts model-weighted tokens ≈ <b>{asPercent.toFixed(1)}%</b> window.</>}
+              {basis === 'PERCENT' && <>= <b>{fmtTokens(asTokens)}</b> dirty tokens/day (at {fmtTokens(tpp)}/1%).</>}
             </p>
           </div>
         )}

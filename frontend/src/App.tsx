@@ -5,9 +5,10 @@ import { Dashboard } from './pages/Dashboard';
 import { Accounts } from './pages/Accounts';
 import { Users } from './pages/Users';
 import { Tokens } from './pages/Tokens';
+import { TokenRules } from './pages/TokenRules';
 import { Stats } from './pages/Stats';
 
-type View = 'dashboard' | 'accounts' | 'users' | 'tokens' | 'stats';
+type View = 'dashboard' | 'accounts' | 'users' | 'tokens' | 'tokenrules' | 'stats';
 
 interface NavDef {
   key: View;
@@ -20,6 +21,7 @@ const NAV: NavDef[] = [
   { key: 'accounts', label: 'Accounts', perm: 'ACCOUNTS_VIEW' },
   { key: 'stats', label: 'Statistics', perm: 'STATS_VIEW' },
   { key: 'tokens', label: 'Proxy Tokens', perm: 'PROXY_USE' },
+  { key: 'tokenrules', label: 'Token Rules', perm: 'ADMIN' },
   { key: 'users', label: 'Users & Roles', perm: 'USERS_MANAGE' },
 ];
 
@@ -69,6 +71,7 @@ export function App() {
         {activeView === 'accounts' && <Accounts user={user} />}
         {activeView === 'stats' && <Stats />}
         {activeView === 'tokens' && <Tokens />}
+        {activeView === 'tokenrules' && <TokenRules />}
         {activeView === 'users' && <Users isAdmin={has(user, 'ADMIN')} />}
       </div>
     </div>
