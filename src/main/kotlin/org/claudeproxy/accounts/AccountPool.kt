@@ -56,6 +56,21 @@ class AccountPool {
     }
 
     /**
+     * Ordered list of accounts to try for a request: under-threshold first (by priority),
+     * then over-threshold as fallback. Excludes disabled/unhealthy/hard-limited/out-of-scope.
+     */
+    suspend fun selectionOrder(allowedGroups: Set<Int>?, now: Instant = Instant.now()): List<AccountRuntime> = mutex.withLock {
+        val candidates = accounts.values
+            .filter { it.enabled && it.health == AccountHealth.OK && !it.isHardLimited(now) && canUse(it, allowedGroups) }
+            .sortedWith(compareBy({ it.priority }, { it.id }))
+        val under = candidates.filter { it.usageForSelection() < it.threshold }
+        val over = candidates.filter { it.usageForSelection() >= it.threshold }
+        under + over
+    }
+
+    fun markActive(id: Int) { activeAccountId = id }
+
+    /**
      * Pick any enabled+healthy account in scope, ignoring threshold and rate-limit.
      * Used for requests that don't consume subscription quota (token counting, model list).
      */

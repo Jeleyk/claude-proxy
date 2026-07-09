@@ -69,6 +69,7 @@ class UpstreamForwarder(
         pathAndQuery: String,
         bodyBytes: ByteArray,
         userId: Int?,
+        canRetry: Boolean = false,
     ): ForwardResult {
         val method = call.request.httpMethod
         val url = "$upstreamBaseUrl$pathAndQuery"
@@ -108,28 +109,33 @@ class UpstreamForwarder(
 
             val status = response.status
             log.info("upstream {} {} acct#{} -> {}", method.value, pathAndQuery.substringBefore('?'), account.id, status.value)
+
+            // Update account health/limit state for retryable statuses, then decide whether to
+            // retry another account or pass the real upstream response straight through.
             if (status == HttpStatusCode.TooManyRequests) {
-                val until = resetInstantFrom(headerMap)
-                    ?: newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull()
+                val until = resetInstantFrom(headerMap) ?: newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull()
                 pool.markRateLimited(account.id, until)
-                runCatching { response.readRawBytes() }
-                UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
-                return@execute ForwardResult.Retry(RetryKind.RATE_LIMITED, until)
-            }
-            // Account's credentials were rejected — flag lost access and try another account.
-            if (status.value == 401) {
+                if (canRetry) {
+                    runCatching { response.readRawBytes() }
+                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
+                    return@execute ForwardResult.Retry(RetryKind.RATE_LIMITED, until)
+                }
+            } else if (status.value == 401) {
                 pool.setHealth(account.id, org.claudeproxy.model.AccountHealth.REFRESH_FAILED)
                 runCatching { AccountRepo.updateHealth(account.id, org.claudeproxy.model.AccountHealth.REFRESH_FAILED) }
-                runCatching { response.readRawBytes() }
-                UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
-                return@execute ForwardResult.Retry(RetryKind.LOST_ACCESS, null)
+                if (canRetry) {
+                    runCatching { response.readRawBytes() }
+                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
+                    return@execute ForwardResult.Retry(RetryKind.LOST_ACCESS, null)
+                }
+            } else if (status.value in intArrayOf(500, 502, 503, 529)) {
+                if (canRetry) {
+                    runCatching { response.readRawBytes() }
+                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
+                    return@execute ForwardResult.Retry(RetryKind.UPSTREAM_ERROR, null)
+                }
             }
-            // Transient upstream errors (overloaded/5xx) — try the next account.
-            if (status.value in intArrayOf(500, 502, 503, 529)) {
-                runCatching { response.readRawBytes() }
-                UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
-                return@execute ForwardResult.Retry(RetryKind.UPSTREAM_ERROR, null)
-            }
+            // Otherwise (2xx, client 4xx, or last-attempt error) → pass the real response through.
 
             // Copy safe response headers to the client.
             response.headers.forEach { name, values ->

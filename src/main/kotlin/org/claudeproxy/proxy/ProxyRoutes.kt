@@ -60,8 +60,8 @@ class ProxyEngine(
         // should always work if any account exists — no limit checks, ignore rate-limit.
         if (isFreePath(pathAndQuery)) {
             val account = pool.selectAny(allowedGroups)
-            if (account == null) { respondExhausted(call, allowedGroups, false); return }
-            forwarder.forward(call, account, pathAndQuery, bodyBytes, userId)
+            if (account == null) { respondNoAccount(call, allowedGroups); return }
+            forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = false)
             return
         }
 
@@ -80,24 +80,22 @@ class ProxyEngine(
             }
         }
 
-        val maxAttempts = maxOf(1, pool.snapshot().size)
-        val tried = HashSet<Int>()
-        var sawUpstreamError = false
-        repeat(maxAttempts) {
-            val account = pool.select(allowedGroups)
-            if (account == null || !tried.add(account.id)) {
-                respondExhausted(call, allowedGroups, sawUpstreamError)
-                return
-            }
-            when (val r = forwarder.forward(call, account, pathAndQuery, bodyBytes, userId)) {
+        // Try accounts in order; every account except the last may retry to the next one.
+        // The last account's real upstream response (incl. 429/5xx + retry-after) is passed
+        // straight through to the client, so Claude Code sees the true status and backoff.
+        val order = pool.selectionOrder(allowedGroups)
+        if (order.isEmpty()) {
+            respondNoAccount(call, allowedGroups)
+            return
+        }
+        for ((i, account) in order.withIndex()) {
+            pool.markActive(account.id)
+            val isLast = i == order.lastIndex
+            when (forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = !isLast)) {
                 is ForwardResult.Served -> return
-                is ForwardResult.Retry -> {
-                    if (r.kind == RetryKind.UPSTREAM_ERROR) sawUpstreamError = true
-                    log.info("Account {} unavailable ({}), trying next", account.id, r.kind)
-                }
+                is ForwardResult.Retry -> log.info("Account {} unavailable, trying next", account.id)
             }
         }
-        respondExhausted(call, allowedGroups, sawUpstreamError)
     }
 
     /** Paths that don't consume subscription usage. */
@@ -106,12 +104,10 @@ class ProxyEngine(
         return p.contains("count_tokens") || p.endsWith("/v1/models") || p.contains("/v1/models/")
     }
 
-    private suspend fun respondExhausted(call: ApplicationCall, allowedGroups: Set<Int>?, sawUpstreamError: Boolean) {
+    /** No usable account at all (none enabled/healthy in scope, or all hard rate-limited). */
+    private suspend fun respondNoAccount(call: ApplicationCall, allowedGroups: Set<Int>?) {
         val a = pool.availability(allowedGroups)
-        // Accounts that lost access or transient upstream errors → retryable overloaded error
-        // (529) so Claude Code retries; a refresh/reset may recover things.
-        if ((a.lostAccess > 0 || sawUpstreamError) && a.rateLimited == 0) {
-            call.response.headers.append("x-claude-proxy-lost-access", a.lostAccess.toString())
+        if (a.lostAccess > 0 && a.rateLimited == 0 && a.healthy == 0) {
             call.respond(
                 HttpStatusCode.fromValue(529),
                 ProxyError(ProxyErrorBody("overloaded_error", "One of the accounts lost access — retrying")),
@@ -121,7 +117,7 @@ class ProxyEngine(
         val reset = pool.earliestReset()
         val msg = when {
             a.enabledInScope == 0 -> "No account is available for this token"
-            reset != null -> "All accounts are exhausted; earliest reset at $reset"
+            reset != null -> "All accounts are rate-limited; earliest reset at $reset"
             else -> "All accounts are exhausted"
         }
         call.response.headers.append("x-claude-proxy-exhausted", "true")
