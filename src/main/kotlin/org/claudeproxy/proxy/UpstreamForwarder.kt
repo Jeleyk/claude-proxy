@@ -107,6 +107,7 @@ class UpstreamForwarder(
             pool.updateLimit(account.id, newLimit)
 
             val status = response.status
+            log.info("upstream {} {} acct#{} -> {}", method.value, pathAndQuery.substringBefore('?'), account.id, status.value)
             if (status == HttpStatusCode.TooManyRequests) {
                 val until = resetInstantFrom(headerMap)
                     ?: newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull()
