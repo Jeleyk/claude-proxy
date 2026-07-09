@@ -4,6 +4,8 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
+import io.ktor.server.engine.applicationEnvironment
+import io.ktor.server.engine.connector
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.http.content.singlePageApplication
 import io.ktor.server.netty.Netty
@@ -49,7 +51,18 @@ fun main() {
 
     log.info("Starting claude-proxy on {}:{} (upstream {})", config.bindHost, config.port, config.upstreamBaseUrl)
 
-    embeddedServer(Netty, host = config.bindHost, port = config.port) {
+    embeddedServer(
+        Netty,
+        environment = applicationEnvironment { },
+        configure = {
+            connector { host = config.bindHost; port = config.port }
+            // Claude Code sends many/large headers (Stainless SDK x-stainless-*, anthropic-beta,
+            // long tokens). The Netty defaults (~8 KB) reject them at the decoder → nginx 502.
+            maxInitialLineLength = 64 * 1024
+            maxHeaderSize = 512 * 1024
+            maxChunkSize = 512 * 1024
+        },
+    ) {
         module(config, pool, engine, refresher, probe, scheduler)
     }.start(wait = true)
 }
