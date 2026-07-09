@@ -113,7 +113,16 @@ class UpstreamForwarder(
             // Update account health/limit state for retryable statuses, then decide whether to
             // retry another account or pass the real upstream response straight through.
             if (status == HttpStatusCode.TooManyRequests) {
-                val until = resetInstantFrom(headerMap) ?: newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull()
+                // Park until retry-after if given; else, only until the window reset when the
+                // account is genuinely at its window limit (utilization ~full). A 429 at low
+                // utilization is a short burst limit — park briefly so we retry soon.
+                val retryAfter = resetInstantFrom(headerMap)
+                val maxUtil = newLimit.windows.values.mapNotNull { it.utilization }.maxOrNull() ?: 0.0
+                val until = when {
+                    retryAfter != null -> retryAfter
+                    maxUtil >= 0.95 -> newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull()
+                    else -> Instant.now().plusSeconds(60)
+                }
                 pool.markRateLimited(account.id, until)
                 if (canRetry) {
                     runCatching { response.readRawBytes() }
