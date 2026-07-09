@@ -5,13 +5,15 @@ import java.time.Instant
 
 /** Permissions a user can hold (directly, via roles). */
 enum class Permission {
-    PROXY_USE,        // may route requests through the proxy
-    STATS_VIEW_OWN,   // may view only their own usage statistics
-    ACCOUNTS_VIEW,    // may view upstream accounts + their limits
-    STATS_VIEW,       // may view usage statistics for all accounts/users
-    ACCOUNTS_MANAGE,  // may create/edit/delete upstream accounts
-    USERS_MANAGE,     // may create/edit/delete users and roles
-    ADMIN;            // superuser: implies everything
+    PROXY_USE,          // may route requests through the proxy
+    STATS_VIEW_OWN,     // may view only their own usage statistics
+    STATS_VIEW_RECENT,  // may view the list of recent requests (pool-wide)
+    STATS_VIEW_ACCOUNTS,// may see which account each request/stat came from
+    ACCOUNTS_VIEW,      // may view upstream accounts + their limits
+    STATS_VIEW,         // full statistics (implies recent + accounts + graphs)
+    ACCOUNTS_MANAGE,    // may create/edit/delete upstream accounts
+    USERS_MANAGE,       // may create/edit/delete users and roles
+    ADMIN;              // superuser: implies everything
 
     companion object {
         fun fromString(s: String): Permission? = entries.firstOrNull { it.name == s }

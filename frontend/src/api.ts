@@ -18,6 +18,8 @@ export interface ModelPrice {
   pattern: string;
   inputPrice: number;
   outputPrice: number;
+  cacheReadPrice: number;
+  cacheWritePrice: number;
 }
 
 export interface WindowLimitDto {
@@ -105,7 +107,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 export const api = {
   config: () => req<{ publicBaseUrl: string }>('GET', '/api/config'),
   modelPrices: () => req<ModelPrice[]>('GET', '/api/model-prices'),
-  setModelPrice: (pattern: string, inputPrice: number, outputPrice: number) => req<ModelPrice[]>('POST', '/api/model-prices', { pattern, inputPrice, outputPrice }),
+  setModelPrice: (b: ModelPrice) => req<ModelPrice[]>('POST', '/api/model-prices', b),
   deleteModelPrice: (pattern: string) => req<ModelPrice[]>('DELETE', `/api/model-prices/${encodeURIComponent(pattern)}`),
 
   login: (username: string, password: string) =>
@@ -141,19 +143,31 @@ export const api = {
   createToken: (name: string) => req<ProxyTokenDto>('POST', '/api/proxy-tokens', { name }),
   deleteToken: (id: number) => req<unknown>('DELETE', `/api/proxy-tokens/${id}`),
 
-  stats: () => req<any>('GET', '/api/stats/usage'),
+  statsSummary: () => req<UsageSummary[]>('GET', '/api/stats/summary'),
+  statsRecent: () => req<UsageEvent[]>('GET', '/api/stats/recent'),
+  statsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/daily?days=${days}${end ? `&end=${end}` : ''}`),
   myStats: () => req<MyStats>('GET', '/api/stats/mine'),
   resetAllStats: () => req<{ message: string }>('POST', '/api/stats/reset'),
   resetUserStats: (id: number) => req<{ message: string }>('POST', `/api/users/${id}/stats/reset`),
   resetMyStats: () => req<{ message: string }>('POST', '/api/stats/mine/reset'),
 };
 
+export interface UsageSummary { accountId: number; accountName: string | null; requests: number; inputTokens: number; outputTokens: number; cost: number; }
+export interface UsageEvent { id: number; accountId: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; cost: number; httpStatus: number; model: string | null; }
 export interface ModelUsage { model: string | null; requests: number; cleanTokens: number; cost: number; }
-export interface MyStatsEvent { id: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; cost: number; httpStatus: number; model: string | null; }
 export interface MyStats {
   todayCost: number; todayClean: number; todayRequests: number;
   totalCost: number; totalClean: number; totalRequests: number;
-  perModel: ModelUsage[]; recent: MyStatsEvent[];
+  dailyCostLimit: number | null;
+  perModel: ModelUsage[]; recent: UsageEvent[];
+}
+export interface AccountSeries { accountId: number; accountName: string | null; cost: number[]; requests: number[]; }
+export interface DailyStats {
+  days: string[];
+  totalCost: number[];
+  totalRequests: number[];
+  perAccount: AccountSeries[];
+  canViewAccounts: boolean;
 }
 
 export function has(user: UserDto | null, perm: string): boolean {

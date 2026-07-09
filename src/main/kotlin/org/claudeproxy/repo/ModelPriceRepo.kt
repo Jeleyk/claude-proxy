@@ -10,12 +10,18 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.upsert
 
 @Serializable
-data class ModelPriceDto(val pattern: String, val inputPrice: Double, val outputPrice: Double)
+data class ModelPriceDto(
+    val pattern: String,
+    val inputPrice: Double,
+    val outputPrice: Double,
+    val cacheReadPrice: Double,
+    val cacheWritePrice: Double,
+)
 
 /**
- * Per-model pricing in USD per 1M tokens. A request's model id is matched against each
- * pattern by case-insensitive substring; the longest matching pattern wins (so "opus"
- * matches "claude-opus-4-8"). Defaults use Anthropic list prices.
+ * Per-model pricing in USD per 1M tokens, split by token kind (input, output, cache read,
+ * cache write). A request's model id is matched against each pattern by case-insensitive
+ * substring; the longest matching pattern wins. Defaults use Anthropic list prices.
  */
 object ModelPriceRepo {
 
@@ -24,12 +30,19 @@ object ModelPriceRepo {
 
     fun seedDefaults() {
         transaction {
+            // pattern to (input, output, cacheRead, cacheWrite)
             listOf(
-                Triple("haiku", 1.0, 5.0),
-                Triple("sonnet", 3.0, 15.0),
-                Triple("opus", 15.0, 75.0),
-            ).forEach { (p, i, o) ->
-                ModelPrices.insertIgnore { it[pattern] = p; it[inputPrice] = i; it[outputPrice] = o }
+                Quad("haiku", 1.0, 5.0, 0.1, 1.25),
+                Quad("sonnet", 3.0, 15.0, 0.3, 3.75),
+                Quad("opus", 15.0, 75.0, 1.5, 18.75),
+            ).forEach { p ->
+                ModelPrices.insertIgnore {
+                    it[pattern] = p.pattern
+                    it[inputPrice] = p.input
+                    it[outputPrice] = p.output
+                    it[cacheReadPrice] = p.cacheRead
+                    it[cacheWritePrice] = p.cacheWrite
+                }
             }
         }
         invalidate()
@@ -38,18 +51,25 @@ object ModelPriceRepo {
     fun list(): List<ModelPriceDto> {
         cache?.let { return it }
         val loaded = transaction {
-            ModelPrices.selectAll().map { ModelPriceDto(it[ModelPrices.pattern], it[ModelPrices.inputPrice], it[ModelPrices.outputPrice]) }
+            ModelPrices.selectAll().map {
+                ModelPriceDto(
+                    it[ModelPrices.pattern], it[ModelPrices.inputPrice], it[ModelPrices.outputPrice],
+                    it[ModelPrices.cacheReadPrice], it[ModelPrices.cacheWritePrice],
+                )
+            }
         }.sortedByDescending { it.pattern.length }
         cache = loaded
         return loaded
     }
 
-    fun set(pattern: String, inputPrice: Double, outputPrice: Double) {
+    fun set(pattern: String, input: Double, output: Double, cacheRead: Double, cacheWrite: Double) {
         transaction {
             ModelPrices.upsert {
                 it[ModelPrices.pattern] = pattern.trim().lowercase()
-                it[ModelPrices.inputPrice] = inputPrice
-                it[ModelPrices.outputPrice] = outputPrice
+                it[inputPrice] = input
+                it[outputPrice] = output
+                it[cacheReadPrice] = cacheRead
+                it[cacheWritePrice] = cacheWrite
             }
         }
         invalidate()
@@ -66,16 +86,14 @@ object ModelPriceRepo {
         return list().firstOrNull { m.contains(it.pattern) }
     }
 
-    /**
-     * USD cost from the response's own token breakdown. Cache reads bill at 0.1× the input
-     * price and cache writes at 1.25×, matching Anthropic prompt-caching pricing; base input
-     * and output at their list prices. Unknown model => 0.
-     */
-    fun costOf(model: String?, input: Long, cacheRead: Long, cacheCreation: Long, output: Long): Double {
+    /** USD cost from the full token breakdown, each kind priced separately (per 1M). */
+    fun costOf(model: String?, input: Long, cacheRead: Long, cacheWrite: Long, output: Long): Double {
         val p = priceFor(model) ?: return 0.0
-        val inputUnits = input + cacheRead * 0.1 + cacheCreation * 1.25
-        return (inputUnits * p.inputPrice + output * p.outputPrice) / 1_000_000.0
+        return (input * p.inputPrice + output * p.outputPrice +
+            cacheRead * p.cacheReadPrice + cacheWrite * p.cacheWritePrice) / 1_000_000.0
     }
 
     private fun invalidate() { cache = null }
+
+    private data class Quad(val pattern: String, val input: Double, val output: Double, val cacheRead: Double, val cacheWrite: Double)
 }

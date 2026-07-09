@@ -110,6 +110,10 @@ object AccountRepo {
         Accounts.selectAll().associate { it[Accounts.id] to it[Accounts.createdAt] }
     }
 
+    fun namesMap(): Map<Int, String> = transaction {
+        Accounts.selectAll().associate { it[Accounts.id] to it[Accounts.name] }
+    }
+
     fun create(
         name: String, type: AccountType, groupId: Int?, priority: Int, threshold: Double, coefficient: Double,
         secret: AccountSecret, createdBy: Int?, clientId: String? = java.util.UUID.randomUUID().toString(),

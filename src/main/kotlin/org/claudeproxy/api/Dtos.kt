@@ -71,7 +71,13 @@ data class UpdateUserRequest(
 )
 
 @Serializable
-data class ModelPriceRequest(val pattern: String, val inputPrice: Double, val outputPrice: Double)
+data class ModelPriceRequest(
+    val pattern: String,
+    val inputPrice: Double,
+    val outputPrice: Double,
+    val cacheReadPrice: Double = 0.0,
+    val cacheWritePrice: Double = 0.0,
+)
 
 @Serializable
 data class ConfigDto(val publicBaseUrl: String)
@@ -102,8 +108,26 @@ data class MyStatsPayload(
     val totalCost: Double,
     val totalClean: Long,
     val totalRequests: Long,
+    val dailyCostLimit: Double?,
     val perModel: List<org.claudeproxy.repo.ModelUsageDto>,
     val recent: List<org.claudeproxy.repo.UsageEventDto>,
+)
+
+@Serializable
+data class AccountSeriesDto(
+    val accountId: Int,
+    val accountName: String?,
+    val cost: List<Double>,
+    val requests: List<Long>,
+)
+
+@Serializable
+data class DailyStatsPayload(
+    val days: List<String>,               // date labels (UTC), oldest→newest
+    val totalCost: List<Double>,          // combined cost per day
+    val totalRequests: List<Long>,
+    val perAccount: List<AccountSeriesDto>, // empty if the viewer can't see accounts
+    val canViewAccounts: Boolean,
 )
 
 @Serializable

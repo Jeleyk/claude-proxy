@@ -1,75 +1,135 @@
 import { useEffect, useState } from 'react';
-import { api, fmtUsd } from '../api';
+import { api, DailyStats, fmtUsd, has, UsageEvent, UsageSummary, UserDto } from '../api';
+import { SERIES_COLORS, StackedBarChart } from '../Chart';
 
-interface Summary { accountId: number; accountName: string | null; requests: number; inputTokens: number; outputTokens: number; cost: number; }
-interface Event { id: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; cost: number; httpStatus: number; model: string | null; }
+function todayUtc(): string { return new Date().toISOString().slice(0, 10); }
+function shiftDate(d: string, days: number): string {
+  const dt = new Date(d + 'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate() + days); return dt.toISOString().slice(0, 10);
+}
 
-export function Stats() {
-  const [summary, setSummary] = useState<Summary[]>([]);
-  const [recent, setRecent] = useState<Event[]>([]);
+export function Stats({ user }: { user: UserDto }) {
+  const canStats = has(user, 'STATS_VIEW');
+  const canRecent = has(user, 'STATS_VIEW_RECENT') || canStats;
+  const canAccounts = has(user, 'STATS_VIEW_ACCOUNTS') || canStats;
+
+  const [daily, setDaily] = useState<DailyStats | null>(null);
+  const [summary, setSummary] = useState<UsageSummary[]>([]);
+  const [recent, setRecent] = useState<UsageEvent[]>([]);
+  const [endDate, setEndDate] = useState(todayUtc());
+  const [days] = useState(7);
   const [err, setErr] = useState<string | null>(null);
 
   async function load() {
     try {
-      const d = await api.stats();
-      setSummary(d.summary); setRecent(d.recent);
+      if (canStats) { setDaily(await api.statsDaily(days, endDate)); setSummary(await api.statsSummary()); }
+      if (canRecent) setRecent(await api.statsRecent());
     } catch (e: any) { setErr(e.message); }
   }
-  useEffect(() => { load(); const t = setInterval(load, 8000); return () => clearInterval(t); }, []);
+  useEffect(() => { load(); }, [endDate]);
+  useEffect(() => { const t = setInterval(load, 10000); return () => clearInterval(t); }, [endDate]);
 
   if (err) return <div className="err">{err}</div>;
 
-  function statusBadge(s: number) {
-    const cls = s >= 200 && s < 300 ? 'ok' : s === 429 ? 'warn' : 'bad';
-    return <span className={`badge ${cls}`}>{s}</span>;
-  }
+  const atToday = endDate >= todayUtc();
+  const rangeStart = daily?.days[0] ?? shiftDate(endDate, -(days - 1));
+
+  // combined chart series: stacked by account if allowed, else a single total bar
+  const combinedSeries = daily
+    ? (canAccounts && daily.perAccount.length
+        ? daily.perAccount.map((a, i) => ({ name: a.accountName ?? `#${a.accountId}`, color: SERIES_COLORS[i % SERIES_COLORS.length], values: a.cost }))
+        : [{ name: 'Total', color: SERIES_COLORS[0], values: daily.totalCost }])
+    : [];
+  const weekTotal = daily ? daily.totalCost.reduce((s, v) => s + v, 0) : 0;
 
   return (
     <div className="main-inner">
       <div className="section-head" style={{ marginTop: 0 }}>
-        <div><h1>Statistics</h1><p className="sub" style={{ margin: 0 }}>Usage over the last 24h. Refreshes every 8s.</p></div>
-        <button className="ghost" onClick={async () => { if (confirm('Reset usage statistics for ALL users? This cannot be undone.')) { await api.resetAllStats(); load(); } }}>Reset all stats</button>
+        <div><h1>Statistics</h1><p className="sub" style={{ margin: 0 }}>Daily spend and recent activity.</p></div>
+        {canStats && <button className="ghost" onClick={async () => { if (confirm('Reset usage statistics for ALL users?')) { await api.resetAllStats(); load(); } }}>Reset all stats</button>}
       </div>
 
-      <h2>Per account (24h)</h2>
-      <div className="tablewrap">
-        <table>
-          <thead><tr><th>Account</th><th>Requests</th><th>Input</th><th>Output</th><th>Cost</th></tr></thead>
-          <tbody>
-            {summary.map((s) => (
-              <tr key={s.accountId}>
-                <td>{s.accountName ?? `#${s.accountId}`}</td>
-                <td className="num">{s.requests}</td>
-                <td className="num">{s.inputTokens.toLocaleString()}</td>
-                <td className="num">{s.outputTokens.toLocaleString()}</td>
-                <td className="num">{fmtUsd(s.cost)}</td>
-              </tr>
-            ))}
-            {summary.length === 0 && <tr><td colSpan={5} className="hint">No usage yet.</td></tr>}
-          </tbody>
-        </table>
-      </div>
+      {canStats && daily && (
+        <>
+          <div className="section-head">
+            <h2 style={{ margin: 0 }}>Spend per day — all accounts</h2>
+            <div className="row">
+              <button className="ghost sm" onClick={() => setEndDate(shiftDate(endDate, -days))}>← prev</button>
+              <span className="hint mono">{rangeStart} … {endDate}</span>
+              <button className="ghost sm" disabled={atToday} onClick={() => setEndDate(shiftDate(endDate, days))}>next →</button>
+            </div>
+          </div>
+          <div className="panel">
+            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+              <span className="hint">Total for range</span><b>{fmtUsd(weekTotal)}</b>
+            </div>
+            <StackedBarChart days={daily.days} series={combinedSeries} fmt={fmtUsd} />
+            {canAccounts && daily.perAccount.length > 0 && (
+              <div className="pillrow" style={{ marginTop: 10 }}>
+                {daily.perAccount.map((a, i) => (
+                  <span key={a.accountId} className="grouptag" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 2, background: SERIES_COLORS[i % SERIES_COLORS.length] }} />
+                    {a.accountName ?? `#${a.accountId}`}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
 
-      <h2>Recent requests</h2>
-      <div className="tablewrap">
-        <table>
-          <thead><tr><th>Time</th><th>Account</th><th>Model</th><th>In</th><th>Out</th><th>Cost</th><th>Status</th></tr></thead>
-          <tbody>
-            {recent.map((e) => (
-              <tr key={e.id}>
-                <td className="hint">{new Date(e.ts).toLocaleTimeString()}</td>
-                <td>{e.accountName ?? '—'}</td>
-                <td className="hint">{e.model ?? '—'}</td>
-                <td className="num">{e.inputTokens}</td>
-                <td className="num">{e.outputTokens}</td>
-                <td className="num">{fmtUsd(e.cost)}</td>
-                <td>{statusBadge(e.httpStatus)}</td>
-              </tr>
-            ))}
-            {recent.length === 0 && <tr><td colSpan={7} className="hint">No requests yet.</td></tr>}
-          </tbody>
-        </table>
-      </div>
+          {canAccounts && daily.perAccount.map((a, i) => (
+            <div key={a.accountId}>
+              <h2>{a.accountName ?? `#${a.accountId}`} — spend per day</h2>
+              <div className="panel">
+                <StackedBarChart days={daily.days} height={150}
+                  series={[{ name: a.accountName ?? `#${a.accountId}`, color: SERIES_COLORS[i % SERIES_COLORS.length], values: a.cost }]} fmt={fmtUsd} />
+              </div>
+            </div>
+          ))}
+
+          <h2>Per account (24h)</h2>
+          <div className="tablewrap">
+            <table>
+              <thead><tr>{canAccounts && <th>Account</th>}<th>Requests</th><th>Input</th><th>Output</th><th>Cost</th></tr></thead>
+              <tbody>
+                {summary.map((s) => (
+                  <tr key={s.accountId}>
+                    {canAccounts && <td>{s.accountName ?? `#${s.accountId}`}</td>}
+                    <td className="num">{s.requests}</td>
+                    <td className="num">{s.inputTokens.toLocaleString()}</td>
+                    <td className="num">{s.outputTokens.toLocaleString()}</td>
+                    <td className="num">{fmtUsd(s.cost)}</td>
+                  </tr>
+                ))}
+                {summary.length === 0 && <tr><td colSpan={canAccounts ? 5 : 4} className="hint">No usage yet.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {canRecent && (
+        <>
+          <h2>Recent requests</h2>
+          <div className="tablewrap">
+            <table>
+              <thead><tr><th>Time</th>{canAccounts && <th>Account</th>}<th>Model</th><th>In</th><th>Out</th><th>Cost</th><th>Status</th></tr></thead>
+              <tbody>
+                {recent.map((e) => (
+                  <tr key={e.id}>
+                    <td className="hint">{new Date(e.ts).toLocaleTimeString()}</td>
+                    {canAccounts && <td>{e.accountName ?? '—'}</td>}
+                    <td className="hint">{e.model ?? '—'}</td>
+                    <td className="num">{e.inputTokens}</td>
+                    <td className="num">{e.outputTokens}</td>
+                    <td className="num">{fmtUsd(e.cost)}</td>
+                    <td><span className={`badge ${e.httpStatus >= 200 && e.httpStatus < 300 ? 'ok' : e.httpStatus === 429 ? 'warn' : 'bad'}`}>{e.httpStatus}</span></td>
+                  </tr>
+                ))}
+                {recent.length === 0 && <tr><td colSpan={canAccounts ? 7 : 6} className="hint">No requests yet.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 }

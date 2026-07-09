@@ -24,8 +24,10 @@ object Settings : Table("settings") {
 /** Per-model pricing ($ per million tokens), matched by substring of the request model id. */
 object ModelPrices : Table("model_prices") {
     val pattern = varchar("pattern", 64)   // e.g. "haiku", "sonnet", "opus"
-    val inputPrice = double("input_price").default(0.0)    // USD per 1M input tokens
-    val outputPrice = double("output_price").default(0.0)  // USD per 1M output tokens
+    val inputPrice = double("input_price").default(0.0)             // USD / 1M input tokens
+    val outputPrice = double("output_price").default(0.0)          // USD / 1M output tokens
+    val cacheReadPrice = double("cache_read_price").default(0.0)    // USD / 1M cache-read tokens
+    val cacheWritePrice = double("cache_write_price").default(0.0)  // USD / 1M cache-write tokens
     override val primaryKey = PrimaryKey(pattern)
 }
 
@@ -115,8 +117,10 @@ object UsageEvents : Table("usage_events") {
     val accountId = integer("account_id").references(Accounts.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
     val userId = integer("user_id").references(Users.id).nullable()
     val ts = timestamp("ts")
-    val inputTokens = long("input_tokens").default(0)
+    val inputTokens = long("input_tokens").default(0)          // base (non-cache) input
     val outputTokens = long("output_tokens").default(0)
+    val cacheReadTokens = long("cache_read_tokens").default(0)
+    val cacheWriteTokens = long("cache_write_tokens").default(0)
     // computed USD cost of this request from model pricing at record time
     val cost = double("cost").default(0.0)
     val httpStatus = integer("http_status").default(0)

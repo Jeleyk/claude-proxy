@@ -51,7 +51,7 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
             call.requirePermission(Permission.ADMIN)
             val req = call.receive<ModelPriceRequest>()
             if (req.pattern.isBlank()) return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("pattern required"))
-            ModelPriceRepo.set(req.pattern, req.inputPrice, req.outputPrice)
+            ModelPriceRepo.set(req.pattern, req.inputPrice, req.outputPrice, req.cacheReadPrice, req.cacheWritePrice)
             call.respond(ModelPriceRepo.list())
         }
         delete("/model-prices/{pattern}") {
@@ -338,48 +338,88 @@ private fun Route.proxyTokenRoutes() {
 
 // ---- stats ----
 
+private fun org.claudeproxy.repo.UserAuth.canRecent() =
+    Permission.STATS_VIEW_RECENT in permissions || Permission.STATS_VIEW in permissions
+private fun org.claudeproxy.repo.UserAuth.canAccounts() =
+    Permission.STATS_VIEW_ACCOUNTS in permissions || Permission.STATS_VIEW in permissions
+private fun org.claudeproxy.repo.UserAuth.canOwn() =
+    Permission.STATS_VIEW_OWN in permissions || Permission.STATS_VIEW in permissions
+
+/** Build the daily-cost time series for a window of [days] ending at [endDate] (UTC). */
+private fun buildDaily(days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean): DailyStatsPayload {
+    val n = days.coerceIn(1, 90)
+    val startDate = endDate.minusDays((n - 1).toLong())
+    val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val dayLabels = (0 until n).map { startDate.plusDays(it.toLong()).toString() }
+    val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
+    val totalCost = DoubleArray(n); val totalReq = LongArray(n)
+    val perAcc = HashMap<Int, Pair<DoubleArray, LongArray>>()
+    UsageRepo.dailyBuckets(start, end).forEach { b ->
+        val i = idx[b.date] ?: return@forEach
+        totalCost[i] += b.cost; totalReq[i] += b.requests
+        val (c, r) = perAcc.getOrPut(b.accountId) { DoubleArray(n) to LongArray(n) }
+        c[i] += b.cost; r[i] += b.requests
+    }
+    val names = AccountRepo.namesMap()
+    val series = if (includeAccounts)
+        perAcc.entries.sortedByDescending { it.value.first.sum() }
+            .map { (aid, cr) -> AccountSeriesDto(aid, names[aid], cr.first.toList(), cr.second.toList()) }
+    else emptyList()
+    return DailyStatsPayload(dayLabels, totalCost.toList(), totalReq.toList(), series, includeAccounts)
+}
+
 private fun Route.statsRoutes() {
-    get("/stats/usage") {
+    // Per-account summary over the last N hours (full stats).
+    get("/stats/summary") {
         call.requirePermission(Permission.STATS_VIEW)
         val sinceHours = call.parameters["sinceHours"]?.toLongOrNull() ?: 24L
-        val since = Instant.now().minusSeconds(sinceHours * 3600)
-        call.respond(StatsPayload(UsageRepo.summarySince(since), UsageRepo.recent(200)))
+        call.respond(UsageRepo.summarySince(Instant.now().minusSeconds(sinceHours * 3600)))
     }
-    // Reset usage statistics for ALL users.
+    // Recent requests list. Account attribution only if the viewer may see accounts.
+    get("/stats/recent") {
+        val user = call.requireUser()
+        if (!user.canRecent()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_RECENT")
+        val recent = UsageRepo.recent(200)
+        call.respond(if (user.canAccounts()) recent else recent.map { it.copy(accountName = null, accountId = 0) })
+    }
+    // Daily cost time series (graphs). Default: last 7 days ending today (UTC).
+    get("/stats/daily") {
+        call.requirePermission(Permission.STATS_VIEW)
+        val user = call.requireUser()
+        val days = call.parameters["days"]?.toIntOrNull() ?: 7
+        val endDate = call.parameters["end"]?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
+            ?: java.time.LocalDate.now(java.time.ZoneOffset.UTC)
+        call.respond(buildDaily(days, endDate, user.canAccounts()))
+    }
     post("/stats/reset") {
         call.requirePermission(Permission.STATS_VIEW)
-        val n = UsageRepo.clearAll()
-        call.respond(MessageResponse("Cleared $n usage records for all users"))
+        call.respond(MessageResponse("Cleared ${UsageRepo.clearAll()} usage records for all users"))
     }
-    // Reset usage statistics for one user.
     post("/users/{id}/stats/reset") {
         call.requirePermission(Permission.USERS_MANAGE)
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
-        val n = UsageRepo.clearUser(id)
-        call.respond(MessageResponse("Cleared $n usage records"))
+        call.respond(MessageResponse("Cleared ${UsageRepo.clearUser(id)} usage records"))
     }
-    // Reset the caller's own statistics.
     post("/stats/mine/reset") {
         val user = call.requireUser()
-        val ok = user.permissions.any { it == Permission.STATS_VIEW_OWN || it == Permission.STATS_VIEW || it == Permission.ADMIN }
-        if (!ok) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
-        val n = UsageRepo.clearUser(user.id)
-        call.respond(MessageResponse("Cleared $n of your usage records"))
+        if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
+        call.respond(MessageResponse("Cleared ${UsageRepo.clearUser(user.id)} of your usage records"))
     }
-    // A user's own statistics — gated by STATS_VIEW_OWN (STATS_VIEW / ADMIN also allowed).
     get("/stats/mine") {
         val user = call.requireUser()
-        val ok = user.permissions.any { it == Permission.STATS_VIEW_OWN || it == Permission.STATS_VIEW || it == Permission.ADMIN }
-        if (!ok) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
+        if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
         val today = UsageRepo.userTotals(user.id, UserRepo.startOfUtcDay())
         val total = UsageRepo.userTotals(user.id)
+        val recent = UsageRepo.recentForUser(user.id, 100)
         call.respond(
             MyStatsPayload(
                 todayCost = today.cost, todayClean = today.clean, todayRequests = today.requests,
                 totalCost = total.cost, totalClean = total.clean, totalRequests = total.requests,
+                dailyCostLimit = UserRepo.dailyLimitOf(user.id),
                 perModel = UsageRepo.userPerModel(user.id),
-                recent = UsageRepo.recentForUser(user.id, 100),
+                recent = if (user.canAccounts()) recent else recent.map { it.copy(accountName = null, accountId = 0) },
             ),
         )
     }

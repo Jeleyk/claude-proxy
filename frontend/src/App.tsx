@@ -15,13 +15,14 @@ interface NavDef {
   key: View;
   label: string;
   perm?: string;
+  anyPerm?: string[];
 }
 
 const NAV: NavDef[] = [
   { key: 'dashboard', label: 'Dashboard', perm: 'ACCOUNTS_VIEW' },
   { key: 'accounts', label: 'Accounts', perm: 'ACCOUNTS_VIEW' },
   { key: 'mystats', label: 'My Stats', perm: 'STATS_VIEW_OWN' },
-  { key: 'stats', label: 'Statistics', perm: 'STATS_VIEW' },
+  { key: 'stats', label: 'Statistics', anyPerm: ['STATS_VIEW', 'STATS_VIEW_RECENT', 'STATS_VIEW_ACCOUNTS'] },
   { key: 'tokens', label: 'Proxy Tokens', perm: 'PROXY_USE' },
   { key: 'pricing', label: 'Model Pricing', perm: 'ADMIN' },
   { key: 'users', label: 'Users & Roles', perm: 'USERS_MANAGE' },
@@ -39,7 +40,9 @@ export function App() {
   if (loading) return <div className="login-wrap">Loading…</div>;
   if (!user) return <Login onLogin={(u) => { setUser(u); setView(firstAllowed(u)); }} />;
 
-  const allowed = NAV.filter((n) => !n.perm || has(user, n.perm));
+  const navAllowed = (n: NavDef) =>
+    (!n.perm || has(user, n.perm)) && (!n.anyPerm || n.anyPerm.some((p) => has(user, p)));
+  const allowed = NAV.filter(navAllowed);
   const activeView = allowed.some((n) => n.key === view) ? view : (allowed[0]?.key ?? 'tokens');
 
   async function logout() {
@@ -72,7 +75,7 @@ export function App() {
         {activeView === 'dashboard' && <Dashboard />}
         {activeView === 'accounts' && <Accounts user={user} />}
         {activeView === 'mystats' && <MyStats />}
-        {activeView === 'stats' && <Stats />}
+        {activeView === 'stats' && <Stats user={user} />}
         {activeView === 'tokens' && <Tokens />}
         {activeView === 'pricing' && <ModelPricing />}
         {activeView === 'users' && <Users isAdmin={has(user, 'ADMIN')} />}
@@ -82,6 +85,6 @@ export function App() {
 }
 
 function firstAllowed(u: UserDto): View {
-  const first = NAV.find((n) => !n.perm || has(u, n.perm));
+  const first = NAV.find((n) => (!n.perm || has(u, n.perm)) && (!n.anyPerm || n.anyPerm.some((p) => has(u, p))));
   return (first?.key ?? 'tokens') as View;
 }
