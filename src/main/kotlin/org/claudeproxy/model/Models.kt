@@ -139,14 +139,18 @@ data class PoolStatsDto(
 
 /** Live limit state for a single rolling window. */
 data class WindowLimit(
+    // Anthropic reports usage directly as a 0..1 `utilization` fraction (subscription).
+    val utilization: Double? = null,
+    // API-key style limits report remaining/limit instead.
     val remaining: Double? = null,
     val limitTotal: Double? = null,
     val resetAt: Instant? = null,
     val status: LimitStatus = LimitStatus.UNKNOWN,
     val updatedAt: Instant? = null,
 ) {
-    /** Self-normalized usage fraction 0..1, or null if unknown. */
+    /** Usage fraction 0..1: prefer the reported utilization, else derive from remaining/limit. */
     fun usageFraction(): Double? {
+        utilization?.let { return it.coerceIn(0.0, 1.0) }
         val r = remaining ?: return null
         val t = limitTotal ?: return null
         if (t <= 0.0) return null
@@ -154,7 +158,7 @@ data class WindowLimit(
     }
 
     fun isEmpty(): Boolean =
-        remaining == null && limitTotal == null && resetAt == null && status == LimitStatus.UNKNOWN
+        utilization == null && remaining == null && limitTotal == null && resetAt == null && status == LimitStatus.UNKNOWN
 }
 
 /** Immutable snapshot of an account's live limit state across all windows. */

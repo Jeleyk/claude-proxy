@@ -9,91 +9,69 @@ import java.time.Instant
 import java.time.format.DateTimeParseException
 
 /**
- * Parses Anthropic rate-limit headers into a [LimitState] with per-window detail.
+ * Parses Anthropic subscription rate-limit headers into a [LimitState].
  *
- * The exact header names for subscription (unified) limits must be confirmed against
- * live traffic — this parser is deliberately tolerant: it accepts several plausible
- * key names per window, and logs every `anthropic-ratelimit-*` header at INFO the first
- * time an unrecognized one is seen (and always at DEBUG), so calibration is a matter of
- * reading the logs, not guessing.
+ * Calibrated against live traffic. Anthropic reports usage as a direct 0..1 `utilization`
+ * per window, plus a `status` and epoch-seconds `reset`, e.g.:
+ *   anthropic-ratelimit-unified-5h-utilization: 0.14
+ *   anthropic-ratelimit-unified-5h-status: allowed
+ *   anthropic-ratelimit-unified-5h-reset: 1783621800
+ *   anthropic-ratelimit-unified-7d-utilization: 0.38
+ * There is no remaining/limit header for subscriptions; those are only parsed as a
+ * fallback for API-key style limits. Every `anthropic-ratelimit-*` header is logged once
+ * per shape at INFO for ongoing calibration.
  */
 object RateLimitHeaders {
     private val log = LoggerFactory.getLogger("RateLimitHeaders")
-
-    // Remembers header-key signatures already logged, so calibration logging is one-shot per shape.
     private val loggedSignatures = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-    // Per-window candidate key names, most specific first. Covers the unified subscription
-    // family (5h / 7d) plus the standard per-key families as a fallback for API keys.
-    private val KEYS: Map<WindowKind, WindowKeys> = mapOf(
-        WindowKind.FIVE_HOUR to WindowKeys(
-            remaining = listOf(
-                "anthropic-ratelimit-unified-5h-remaining", "anthropic-ratelimit-unified-remaining",
-                "anthropic-ratelimit-unified-fivehour-remaining", "anthropic-ratelimit-tokens-remaining",
-            ),
-            limit = listOf(
-                "anthropic-ratelimit-unified-5h-limit", "anthropic-ratelimit-unified-limit",
-                "anthropic-ratelimit-unified-fivehour-limit", "anthropic-ratelimit-tokens-limit",
-            ),
-            reset = listOf(
-                "anthropic-ratelimit-unified-5h-reset", "anthropic-ratelimit-unified-reset",
-                "anthropic-ratelimit-unified-fivehour-reset", "anthropic-ratelimit-tokens-reset",
-            ),
-            status = listOf(
-                "anthropic-ratelimit-unified-5h-status", "anthropic-ratelimit-unified-status",
-                "anthropic-ratelimit-unified-fivehour-status",
-            ),
-        ),
-        WindowKind.WEEKLY to WindowKeys(
-            remaining = listOf(
-                "anthropic-ratelimit-unified-7d-remaining", "anthropic-ratelimit-unified-week-remaining",
-                "anthropic-ratelimit-unified-weekly-remaining",
-            ),
-            limit = listOf(
-                "anthropic-ratelimit-unified-7d-limit", "anthropic-ratelimit-unified-week-limit",
-                "anthropic-ratelimit-unified-weekly-limit",
-            ),
-            reset = listOf(
-                "anthropic-ratelimit-unified-7d-reset", "anthropic-ratelimit-unified-week-reset",
-                "anthropic-ratelimit-unified-weekly-reset",
-            ),
-            status = listOf(
-                "anthropic-ratelimit-unified-7d-status", "anthropic-ratelimit-unified-week-status",
-                "anthropic-ratelimit-unified-weekly-status",
-            ),
-        ),
-    )
-
     private data class WindowKeys(
+        val utilization: List<String>,
         val remaining: List<String>,
         val limit: List<String>,
         val reset: List<String>,
         val status: List<String>,
     )
 
+    private val KEYS: Map<WindowKind, WindowKeys> = mapOf(
+        WindowKind.FIVE_HOUR to WindowKeys(
+            utilization = listOf("anthropic-ratelimit-unified-5h-utilization"),
+            remaining = listOf("anthropic-ratelimit-unified-5h-remaining", "anthropic-ratelimit-tokens-remaining"),
+            limit = listOf("anthropic-ratelimit-unified-5h-limit", "anthropic-ratelimit-tokens-limit"),
+            reset = listOf("anthropic-ratelimit-unified-5h-reset", "anthropic-ratelimit-unified-reset", "anthropic-ratelimit-tokens-reset"),
+            status = listOf("anthropic-ratelimit-unified-5h-status", "anthropic-ratelimit-unified-status"),
+        ),
+        WindowKind.WEEKLY to WindowKeys(
+            utilization = listOf("anthropic-ratelimit-unified-7d-utilization"),
+            remaining = listOf("anthropic-ratelimit-unified-7d-remaining"),
+            limit = listOf("anthropic-ratelimit-unified-7d-limit"),
+            reset = listOf("anthropic-ratelimit-unified-7d-reset"),
+            status = listOf("anthropic-ratelimit-unified-7d-status"),
+        ),
+    )
+
     fun parse(headers: Map<String, String>, prev: LimitState): LimitState {
         val lower = headers.mapKeys { it.key.lowercase() }
         val rl = lower.filterKeys { it.startsWith("anthropic-ratelimit") }
         if (rl.isNotEmpty()) {
-            // Log the raw rate-limit headers once per distinct header-shape, at INFO, so the
-            // real Anthropic header names can be calibrated straight from production logs.
             val signature = rl.keys.sorted().joinToString(",")
             if (loggedSignatures.add(signature)) {
                 log.info("observed rate-limit headers: {}", rl.entries.joinToString(", ") { "${it.key}=${it.value}" })
             }
-            if (log.isDebugEnabled) rl.forEach { (k, v) -> log.debug("ratelimit header {} = {}", k, v) }
         }
 
         val windows = prev.windows.toMutableMap()
         var changed = false
         for ((kind, keys) in KEYS) {
+            val util = firstDouble(lower, keys.utilization)
             val remaining = firstDouble(lower, keys.remaining)
             val limit = firstDouble(lower, keys.limit)
             val reset = firstInstant(lower, keys.reset)
             val status = firstStatus(lower, keys.status)
-            if (remaining == null && limit == null && reset == null && status == LimitStatus.UNKNOWN) continue
+            if (util == null && remaining == null && limit == null && reset == null && status == LimitStatus.UNKNOWN) continue
             val prevW = prev.windows[kind] ?: WindowLimit()
             windows[kind] = prevW.copy(
+                utilization = util ?: prevW.utilization,
                 remaining = remaining ?: prevW.remaining,
                 limitTotal = limit ?: prevW.limitTotal,
                 resetAt = reset ?: prevW.resetAt,
@@ -124,7 +102,6 @@ object RateLimitHeaders {
         return LimitStatus.UNKNOWN
     }
 
-    /** Reset headers may be epoch seconds, epoch millis, a seconds-from-now integer, or RFC3339. */
     private fun firstInstant(h: Map<String, String>, keys: List<String>): Instant? {
         for (k in keys) {
             val raw = h[k]?.trim() ?: continue

@@ -24,6 +24,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import org.claudeproxy.accounts.AccountPool
+import org.claudeproxy.accounts.AccountRepo
 import org.claudeproxy.accounts.RateLimitHeaders
 import org.claudeproxy.accounts.AccountRuntime
 import org.claudeproxy.model.AccountType
@@ -31,12 +32,14 @@ import org.claudeproxy.repo.UsageRepo
 import org.slf4j.LoggerFactory
 import java.time.Instant
 
+enum class RetryKind { RATE_LIMITED, LOST_ACCESS, UPSTREAM_ERROR }
+
 /** Outcome of a single upstream attempt. */
 sealed interface ForwardResult {
     /** Response was streamed to the client; we are done. */
     object Served : ForwardResult
-    /** Upstream said 429 for this account; caller may retry another account. */
-    data class RateLimited(val until: Instant?) : ForwardResult
+    /** This account couldn't serve; caller may retry another account. */
+    data class Retry(val kind: RetryKind, val until: Instant?) : ForwardResult
 }
 
 /**
@@ -79,6 +82,10 @@ class UpstreamForwarder(
                 }
             }
             applyAuth(this, account)
+            // Anthropic requires this header; inject a default if the client omitted it.
+            if (call.request.headers["anthropic-version"] == null) {
+                header("anthropic-version", "2023-06-01")
+            }
             if (bodyBytes.isNotEmpty()) {
                 setBody(object : OutgoingContent.ByteArrayContent() {
                     override val contentType: ContentType? =
@@ -104,10 +111,23 @@ class UpstreamForwarder(
                 val until = resetInstantFrom(headerMap)
                     ?: newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull()
                 pool.markRateLimited(account.id, until)
-                // drain body so the connection can be reused, but do not respond yet
                 runCatching { response.readRawBytes() }
                 UsageRepo.record(account.id, userId, 0, 0, status.value, null)
-                return@execute ForwardResult.RateLimited(until)
+                return@execute ForwardResult.Retry(RetryKind.RATE_LIMITED, until)
+            }
+            // Account's credentials were rejected — flag lost access and try another account.
+            if (status.value == 401) {
+                pool.setHealth(account.id, org.claudeproxy.model.AccountHealth.REFRESH_FAILED)
+                runCatching { AccountRepo.updateHealth(account.id, org.claudeproxy.model.AccountHealth.REFRESH_FAILED) }
+                runCatching { response.readRawBytes() }
+                UsageRepo.record(account.id, userId, 0, 0, status.value, null)
+                return@execute ForwardResult.Retry(RetryKind.LOST_ACCESS, null)
+            }
+            // Transient upstream errors (overloaded/5xx) — try the next account.
+            if (status.value in intArrayOf(500, 502, 503, 529)) {
+                runCatching { response.readRawBytes() }
+                UsageRepo.record(account.id, userId, 0, 0, status.value, null)
+                return@execute ForwardResult.Retry(RetryKind.UPSTREAM_ERROR, null)
             }
 
             // Copy safe response headers to the client.

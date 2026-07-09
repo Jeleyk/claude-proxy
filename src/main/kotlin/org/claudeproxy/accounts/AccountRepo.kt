@@ -79,6 +79,7 @@ object AccountRepo {
             val windows = AccountLimits.selectAll().where { AccountLimits.accountId eq id }.mapNotNull { lr ->
                 val kind = WindowKind.fromCode(lr[AccountLimits.windowKind]) ?: return@mapNotNull null
                 kind to WindowLimit(
+                    utilization = lr[AccountLimits.utilization],
                     remaining = lr[AccountLimits.remaining],
                     limitTotal = lr[AccountLimits.limitTotal],
                     resetAt = lr[AccountLimits.resetAt],
@@ -170,6 +171,7 @@ object AccountRepo {
             AccountLimits.replace {
                 it[accountId] = id
                 it[windowKind] = kind.code
+                it[utilization] = w.utilization
                 it[remaining] = w.remaining
                 it[limitTotal] = w.limitTotal
                 it[resetAt] = w.resetAt

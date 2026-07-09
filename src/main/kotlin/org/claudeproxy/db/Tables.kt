@@ -102,6 +102,7 @@ object AccountSecrets : Table("account_secrets") {
 object AccountLimits : Table("account_limits") {
     val accountId = integer("account_id").references(Accounts.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
     val windowKind = varchar("window_kind", 8)   // "5h" | "7d"
+    val utilization = double("utilization").nullable()
     val remaining = double("remaining").nullable()
     val limitTotal = double("limit_total").nullable()
     val resetAt = timestamp("reset_at").nullable()
