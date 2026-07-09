@@ -27,7 +27,7 @@ import org.claudeproxy.model.WindowKind
 import org.claudeproxy.oauth.ClaudeOAuth
 import org.claudeproxy.proxy.Http
 import org.claudeproxy.repo.GroupRepo
-import org.claudeproxy.repo.ModelCoeffRepo
+import org.claudeproxy.repo.ModelPriceRepo
 import org.claudeproxy.repo.OAuthAddRepo
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.RoleRepo
@@ -40,31 +40,25 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
     route("/api") {
         get("/config") {
             call.requireUser()
-            call.respond(ConfigDto(publicBaseUrl, SettingsRepo.tokensPerWindowPercent()))
+            call.respond(ConfigDto(publicBaseUrl))
         }
-        patch("/settings") {
-            call.requirePermission(Permission.ADMIN)
-            val req = call.receive<UpdateSettingsRequest>()
-            req.tokensPerWindowPercent?.let { if (it > 0) SettingsRepo.setTokensPerWindowPercent(it) }
-            call.respond(ConfigDto(publicBaseUrl, SettingsRepo.tokensPerWindowPercent()))
-        }
-        // model dirty-token coefficients (admin-managed)
-        get("/model-coeffs") {
+        // per-model pricing ($ / 1M tokens), admin-managed
+        get("/model-prices") {
             call.requireUser()
-            call.respond(ModelCoeffRepo.list())
+            call.respond(ModelPriceRepo.list())
         }
-        post("/model-coeffs") {
+        post("/model-prices") {
             call.requirePermission(Permission.ADMIN)
-            val req = call.receive<ModelCoeffRequest>()
+            val req = call.receive<ModelPriceRequest>()
             if (req.pattern.isBlank()) return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("pattern required"))
-            ModelCoeffRepo.set(req.pattern, req.coefficient)
-            call.respond(ModelCoeffRepo.list())
+            ModelPriceRepo.set(req.pattern, req.inputPrice, req.outputPrice)
+            call.respond(ModelPriceRepo.list())
         }
-        delete("/model-coeffs/{pattern}") {
+        delete("/model-prices/{pattern}") {
             call.requirePermission(Permission.ADMIN)
             val p = call.parameters["pattern"] ?: return@delete call.respond(HttpStatusCode.BadRequest, MessageResponse("bad pattern"))
-            ModelCoeffRepo.delete(p)
-            call.respond(ModelCoeffRepo.list())
+            ModelPriceRepo.delete(p)
+            call.respond(ModelPriceRepo.list())
         }
         authRoutes()
         accountRoutes(pool, probe)
@@ -101,7 +95,7 @@ private suspend fun buildPoolStats(pool: AccountPool): PoolStatsDto {
         totalRequests = pt.requests,
         totalInputTokens = pt.input,
         totalOutputTokens = pt.output,
-        totalDirtyTokens = pt.dirty,
+        totalCost = pt.cost,
         nextFiveHourReset = pool.nextReset(WindowKind.FIVE_HOUR)?.toString(),
         nextWeeklyReset = pool.nextReset(WindowKind.WEEKLY)?.toString(),
         accounts = accounts,
@@ -270,7 +264,7 @@ private fun Route.userRoutes() {
     post("/users") {
         call.requirePermission(Permission.USERS_MANAGE)
         val req = call.receive<CreateUserRequest>()
-        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyTokenLimit, req.dailyLimitBasis)
+        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyCostLimit)
         call.respond(UserRepo.get(id) ?: MessageResponse("created"))
     }
     patch("/users/{id}") {
@@ -278,7 +272,7 @@ private fun Route.userRoutes() {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateUserRequest>()
-        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyTokenLimit, req.dailyLimitBasis, req.clearDailyLimit)
+        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyCostLimit, req.clearDailyLimit)
         call.respond(UserRepo.get(id) ?: MessageResponse("updated"))
     }
     delete("/users/{id}") {
@@ -382,8 +376,8 @@ private fun Route.statsRoutes() {
         val total = UsageRepo.userTotals(user.id)
         call.respond(
             MyStatsPayload(
-                todayClean = today.clean, todayDirty = today.dirty, todayRequests = today.requests,
-                totalClean = total.clean, totalDirty = total.dirty, totalRequests = total.requests,
+                todayCost = today.cost, todayClean = today.clean, todayRequests = today.requests,
+                totalCost = total.cost, totalClean = total.clean, totalRequests = total.requests,
                 perModel = UsageRepo.userPerModel(user.id),
                 recent = UsageRepo.recentForUser(user.id, 100),
             ),

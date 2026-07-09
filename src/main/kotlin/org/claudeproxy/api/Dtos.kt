@@ -57,8 +57,7 @@ data class CreateUserRequest(
     val password: String,
     val roles: List<String> = emptyList(),
     val allowedGroups: List<Int> = emptyList(),
-    val dailyTokenLimit: Long? = null,
-    val dailyLimitBasis: String = "DIRTY",
+    val dailyCostLimit: Double? = null,
 )
 
 @Serializable
@@ -67,19 +66,15 @@ data class UpdateUserRequest(
     val enabled: Boolean? = null,
     val roles: List<String>? = null,
     val allowedGroups: List<Int>? = null,
-    val dailyTokenLimit: Long? = null,
-    val dailyLimitBasis: String? = null,
+    val dailyCostLimit: Double? = null,
     val clearDailyLimit: Boolean = false,
 )
 
 @Serializable
-data class ModelCoeffRequest(val pattern: String, val coefficient: Double)
+data class ModelPriceRequest(val pattern: String, val inputPrice: Double, val outputPrice: Double)
 
 @Serializable
-data class ConfigDto(val publicBaseUrl: String, val tokensPerWindowPercent: Double)
-
-@Serializable
-data class UpdateSettingsRequest(val tokensPerWindowPercent: Double? = null)
+data class ConfigDto(val publicBaseUrl: String)
 
 @Serializable
 data class CreateRoleRequest(val name: String, val permissions: List<String> = emptyList())
@@ -101,11 +96,11 @@ data class StatsPayload(
 
 @Serializable
 data class MyStatsPayload(
+    val todayCost: Double,
     val todayClean: Long,
-    val todayDirty: Long,
     val todayRequests: Long,
+    val totalCost: Double,
     val totalClean: Long,
-    val totalDirty: Long,
     val totalRequests: Long,
     val perModel: List<org.claudeproxy.repo.ModelUsageDto>,
     val recent: List<org.claudeproxy.repo.UsageEventDto>,

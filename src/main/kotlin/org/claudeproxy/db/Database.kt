@@ -51,7 +51,7 @@ object Db {
             seedRoles()
             seedAdmin(config)
         }
-        org.claudeproxy.repo.ModelCoeffRepo.seedDefaults()
+        org.claudeproxy.repo.ModelPriceRepo.seedDefaults()
         log.info("Database ready ({})", if (config.databaseUrl.isNotBlank()) "PostgreSQL" else "SQLite ${config.dbPath}")
     }
 

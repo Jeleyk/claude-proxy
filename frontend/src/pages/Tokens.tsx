@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, fmtTokens, ProxyTokenDto, UserDto } from '../api';
+import { api, fmtTokens, fmtUsd, ProxyTokenDto, UserDto } from '../api';
 import { CodeBlock, Copy } from '../ui';
 
 export function Tokens() {
@@ -8,15 +8,13 @@ export function Tokens() {
   const [revealed, setRevealed] = useState<ProxyTokenDto | null>(null);
   const [base, setBase] = useState(window.location.origin);
   const [me, setMe] = useState<UserDto | null>(null);
-  const [tpp, setTpp] = useState(10000);
   const [err, setErr] = useState<string | null>(null);
 
   async function load() {
     try {
       setTokens(await api.tokens());
-      const c = await api.config().catch(() => ({ publicBaseUrl: '', tokensPerWindowPercent: 10000 }));
+      const c = await api.config().catch(() => ({ publicBaseUrl: '' }));
       if (c.publicBaseUrl) setBase(c.publicBaseUrl);
-      setTpp(c.tokensPerWindowPercent);
       setMe(await api.me().catch(() => null));
     } catch (e: any) { setErr(e.message); }
   }
@@ -48,29 +46,23 @@ export function Tokens() {
       <h1>Proxy Tokens</h1>
       <p className="sub">Tokens you put into Claude Code to route through this proxy.</p>
 
-      {me && (() => {
-        const basis = me.dailyLimitBasis;
-        const usedClean = me.todayCleanTokens, usedDirty = me.todayDirtyTokens;
-        const used = basis === 'CLEAN' ? usedClean : usedDirty;
-        const capTokens = me.dailyTokenLimit == null ? null : (basis === 'PERCENT' ? me.dailyTokenLimit * tpp : me.dailyTokenLimit);
-        return (
-          <div className="panel narrow">
-            <h2 style={{ marginTop: 0 }}>Your usage today</h2>
-            <p className="hint" style={{ marginTop: -6 }}>clean <b>{fmtTokens(usedClean)}</b> · dirty <b>{fmtTokens(usedDirty)}</b> · ≈ {(usedDirty / tpp).toFixed(1)}% window</p>
-            {capTokens == null ? (
-              <p style={{ margin: 0 }} className="hint">No daily limit.</p>
-            ) : (
-              <>
-                <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span><b>{fmtTokens(used)}</b> / {fmtTokens(capTokens)} {basis.toLowerCase()} used today</span>
-                  <span className="hint">resets 00:00 UTC</span>
-                </div>
-                <div className="bar"><span style={{ width: `${Math.min(100, Math.round((used / capTokens) * 100))}%` }} /></div>
-              </>
-            )}
-          </div>
-        );
-      })()}
+      {me && (
+        <div className="panel narrow">
+          <h2 style={{ marginTop: 0 }}>Your usage today</h2>
+          <p className="hint" style={{ marginTop: -6 }}>{fmtTokens(me.todayInputTokens)} in / {fmtTokens(me.todayOutputTokens)} out</p>
+          {me.dailyCostLimit == null ? (
+            <p style={{ margin: 0 }}><b>{fmtUsd(me.todayCost)}</b> spent today <span className="hint">· no daily limit</span></p>
+          ) : (
+            <>
+              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+                <span><b>{fmtUsd(me.todayCost)}</b> / {fmtUsd(me.dailyCostLimit)} spent today</span>
+                <span className="hint">resets 00:00 UTC</span>
+              </div>
+              <div className="bar"><span style={{ width: `${Math.min(100, Math.round((me.todayCost / me.dailyCostLimit) * 100))}%` }} /></div>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="panel narrow">
         <h2 style={{ marginTop: 0 }}>Connect Claude Code</h2>

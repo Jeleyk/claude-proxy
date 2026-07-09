@@ -22,7 +22,7 @@ data class UsageEventDto(
     val ts: String,
     val inputTokens: Long,
     val outputTokens: Long,
-    val dirtyTokens: Long,
+    val cost: Double,
     val httpStatus: Int,
     val model: String?,
 )
@@ -34,22 +34,21 @@ data class UsageSummaryDto(
     val requests: Long,
     val inputTokens: Long,
     val outputTokens: Long,
-    val dirtyTokens: Long,
+    val cost: Double,
 )
 
-/** [requests, input, output, dirty] bundle. */
-class Totals(val requests: Long = 0, val input: Long = 0, val output: Long = 0, val dirty: Long = 0) {
+@Serializable
+data class ModelUsageDto(val model: String?, val requests: Long, val cleanTokens: Long, val cost: Double)
+
+/** [requests, input, output] tokens + USD cost bundle. */
+class Totals(val requests: Long = 0, val input: Long = 0, val output: Long = 0, val cost: Double = 0.0) {
     val clean: Long get() = input + output
 }
-
-@Serializable
-data class ModelUsageDto(val model: String?, val requests: Long, val cleanTokens: Long, val dirtyTokens: Long)
 
 object UsageRepo {
 
     fun record(accountId: Int, userId: Int?, input: Long, output: Long, status: Int, model: String?) {
-        val coeff = ModelCoeffRepo.coeffFor(model)
-        val dirty = Math.round((input + output) * coeff)
+        val cost = ModelPriceRepo.costOf(model, input, output)
         runCatching {
             transaction {
                 UsageEvents.insert {
@@ -58,7 +57,7 @@ object UsageRepo {
                     it[ts] = Instant.now()
                     it[inputTokens] = input
                     it[outputTokens] = output
-                    it[dirtyTokens] = dirty
+                    it[UsageEvents.cost] = cost
                     it[httpStatus] = status
                     it[UsageEvents.model] = model
                 }
@@ -66,106 +65,69 @@ object UsageRepo {
         }
     }
 
-    /** [clean, dirty] tokens a user has spent since [since]. */
-    fun userTotalsSince(userId: Int, since: Instant): LongArray = transaction {
-        var clean = 0L; var dirty = 0L
-        UsageEvents.selectAll()
-            .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
-            .forEach { clean += it[UsageEvents.inputTokens] + it[UsageEvents.outputTokens]; dirty += it[UsageEvents.dirtyTokens] }
-        longArrayOf(clean, dirty)
+    private fun accumulate(rows: Iterable<org.jetbrains.exposed.sql.ResultRow>): Totals {
+        var req = 0L; var input = 0L; var output = 0L; var cost = 0.0
+        rows.forEach { req += 1; input += it[UsageEvents.inputTokens]; output += it[UsageEvents.outputTokens]; cost += it[UsageEvents.cost] }
+        return Totals(req, input, output, cost)
     }
 
-    /** [requests, clean, dirty] for a user, optionally since an instant. */
     fun userTotals(userId: Int, since: Instant? = null): Totals = transaction {
-        var req = 0L; var input = 0L; var output = 0L; var dirty = 0L
         val q = if (since != null)
             UsageEvents.selectAll().where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
         else UsageEvents.selectAll().where { UsageEvents.userId eq userId }
-        q.forEach { req += 1; input += it[UsageEvents.inputTokens]; output += it[UsageEvents.outputTokens]; dirty += it[UsageEvents.dirtyTokens] }
-        Totals(req, input, output, dirty)
+        accumulate(q)
     }
 
-    /** Per-model usage for a user (all-time). */
     fun userPerModel(userId: Int): List<ModelUsageDto> = transaction {
-        val acc = HashMap<String?, LongArray>()
+        val acc = HashMap<String?, DoubleArray>()  // [requests, clean, cost]
         UsageEvents.selectAll().where { UsageEvents.userId eq userId }.forEach { row ->
-            val a = acc.getOrPut(row[UsageEvents.model]) { LongArray(3) }
-            a[0] += 1; a[1] += row[UsageEvents.inputTokens] + row[UsageEvents.outputTokens]; a[2] += row[UsageEvents.dirtyTokens]
+            val a = acc.getOrPut(row[UsageEvents.model]) { DoubleArray(3) }
+            a[0] += 1; a[1] += (row[UsageEvents.inputTokens] + row[UsageEvents.outputTokens]); a[2] += row[UsageEvents.cost]
         }
-        acc.map { (m, a) -> ModelUsageDto(m, a[0], a[1], a[2]) }.sortedByDescending { it.dirtyTokens }
+        acc.map { (m, a) -> ModelUsageDto(m, a[0].toLong(), a[1].toLong(), a[2]) }.sortedByDescending { it.cost }
     }
 
     fun recentForUser(userId: Int, limit: Int = 100): List<UsageEventDto> = transaction {
         val names = Accounts.selectAll().associate { it[Accounts.id] to it[Accounts.name] }
         UsageEvents.selectAll().where { UsageEvents.userId eq userId }
             .orderBy(UsageEvents.ts, SortOrder.DESC).limit(limit)
-            .map { row ->
-                val aid = row[UsageEvents.accountId]
-                UsageEventDto(
-                    id = row[UsageEvents.id], accountId = aid, accountName = names[aid],
-                    userId = row[UsageEvents.userId], ts = row[UsageEvents.ts].toString(),
-                    inputTokens = row[UsageEvents.inputTokens], outputTokens = row[UsageEvents.outputTokens],
-                    dirtyTokens = row[UsageEvents.dirtyTokens], httpStatus = row[UsageEvents.httpStatus], model = row[UsageEvents.model],
-                )
-            }
+            .map { it.toEventDto(names) }
     }
 
     fun totalsPerAccount(): Map<Int, Totals> = transaction {
-        val acc = HashMap<Int, LongArray>()
-        UsageEvents.selectAll().forEach { row ->
-            val a = acc.getOrPut(row[UsageEvents.accountId]) { LongArray(4) }
-            a[0] += 1; a[1] += row[UsageEvents.inputTokens]; a[2] += row[UsageEvents.outputTokens]; a[3] += row[UsageEvents.dirtyTokens]
-        }
-        acc.mapValues { (_, a) -> Totals(a[0], a[1], a[2], a[3]) }
+        val acc = HashMap<Int, MutableList<org.jetbrains.exposed.sql.ResultRow>>()
+        UsageEvents.selectAll().forEach { acc.getOrPut(it[UsageEvents.accountId]) { mutableListOf() }.add(it) }
+        acc.mapValues { (_, rows) -> accumulate(rows) }
     }
 
-    fun poolTotals(): Totals = transaction {
-        val a = LongArray(4)
-        UsageEvents.selectAll().forEach { row ->
-            a[0] += 1; a[1] += row[UsageEvents.inputTokens]; a[2] += row[UsageEvents.outputTokens]; a[3] += row[UsageEvents.dirtyTokens]
-        }
-        Totals(a[0], a[1], a[2], a[3])
-    }
+    fun poolTotals(): Totals = transaction { accumulate(UsageEvents.selectAll()) }
 
-    /** Wipe usage history for all users (token/request counters + stats). */
     fun clearAll(): Int = transaction { UsageEvents.deleteAll() }
 
-    /** Wipe usage history for one user. */
-    fun clearUser(userId: Int): Int = transaction {
-        UsageEvents.deleteWhere { UsageEvents.userId eq userId }
-    }
+    fun clearUser(userId: Int): Int = transaction { UsageEvents.deleteWhere { UsageEvents.userId eq userId } }
 
     fun recent(limit: Int = 200): List<UsageEventDto> = transaction {
         val names = Accounts.selectAll().associate { it[Accounts.id] to it[Accounts.name] }
-        UsageEvents.selectAll()
-            .orderBy(UsageEvents.ts, SortOrder.DESC)
-            .limit(limit)
-            .map { row ->
-                val aid = row[UsageEvents.accountId]
-                UsageEventDto(
-                    id = row[UsageEvents.id],
-                    accountId = aid,
-                    accountName = names[aid],
-                    userId = row[UsageEvents.userId],
-                    ts = row[UsageEvents.ts].toString(),
-                    inputTokens = row[UsageEvents.inputTokens],
-                    outputTokens = row[UsageEvents.outputTokens],
-                    dirtyTokens = row[UsageEvents.dirtyTokens],
-                    httpStatus = row[UsageEvents.httpStatus],
-                    model = row[UsageEvents.model],
-                )
-            }
+        UsageEvents.selectAll().orderBy(UsageEvents.ts, SortOrder.DESC).limit(limit).map { it.toEventDto(names) }
     }
 
     fun summarySince(since: Instant): List<UsageSummaryDto> = transaction {
         val names = Accounts.selectAll().associate { it[Accounts.id] to it[Accounts.name] }
-        val acc = HashMap<Int, LongArray>() // [requests, input, output, dirty]
-        UsageEvents.selectAll().where { UsageEvents.ts greaterEq since }.forEach { row ->
-            val aid = row[UsageEvents.accountId]
-            val a = acc.getOrPut(aid) { LongArray(4) }
-            a[0] += 1; a[1] += row[UsageEvents.inputTokens]; a[2] += row[UsageEvents.outputTokens]; a[3] += row[UsageEvents.dirtyTokens]
-        }
-        acc.map { (aid, a) -> UsageSummaryDto(aid, names[aid], a[0], a[1], a[2], a[3]) }
-            .sortedByDescending { it.requests }
+        val acc = HashMap<Int, MutableList<org.jetbrains.exposed.sql.ResultRow>>()
+        UsageEvents.selectAll().where { UsageEvents.ts greaterEq since }.forEach { acc.getOrPut(it[UsageEvents.accountId]) { mutableListOf() }.add(it) }
+        acc.map { (aid, rows) ->
+            val t = accumulate(rows)
+            UsageSummaryDto(aid, names[aid], t.requests, t.input, t.output, t.cost)
+        }.sortedByDescending { it.requests }
+    }
+
+    private fun org.jetbrains.exposed.sql.ResultRow.toEventDto(names: Map<Int, String>): UsageEventDto {
+        val aid = this[UsageEvents.accountId]
+        return UsageEventDto(
+            id = this[UsageEvents.id], accountId = aid, accountName = names[aid],
+            userId = this[UsageEvents.userId], ts = this[UsageEvents.ts].toString(),
+            inputTokens = this[UsageEvents.inputTokens], outputTokens = this[UsageEvents.outputTokens],
+            cost = this[UsageEvents.cost], httpStatus = this[UsageEvents.httpStatus], model = this[UsageEvents.model],
+        )
     }
 }

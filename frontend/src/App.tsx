@@ -5,11 +5,11 @@ import { Dashboard } from './pages/Dashboard';
 import { Accounts } from './pages/Accounts';
 import { Users } from './pages/Users';
 import { Tokens } from './pages/Tokens';
-import { TokenRules } from './pages/TokenRules';
+import { ModelPricing } from './pages/ModelPricing';
 import { Stats } from './pages/Stats';
 import { MyStats } from './pages/MyStats';
 
-type View = 'dashboard' | 'accounts' | 'users' | 'tokens' | 'tokenrules' | 'stats' | 'mystats';
+type View = 'dashboard' | 'accounts' | 'users' | 'tokens' | 'pricing' | 'stats' | 'mystats';
 
 interface NavDef {
   key: View;
@@ -23,7 +23,7 @@ const NAV: NavDef[] = [
   { key: 'mystats', label: 'My Stats', perm: 'STATS_VIEW_OWN' },
   { key: 'stats', label: 'Statistics', perm: 'STATS_VIEW' },
   { key: 'tokens', label: 'Proxy Tokens', perm: 'PROXY_USE' },
-  { key: 'tokenrules', label: 'Token Rules', perm: 'ADMIN' },
+  { key: 'pricing', label: 'Model Pricing', perm: 'ADMIN' },
   { key: 'users', label: 'Users & Roles', perm: 'USERS_MANAGE' },
 ];
 
@@ -74,7 +74,7 @@ export function App() {
         {activeView === 'mystats' && <MyStats />}
         {activeView === 'stats' && <Stats />}
         {activeView === 'tokens' && <Tokens />}
-        {activeView === 'tokenrules' && <TokenRules />}
+        {activeView === 'pricing' && <ModelPricing />}
         {activeView === 'users' && <Users isAdmin={has(user, 'ADMIN')} />}
       </div>
     </div>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AccountDto, api, fmtReset, fmtTokens, GroupDto, PoolStats, UserDto, WindowLimitDto } from '../api';
+import { AccountDto, api, fmtReset, fmtTokens, fmtUsd, GroupDto, PoolStats, UserDto, WindowLimitDto } from '../api';
 
 function WindowCell({ w, isApi }: { w: WindowLimitDto | null; isApi: boolean }) {
   if (isApi) return <span className="hint">n/a</span>;
@@ -30,7 +30,6 @@ export function Dashboard() {
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [groups, setGroups] = useState<GroupDto[]>([]);
   const [me, setMe] = useState<UserDto | null>(null);
-  const [tpp, setTpp] = useState(10000);
   const [canViewPool, setCanViewPool] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -38,7 +37,6 @@ export function Dashboard() {
   async function load() {
     try {
       setMe(await api.me().catch(() => null));
-      setTpp((await api.config().catch(() => ({ tokensPerWindowPercent: 10000 }))).tokensPerWindowPercent);
       const s = await api.accounts().catch(() => { setCanViewPool(false); return null; });
       if (s) { setStats(s); setCanViewPool(true); }
       setGroups(await api.groups().catch(() => []));
@@ -67,7 +65,7 @@ export function Dashboard() {
         {canViewPool && <button className="ghost" disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Refreshing…' : '↻ Refresh limits'}</button>}
       </div>
 
-      {me && <MyUsage me={me} tpp={tpp} />}
+      {me && <MyUsage me={me} />}
 
       {!stats ? (canViewPool ? <div className="hint">Loading pool…</div> : null) : (
       <>
@@ -81,8 +79,9 @@ export function Dashboard() {
         </div>
         <div className="card"><div className="label">Total requests</div><div className="value">{stats.totalRequests.toLocaleString()}</div></div>
         <div className="card">
-          <div className="label">Tokens (in / out)</div>
-          <div className="value" style={{ fontSize: 20 }}>{fmtTokens(stats.totalInputTokens)} / {fmtTokens(stats.totalOutputTokens)}</div>
+          <div className="label">Total cost</div>
+          <div className="value">{fmtUsd(stats.totalCost)}</div>
+          <div className="hint">{fmtTokens(stats.totalInputTokens)} in / {fmtTokens(stats.totalOutputTokens)} out</div>
         </div>
         <div className="card">
           <div className="label">Next reset</div>
@@ -97,7 +96,7 @@ export function Dashboard() {
           <thead>
             <tr>
               <th>Prio</th><th>Name</th><th>Group</th><th>Type</th>
-              <th>5-hour</th><th>Weekly</th><th>Coef</th><th>Eff. left</th><th>Tokens in/out</th><th>Status</th>
+              <th>5-hour</th><th>Weekly</th><th>Coef</th><th>Eff. left</th><th>Cost</th><th>Tokens in/out</th><th>Status</th>
             </tr>
           </thead>
           <tbody>
@@ -111,11 +110,12 @@ export function Dashboard() {
                 <td><WindowCell w={a.weekly} isApi={a.type === 'API_KEY'} /></td>
                 <td className="num">×{a.coefficient}</td>
                 <td className="num">{a.effectiveRemaining == null ? '—' : a.effectiveRemaining.toFixed(2)}</td>
+                <td className="num">{fmtUsd(a.totalCost)}</td>
                 <td className="num">{fmtTokens(a.totalInputTokens)} / {fmtTokens(a.totalOutputTokens)}</td>
                 <td>{healthBadge(a)}</td>
               </tr>
             ))}
-            {stats.accounts.length === 0 && <tr><td colSpan={10} className="hint">No accounts yet. Add one on the Accounts page.</td></tr>}
+            {stats.accounts.length === 0 && <tr><td colSpan={11} className="hint">No accounts yet. Add one on the Accounts page.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -125,20 +125,17 @@ export function Dashboard() {
   );
 }
 
-function MyUsage({ me, tpp }: { me: UserDto; tpp: number }) {
-  const basis = me.dailyLimitBasis;
-  const used = basis === 'CLEAN' ? me.todayCleanTokens : me.todayDirtyTokens;
-  const capTokens = me.dailyTokenLimit == null ? null : (basis === 'PERCENT' ? me.dailyTokenLimit * tpp : me.dailyTokenLimit);
-  const frac = capTokens && capTokens > 0 ? Math.min(1, used / capTokens) : 0;
+function MyUsage({ me }: { me: UserDto }) {
+  const cap = me.dailyCostLimit;
+  const frac = cap && cap > 0 ? Math.min(1, me.todayCost / cap) : 0;
   return (
     <div className="cards" style={{ marginTop: 18 }}>
-      <div className="card"><div className="label">You — clean tokens today</div><div className="value" style={{ fontSize: 22 }}>{fmtTokens(me.todayCleanTokens)}</div></div>
-      <div className="card"><div className="label">You — dirty tokens today</div><div className="value" style={{ fontSize: 22 }}>{fmtTokens(me.todayDirtyTokens)}</div><div className="hint">≈ {(me.todayDirtyTokens / tpp).toFixed(1)}% window</div></div>
+      <div className="card"><div className="label">You — spent today</div><div className="value">{fmtUsd(me.todayCost)}</div><div className="hint">{fmtTokens(me.todayInputTokens)} in / {fmtTokens(me.todayOutputTokens)} out</div></div>
       <div className="card" style={{ minWidth: 220 }}>
-        <div className="label">Your daily budget</div>
-        {capTokens == null ? <div className="value" style={{ fontSize: 20 }}>unlimited</div> : (
+        <div className="label">Your daily limit</div>
+        {cap == null ? <div className="value" style={{ fontSize: 20 }}>unlimited</div> : (
           <>
-            <div className="value" style={{ fontSize: 18 }}>{fmtTokens(used)} / {fmtTokens(capTokens)}</div>
+            <div className="value" style={{ fontSize: 18 }}>{fmtUsd(me.todayCost)} / {fmtUsd(cap)}</div>
             <div className="bar" style={{ marginTop: 8 }}><span style={{ width: `${Math.round(frac * 100)}%` }} /></div>
           </>
         )}

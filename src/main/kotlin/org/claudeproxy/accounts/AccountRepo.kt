@@ -51,7 +51,7 @@ data class AccountRuntime(
             effectiveRemaining = effRemaining,
             totalInputTokens = counts.input,
             totalOutputTokens = counts.output,
-            totalDirtyTokens = counts.dirty,
+            totalCost = counts.cost,
             totalRequests = counts.requests,
             clientId = clientId,
             createdAt = createdAt,

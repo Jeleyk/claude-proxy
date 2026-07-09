@@ -8,15 +8,16 @@ export interface UserDto {
   permissions: string[];
   allowedGroups: number[];
   allGroups: boolean;
-  dailyTokenLimit: number | null;
-  dailyLimitBasis: string; // CLEAN | DIRTY | PERCENT
-  todayCleanTokens: number;
-  todayDirtyTokens: number;
+  dailyCostLimit: number | null;
+  todayCost: number;
+  todayInputTokens: number;
+  todayOutputTokens: number;
 }
 
-export interface ModelCoeff {
+export interface ModelPrice {
   pattern: string;
-  coefficient: number;
+  inputPrice: number;
+  outputPrice: number;
 }
 
 export interface WindowLimitDto {
@@ -45,7 +46,7 @@ export interface AccountDto {
   effectiveRemaining: number | null;
   totalInputTokens: number;
   totalOutputTokens: number;
-  totalDirtyTokens: number;
+  totalCost: number;
   totalRequests: number;
   clientId: string | null;
   createdAt: string;
@@ -59,7 +60,7 @@ export interface PoolStats {
   totalEffectiveCapacity: number;
   totalInputTokens: number;
   totalOutputTokens: number;
-  totalDirtyTokens: number;
+  totalCost: number;
   totalRequests: number;
   nextFiveHourReset: string | null;
   nextWeeklyReset: string | null;
@@ -102,11 +103,10 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 }
 
 export const api = {
-  config: () => req<{ publicBaseUrl: string; tokensPerWindowPercent: number }>('GET', '/api/config'),
-  updateSettings: (b: unknown) => req<{ publicBaseUrl: string; tokensPerWindowPercent: number }>('PATCH', '/api/settings', b),
-  modelCoeffs: () => req<ModelCoeff[]>('GET', '/api/model-coeffs'),
-  setModelCoeff: (pattern: string, coefficient: number) => req<ModelCoeff[]>('POST', '/api/model-coeffs', { pattern, coefficient }),
-  deleteModelCoeff: (pattern: string) => req<ModelCoeff[]>('DELETE', `/api/model-coeffs/${encodeURIComponent(pattern)}`),
+  config: () => req<{ publicBaseUrl: string }>('GET', '/api/config'),
+  modelPrices: () => req<ModelPrice[]>('GET', '/api/model-prices'),
+  setModelPrice: (pattern: string, inputPrice: number, outputPrice: number) => req<ModelPrice[]>('POST', '/api/model-prices', { pattern, inputPrice, outputPrice }),
+  deleteModelPrice: (pattern: string) => req<ModelPrice[]>('DELETE', `/api/model-prices/${encodeURIComponent(pattern)}`),
 
   login: (username: string, password: string) =>
     req<UserDto>('POST', '/api/auth/login', { username, password }),
@@ -148,16 +148,23 @@ export const api = {
   resetMyStats: () => req<{ message: string }>('POST', '/api/stats/mine/reset'),
 };
 
-export interface ModelUsage { model: string | null; requests: number; cleanTokens: number; dirtyTokens: number; }
-export interface MyStatsEvent { id: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; dirtyTokens: number; httpStatus: number; model: string | null; }
+export interface ModelUsage { model: string | null; requests: number; cleanTokens: number; cost: number; }
+export interface MyStatsEvent { id: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; cost: number; httpStatus: number; model: string | null; }
 export interface MyStats {
-  todayClean: number; todayDirty: number; todayRequests: number;
-  totalClean: number; totalDirty: number; totalRequests: number;
+  todayCost: number; todayClean: number; todayRequests: number;
+  totalCost: number; totalClean: number; totalRequests: number;
   perModel: ModelUsage[]; recent: MyStatsEvent[];
 }
 
 export function has(user: UserDto | null, perm: string): boolean {
   return !!user && user.permissions.includes(perm);
+}
+
+export function fmtUsd(n: number): string {
+  if (n === 0) return '$0';
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  if (n < 1) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
 }
 
 export function fmtTokens(n: number): string {

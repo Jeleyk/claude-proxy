@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api';
+import { api, fmtUsd } from '../api';
 
-interface Summary { accountId: number; accountName: string | null; requests: number; inputTokens: number; outputTokens: number; dirtyTokens: number; }
-interface Event { id: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; dirtyTokens: number; httpStatus: number; model: string | null; }
+interface Summary { accountId: number; accountName: string | null; requests: number; inputTokens: number; outputTokens: number; cost: number; }
+interface Event { id: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; cost: number; httpStatus: number; model: string | null; }
 
 export function Stats() {
   const [summary, setSummary] = useState<Summary[]>([]);
@@ -34,7 +34,7 @@ export function Stats() {
       <h2>Per account (24h)</h2>
       <div className="tablewrap">
         <table>
-          <thead><tr><th>Account</th><th>Requests</th><th>Input</th><th>Output</th><th>Clean</th><th>Dirty</th></tr></thead>
+          <thead><tr><th>Account</th><th>Requests</th><th>Input</th><th>Output</th><th>Cost</th></tr></thead>
           <tbody>
             {summary.map((s) => (
               <tr key={s.accountId}>
@@ -42,11 +42,10 @@ export function Stats() {
                 <td className="num">{s.requests}</td>
                 <td className="num">{s.inputTokens.toLocaleString()}</td>
                 <td className="num">{s.outputTokens.toLocaleString()}</td>
-                <td className="num">{(s.inputTokens + s.outputTokens).toLocaleString()}</td>
-                <td className="num">{s.dirtyTokens.toLocaleString()}</td>
+                <td className="num">{fmtUsd(s.cost)}</td>
               </tr>
             ))}
-            {summary.length === 0 && <tr><td colSpan={6} className="hint">No usage yet.</td></tr>}
+            {summary.length === 0 && <tr><td colSpan={5} className="hint">No usage yet.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -54,7 +53,7 @@ export function Stats() {
       <h2>Recent requests</h2>
       <div className="tablewrap">
         <table>
-          <thead><tr><th>Time</th><th>Account</th><th>Model</th><th>In</th><th>Out</th><th>Dirty</th><th>Status</th></tr></thead>
+          <thead><tr><th>Time</th><th>Account</th><th>Model</th><th>In</th><th>Out</th><th>Cost</th><th>Status</th></tr></thead>
           <tbody>
             {recent.map((e) => (
               <tr key={e.id}>
@@ -63,7 +62,7 @@ export function Stats() {
                 <td className="hint">{e.model ?? '—'}</td>
                 <td className="num">{e.inputTokens}</td>
                 <td className="num">{e.outputTokens}</td>
-                <td className="num">{e.dirtyTokens}</td>
+                <td className="num">{fmtUsd(e.cost)}</td>
                 <td>{statusBadge(e.httpStatus)}</td>
               </tr>
             ))}

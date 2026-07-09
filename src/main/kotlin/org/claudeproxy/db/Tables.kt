@@ -8,10 +8,8 @@ object Users : Table("users") {
     val username = varchar("username", 128).uniqueIndex()
     val passwordHash = varchar("password_hash", 256)
     val enabled = bool("enabled").default(true)
-    // optional per-day budget. Interpreted per `dailyLimitBasis`. null = unlimited.
-    val dailyTokenLimit = long("daily_token_limit").nullable()
-    // CLEAN (raw tokens) | DIRTY (model-weighted tokens) | PERCENT (% of a normal window)
-    val dailyLimitBasis = varchar("daily_limit_basis", 16).default("DIRTY")
+    // optional per-day spend limit in USD. null = unlimited.
+    val dailyCostLimit = double("daily_cost_limit").nullable()
     val createdAt = timestamp("created_at")
     override val primaryKey = PrimaryKey(id)
 }
@@ -23,10 +21,11 @@ object Settings : Table("settings") {
     override val primaryKey = PrimaryKey(key)
 }
 
-/** Per-model dirty-token multipliers, matched by substring of the request model id. */
-object ModelCoeffs : Table("model_coeffs") {
+/** Per-model pricing ($ per million tokens), matched by substring of the request model id. */
+object ModelPrices : Table("model_prices") {
     val pattern = varchar("pattern", 64)   // e.g. "haiku", "sonnet", "opus"
-    val coefficient = double("coefficient").default(1.0)
+    val inputPrice = double("input_price").default(0.0)    // USD per 1M input tokens
+    val outputPrice = double("output_price").default(0.0)  // USD per 1M output tokens
     override val primaryKey = PrimaryKey(pattern)
 }
 
@@ -118,8 +117,8 @@ object UsageEvents : Table("usage_events") {
     val ts = timestamp("ts")
     val inputTokens = long("input_tokens").default(0)
     val outputTokens = long("output_tokens").default(0)
-    // (input+output) weighted by the model coefficient at record time
-    val dirtyTokens = long("dirty_tokens").default(0)
+    // computed USD cost of this request from model pricing at record time
+    val cost = double("cost").default(0.0)
     val httpStatus = integer("http_status").default(0)
     val model = varchar("model", 128).nullable()
     override val primaryKey = PrimaryKey(id)
@@ -134,7 +133,7 @@ object OAuthAddSessions : Table("oauth_add_sessions") {
 }
 
 val ALL_TABLES = arrayOf(
-    Users, Settings, ModelCoeffs, Roles, RolePermissions, UserRoles, ProxyTokens,
+    Users, Settings, ModelPrices, Roles, RolePermissions, UserRoles, ProxyTokens,
     AccountGroups, UserGroupAccess,
     Accounts, AccountSecrets, AccountLimits, UsageEvents, OAuthAddSessions,
 )

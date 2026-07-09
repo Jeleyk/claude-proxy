@@ -65,21 +65,16 @@ class ProxyEngine(
             return
         }
 
-        // Per-user daily budget (clean tokens / dirty tokens / % of window).
-        val (limitValue, basis) = UserRepo.dailyLimitOf(userId)
-        if (limitValue != null) {
-            val today = UsageRepo.userTotalsSince(userId, UserRepo.startOfUtcDay())
-            val (used, cap, unit) = when (basis) {
-                "CLEAN" -> Triple(today[0], limitValue, "clean tokens")
-                "PERCENT" -> Triple(today[1], SettingsRepo.percentToTokens(limitValue.toDouble()), "% window")
-                else -> Triple(today[1], limitValue, "tokens")   // DIRTY
-            }
-            if (used >= cap) {
-                call.response.headers.append("x-claude-proxy-daily-limit", cap.toString())
-                call.response.headers.append("x-claude-proxy-daily-used", used.toString())
+        // Per-user daily spend limit in USD.
+        val costLimit = UserRepo.dailyLimitOf(userId)
+        if (costLimit != null) {
+            val usedCost = UsageRepo.userTotals(userId, UserRepo.startOfUtcDay()).cost
+            if (usedCost >= costLimit) {
+                call.response.headers.append("x-claude-proxy-daily-limit-usd", costLimit.toString())
+                call.response.headers.append("x-claude-proxy-daily-used-usd", usedCost.toString())
                 call.respond(
                     HttpStatusCode.TooManyRequests,
-                    ProxyError(ProxyErrorBody("rate_limit_error", "Daily budget reached ($used/$cap $unit); resets at 00:00 UTC")),
+                    ProxyError(ProxyErrorBody("rate_limit_error", "Daily spend limit reached ($%.4f/$%.4f); resets at 00:00 UTC".format(usedCost, costLimit))),
                 )
                 return
             }
