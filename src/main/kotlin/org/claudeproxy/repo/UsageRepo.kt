@@ -84,11 +84,29 @@ object UsageRepo {
         return Totals(req, input, output, cr, cw, cost)
     }
 
-    fun userTotals(userId: Int, since: Instant? = null): Totals = transaction {
+    /** Ids of personal (owner-scoped) accounts; their usage is excluded from global stats. */
+    private fun personalAccountIds(): Set<Int> =
+        Accounts.selectAll().mapNotNull { row -> row[Accounts.id].takeIf { row[Accounts.ownerId] != null } }.toSet()
+
+    /**
+     * Totals for one user. [globalOnly] excludes usage that went through the user's own
+     * personal accounts — used for the daily-limit check, which governs only shared-pool spend.
+     */
+    fun userTotals(userId: Int, since: Instant? = null, globalOnly: Boolean = false): Totals = transaction {
+        val personal = if (globalOnly) personalAccountIds() else emptySet()
         val q = if (since != null)
             UsageEvents.selectAll().where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
         else UsageEvents.selectAll().where { UsageEvents.userId eq userId }
-        accumulate(q)
+        accumulate(if (personal.isEmpty()) q else q.filter { it[UsageEvents.accountId] !in personal })
+    }
+
+    /** Per-account totals for a specific set of accounts (used by the personal "My Accounts" view). */
+    fun totalsForAccounts(ids: Set<Int>): Map<Int, Totals> = transaction {
+        if (ids.isEmpty()) return@transaction emptyMap()
+        val acc = HashMap<Int, MutableList<ResultRow>>()
+        UsageEvents.selectAll().where { UsageEvents.accountId inList ids }
+            .forEach { acc.getOrPut(it[UsageEvents.accountId]) { mutableListOf() }.add(it) }
+        acc.mapValues { (_, rows) -> accumulate(rows) }
     }
 
     fun userPerModel(userId: Int): List<ModelUsageDto> = transaction {
@@ -109,19 +127,30 @@ object UsageRepo {
     }
 
     fun totalsPerAccount(): Map<Int, Totals> = transaction {
+        val personal = personalAccountIds()
         val acc = HashMap<Int, MutableList<ResultRow>>()
-        UsageEvents.selectAll().forEach { acc.getOrPut(it[UsageEvents.accountId]) { mutableListOf() }.add(it) }
+        UsageEvents.selectAll().forEach {
+            val aid = it[UsageEvents.accountId]
+            if (aid in personal) return@forEach
+            acc.getOrPut(aid) { mutableListOf() }.add(it)
+        }
         acc.mapValues { (_, rows) -> accumulate(rows) }
     }
 
-    fun poolTotals(): Totals = transaction { accumulate(UsageEvents.selectAll()) }
+    fun poolTotals(): Totals = transaction {
+        val personal = personalAccountIds()
+        accumulate(if (personal.isEmpty()) UsageEvents.selectAll()
+                   else UsageEvents.selectAll().filter { it[UsageEvents.accountId] !in personal })
+    }
 
-    /** Daily (account, day) buckets in [start, end), bucketed by UTC date. */
+    /** Daily (account, day) buckets in [start, end), bucketed by UTC date. Excludes personal accounts. */
     fun dailyBuckets(start: Instant, end: Instant): List<DailyBucketDto> = transaction {
+        val personal = personalAccountIds()
         val acc = HashMap<Pair<Int, String>, DoubleArray>() // (accountId, date) -> [cost, requests, tokens]
         UsageEvents.selectAll()
             .where { (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
             .forEach { row ->
+                if (row[UsageEvents.accountId] in personal) return@forEach
                 val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
                 val a = acc.getOrPut(row[UsageEvents.accountId] to date) { DoubleArray(3) }
                 a[0] += row[UsageEvents.cost]
@@ -131,12 +160,14 @@ object UsageRepo {
         acc.map { (k, a) -> DailyBucketDto(k.first, k.second, a[0], a[1].toLong(), a[2].toLong()) }
     }
 
-    /** Daily (account, model, day) token buckets in [start, end), bucketed by UTC date, kinds kept apart. */
+    /** Daily (account, model, day) token buckets in [start, end), bucketed by UTC date, kinds kept apart. Excludes personal accounts. */
     fun tokenBuckets(start: Instant, end: Instant): List<TokenBucketDto> = transaction {
+        val personal = personalAccountIds()
         val acc = HashMap<Triple<Int, String?, String>, LongArray>() // (accountId, model, date) -> [in, out, cacheRead, cacheWrite]
         UsageEvents.selectAll()
             .where { (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
             .forEach { row ->
+                if (row[UsageEvents.accountId] in personal) return@forEach
                 val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
                 val a = acc.getOrPut(Triple(row[UsageEvents.accountId], row[UsageEvents.model], date)) { LongArray(4) }
                 a[0] += row[UsageEvents.inputTokens]
@@ -152,13 +183,21 @@ object UsageRepo {
 
     fun recent(limit: Int = 200): List<UsageEventDto> = transaction {
         val names = accountNames()
-        UsageEvents.selectAll().orderBy(UsageEvents.ts, SortOrder.DESC).limit(limit).map { it.toEventDto(names) }
+        val personal = personalAccountIds()
+        val base = UsageEvents.selectAll()
+        val q = if (personal.isEmpty()) base else base.where { UsageEvents.accountId notInList personal }
+        q.orderBy(UsageEvents.ts, SortOrder.DESC).limit(limit).map { it.toEventDto(names) }
     }
 
     fun summarySince(since: Instant): List<UsageSummaryDto> = transaction {
         val names = accountNames()
+        val personal = personalAccountIds()
         val acc = HashMap<Int, MutableList<ResultRow>>()
-        UsageEvents.selectAll().where { UsageEvents.ts greaterEq since }.forEach { acc.getOrPut(it[UsageEvents.accountId]) { mutableListOf() }.add(it) }
+        UsageEvents.selectAll().where { UsageEvents.ts greaterEq since }.forEach {
+            val aid = it[UsageEvents.accountId]
+            if (aid in personal) return@forEach
+            acc.getOrPut(aid) { mutableListOf() }.add(it)
+        }
         acc.map { (aid, rows) ->
             val t = accumulate(rows)
             UsageSummaryDto(aid, names[aid], t.requests, t.input, t.output, t.cost)

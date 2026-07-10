@@ -65,33 +65,34 @@ class ProxyEngine(
         // Requests that don't consume subscription quota (token counting, model listing)
         // should always work if any account exists — no limit checks, ignore rate-limit.
         if (isFreePath(pathAndQuery)) {
-            val account = pool.selectAny(allowedGroups)
-            if (account == null) { respondNoAccount(call, allowedGroups); return }
+            val account = pool.selectAny(userId, allowedGroups)
+            if (account == null) { respondNoAccount(call, userId, allowedGroups); return }
             forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = false)
             return
         }
 
-        // Per-user daily spend limit in USD.
+        // Per-user daily spend limit in USD. Personal-account usage is the user's own quota
+        // and does not count toward this shared-pool limit. When the shared limit is reached
+        // the user may still route through their own personal accounts (their own quota).
         val costLimit = UserRepo.dailyLimitOf(userId)
-        if (costLimit != null) {
-            val usedCost = UsageRepo.userTotals(userId, UserRepo.startOfUtcDay()).cost
-            if (usedCost >= costLimit) {
-                call.response.headers.append("x-claude-proxy-daily-limit-usd", costLimit.toString())
-                call.response.headers.append("x-claude-proxy-daily-used-usd", usedCost.toString())
-                call.respond(
-                    HttpStatusCode.TooManyRequests,
-                    ProxyError(ProxyErrorBody("rate_limit_error", "Daily spend limit reached ($%.4f/$%.4f); resets at 00:00 UTC".format(usedCost, costLimit))),
-                )
-                return
-            }
-        }
+        val usedCost = if (costLimit != null) UsageRepo.userTotals(userId, UserRepo.startOfUtcDay(), globalOnly = true).cost else 0.0
+        val overLimit = costLimit != null && usedCost >= costLimit
 
         // Try accounts in order; every account except the last may retry to the next one.
         // The last account's real upstream response (incl. 429/5xx + retry-after) is passed
         // straight through to the client, so Claude Code sees the true status and backoff.
-        val order = pool.selectionOrder(allowedGroups)
+        val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups)
         if (order.isEmpty()) {
-            respondNoAccount(call, allowedGroups)
+            if (overLimit) {
+                call.response.headers.append("x-claude-proxy-daily-limit-usd", costLimit.toString())
+                call.response.headers.append("x-claude-proxy-daily-used-usd", usedCost.toString())
+                call.respond(
+                    HttpStatusCode.TooManyRequests,
+                    ProxyError(ProxyErrorBody("rate_limit_error", "Daily spend limit reached ($%.4f/$%.4f); resets at 00:00 UTC. Add a personal account to keep working.".format(usedCost, costLimit ?: 0.0))),
+                )
+            } else {
+                respondNoAccount(call, userId, allowedGroups)
+            }
             return
         }
         for ((i, account) in order.withIndex()) {
@@ -111,8 +112,8 @@ class ProxyEngine(
     }
 
     /** No usable account at all (none enabled/healthy in scope, or all hard rate-limited). */
-    private suspend fun respondNoAccount(call: ApplicationCall, allowedGroups: Set<Int>?) {
-        val a = pool.availability(allowedGroups)
+    private suspend fun respondNoAccount(call: ApplicationCall, userId: Int, allowedGroups: Set<Int>?) {
+        val a = pool.availability(userId, allowedGroups)
         if (a.lostAccess > 0 && a.rateLimited == 0 && a.healthy == 0) {
             call.respond(
                 HttpStatusCode.fromValue(529),

@@ -36,6 +36,7 @@ export interface AccountDto {
   name: string;
   type: string;
   groupId: number | null;
+  ownerId: number | null;
   priority: number;
   threshold: number;
   coefficient: number;
@@ -127,6 +128,21 @@ export const api = {
   refreshAll: () => req<PoolStats>('POST', '/api/accounts/refresh-limits'),
   oauthStart: () => req<{ authorizeUrl: string; state: string }>('POST', '/api/accounts/oauth/start'),
   oauthComplete: (b: unknown) => req<PoolStats>('POST', '/api/accounts/oauth/complete', b),
+
+  // personal (per-user) accounts — tried before the global pool, excluded from global stats
+  myAccounts: () => req<PoolStats>('GET', '/api/my/accounts'),
+  createMyAccount: (b: unknown) => req<PoolStats>('POST', '/api/my/accounts', b),
+  updateMyAccount: (id: number, b: unknown) => req<PoolStats>('PATCH', `/api/my/accounts/${id}`, b),
+  deleteMyAccount: (id: number) => req<unknown>('DELETE', `/api/my/accounts/${id}`),
+  refreshMyOne: (id: number) => req<PoolStats>('POST', `/api/my/accounts/${id}/refresh-limits`),
+  refreshMyAll: () => req<PoolStats>('POST', '/api/my/accounts/refresh-limits'),
+  myOauthStart: () => req<{ authorizeUrl: string; state: string }>('POST', '/api/my/accounts/oauth/start'),
+  myOauthComplete: (b: unknown) => req<PoolStats>('POST', '/api/my/accounts/oauth/complete', b),
+
+  // admin oversight of a user's personal accounts
+  userAccounts: (uid: number) => req<PoolStats>('GET', `/api/users/${uid}/accounts`),
+  updateUserAccount: (uid: number, id: number, b: unknown) => req<PoolStats>('PATCH', `/api/users/${uid}/accounts/${id}`, b),
+  deleteUserAccount: (uid: number, id: number) => req<PoolStats>('DELETE', `/api/users/${uid}/accounts/${id}`),
 
   groups: () => req<GroupDto[]>('GET', '/api/groups'),
   createGroup: (name: string) => req<GroupDto[]>('POST', '/api/groups', { name }),

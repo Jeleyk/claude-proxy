@@ -169,3 +169,117 @@ export function CodeBlock({ text }: { text: string }) {
     </div>
   );
 }
+
+/* ---------------------------------------------------------------- OS icons
+   Filled brand glyphs (fill=currentColor) — logos read cleaner filled than the
+   stroke-based Icon set, so they get their own component. */
+const OS_ICON: Record<string, ReactNode> = {
+  windows: (<><rect x="3" y="4" width="8" height="8" rx="0.5" /><rect x="13" y="4" width="8" height="8" rx="0.5" /><rect x="3" y="14" width="8" height="8" rx="0.5" /><rect x="13" y="14" width="8" height="8" rx="0.5" /></>),
+  mac: (<path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701" />),
+  linux: (<>
+    <ellipse cx="9.4" cy="20.4" rx="1.8" ry="0.85" />
+    <ellipse cx="14.6" cy="20.4" rx="1.8" ry="0.85" />
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 3C9 3 7.5 5.2 7.5 7.6c0 1.2.3 2 .3 2.8 0 1.6-1.8 3.1-1.8 6 0 2.5 2.4 4.1 6 4.1s6-1.6 6-4.1c0-2.9-1.8-4.4-1.8-6 0-.8.3-1.6.3-2.8C16.5 5.2 15 3 12 3zm-1.4 3.8a.85.9 0 1 1 0 1.8.85.9 0 0 1 0-1.8zm2.8 0a.85.9 0 1 1 0 1.8.85.9 0 0 1 0-1.8zM12 8.2l1 1-1 1-1-1 1-1z" />
+  </>),
+};
+
+export function OsIcon({ name, size = 16 }: { name: string; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      {OS_ICON[name] ?? null}
+    </svg>
+  );
+}
+
+/* ---------------------------------------------------------------- connect scripts
+   OS-aware setup snippets for Claude Code. Auto-detects the current OS for the
+   default tab; the choice is manual + remembered. `token` may be a real cxp_...
+   or a placeholder; `wrapper` adds the persistent claude-proxy install. */
+export type Os = 'mac' | 'linux' | 'windows';
+export type WinShell = 'powershell' | 'cmd';
+const OS_KEY = 'cp-os';
+const WINSHELL_KEY = 'cp-winshell';
+
+export function detectOs(): Os {
+  try {
+    const uaData = (navigator as unknown as { userAgentData?: { platform?: string } }).userAgentData;
+    const p = (uaData?.platform || navigator.platform || navigator.userAgent || '').toLowerCase();
+    if (/win/.test(p)) return 'windows';
+    if (/mac|iphone|ipad|ipod/.test(p)) return 'mac';
+    return 'linux';
+  } catch { return 'linux'; }
+}
+function storedOs(): Os {
+  try { const v = localStorage.getItem(OS_KEY); if (v === 'mac' || v === 'linux' || v === 'windows') return v; } catch { /* ignore */ }
+  return detectOs();
+}
+function storedWinShell(): WinShell {
+  try { const v = localStorage.getItem(WINSHELL_KEY); if (v === 'powershell' || v === 'cmd') return v; } catch { /* ignore */ }
+  return 'powershell';
+}
+
+const unixEnvRun = (base: string, t: string) =>
+  `export ANTHROPIC_BASE_URL=${base}\nexport ANTHROPIC_AUTH_TOKEN=${t}\nclaude`;
+const unixWrapper = (base: string, t: string) =>
+  `mkdir -p ~/.local/bin && cat > ~/.local/bin/claude-proxy <<'EOF'\n` +
+  `#!/usr/bin/env bash\n` +
+  `ANTHROPIC_BASE_URL="${base}" ANTHROPIC_AUTH_TOKEN="${t}" exec claude "$@"\n` +
+  `EOF\n` +
+  `chmod +x ~/.local/bin/claude-proxy && echo 'Installed. Run: claude-proxy [claude args]'`;
+const psEnvRun = (base: string, t: string) =>
+  `$env:ANTHROPIC_BASE_URL="${base}"\n$env:ANTHROPIC_AUTH_TOKEN="${t}"\nclaude`;
+const psWrapper = (base: string, t: string) =>
+  `if (!(Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }\n` +
+  `Add-Content $PROFILE 'function claude-proxy { $env:ANTHROPIC_BASE_URL="${base}"; $env:ANTHROPIC_AUTH_TOKEN="${t}"; claude @args }'\n` +
+  `. $PROFILE; Write-Host 'Installed. Run: claude-proxy [claude args]'`;
+const cmdEnvRun = (base: string, t: string) =>
+  `set ANTHROPIC_BASE_URL=${base}\nset ANTHROPIC_AUTH_TOKEN=${t}\nclaude`;
+
+export function ConnectScripts({ base, token, wrapper = false }: { base: string; token: string; wrapper?: boolean }) {
+  const [os, setOs] = useState<Os>(storedOs);
+  const [win, setWin] = useState<WinShell>(storedWinShell);
+  const pickOs = (v: Os) => { setOs(v); try { localStorage.setItem(OS_KEY, v); } catch { /* ignore */ } };
+  const pickWin = (v: WinShell) => { setWin(v); try { localStorage.setItem(WINSHELL_KEY, v); } catch { /* ignore */ } };
+
+  let envRun: string;
+  let wrap: string | null = null;
+  let winCmdNote = false;
+  if (os === 'windows') {
+    if (win === 'powershell') { envRun = psEnvRun(base, token); if (wrapper) wrap = psWrapper(base, token); }
+    else { envRun = cmdEnvRun(base, token); winCmdNote = wrapper; }
+  } else {
+    envRun = unixEnvRun(base, token);
+    if (wrapper) wrap = unixWrapper(base, token);
+  }
+
+  return (
+    <div className="connect">
+      <div className="connect-tabs">
+        <Segmented<Os> className="ostabs" value={os} onChange={pickOs} options={[
+          { value: 'windows', label: <><OsIcon name="windows" /><span>Windows</span></> },
+          { value: 'mac', label: <><OsIcon name="mac" /><span>macOS</span></> },
+          { value: 'linux', label: <><OsIcon name="linux" /><span>Linux</span></> },
+        ]} />
+        {os === 'windows' && (
+          <Segmented<WinShell> className="winshell" value={win} onChange={pickWin} options={[
+            { value: 'powershell', label: 'PowerShell' },
+            { value: 'cmd', label: 'CMD' },
+          ]} />
+        )}
+      </div>
+
+      <p className="hint" style={{ marginBottom: 4 }}>Set the variables and run:</p>
+      <CodeBlock text={envRun} />
+
+      {wrap && (
+        <>
+          <p className="hint" style={{ marginBottom: 4 }}>Or install a persistent <span className="mono">claude-proxy</span> command (paste once, then run <span className="mono">claude-proxy [args]</span>):</p>
+          <CodeBlock text={wrap} />
+        </>
+      )}
+      {winCmdNote && (
+        <p className="hint" style={{ marginTop: 8 }}>The persistent <span className="mono">claude-proxy</span> command is available on the PowerShell tab.</p>
+      )}
+    </div>
+  );
+}

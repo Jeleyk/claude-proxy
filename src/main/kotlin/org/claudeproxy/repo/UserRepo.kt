@@ -73,7 +73,8 @@ object UserRepo {
 
     private fun toDto(uid: Int, username: String, enabled: Boolean, dailyCostLimit: Double?): UserDto {
         val perms = permissionsOf(uid)
-        val today = UsageRepo.userTotals(uid, startOfUtcDay())
+        // "today" here reflects shared-pool spend (what the daily limit governs); personal-account usage is excluded.
+        val today = UsageRepo.userTotals(uid, startOfUtcDay(), globalOnly = true)
         return UserDto(
             id = uid,
             username = username,
@@ -138,6 +139,12 @@ object UserRepo {
         org.claudeproxy.db.ProxyTokens.deleteWhere { org.claudeproxy.db.ProxyTokens.userId eq userId }
         org.claudeproxy.db.UsageEvents.update({ org.claudeproxy.db.UsageEvents.userId eq userId }) {
             it[org.claudeproxy.db.UsageEvents.userId] = null
+        }
+        // delete this user's personal accounts (their secrets/limits/usage cascade off Accounts)
+        org.claudeproxy.db.Accounts.deleteWhere { org.claudeproxy.db.Accounts.ownerId eq userId }
+        // detach global accounts this user created so the users row can be removed (Postgres FK)
+        org.claudeproxy.db.Accounts.update({ org.claudeproxy.db.Accounts.createdBy eq userId }) {
+            it[org.claudeproxy.db.Accounts.createdBy] = null
         }
         UserGroupAccess.deleteWhere { UserGroupAccess.userId eq userId }
         UserRoles.deleteWhere { UserRoles.userId eq userId }

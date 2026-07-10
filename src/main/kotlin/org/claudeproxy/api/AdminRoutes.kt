@@ -62,8 +62,10 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
         }
         authRoutes()
         accountRoutes(pool, probe)
+        myAccountRoutes(pool, probe)
         groupRoutes(pool)
         userRoutes()
+        userAccountRoutes(pool, probe)
         roleRoutes()
         proxyTokenRoutes()
         statsRoutes()
@@ -74,32 +76,62 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
 
 private fun userToDto(user: org.claudeproxy.repo.UserAuth): UserDto = UserRepo.get(user.id)!!
 
-private suspend fun buildPoolStats(pool: AccountPool): PoolStatsDto {
-    val createdAt = AccountRepo.createdAtMap()
-    val runtimes = pool.snapshot()
-    val perAcc = UsageRepo.totalsPerAccount()
-    val accounts = runtimes.map { rt ->
-        val counts = perAcc[rt.id] ?: Totals()
-        rt.toDto(createdAt[rt.id]?.toString() ?: Instant.now().toString(), counts)
-    }
-    val healthy = runtimes.count { it.enabled && it.health == org.claudeproxy.model.AccountHealth.OK }
-    val effRemaining = accounts.sumOf { it.effectiveRemaining ?: 0.0 }
-    val effCapacity = runtimes.sumOf { it.coefficient }
-    val pt = UsageRepo.poolTotals()
-    return PoolStatsDto(
-        totalAccounts = runtimes.size,
-        healthyAccounts = healthy,
+/** Global (shared-pool) stats — personal accounts are excluded everywhere. */
+private suspend fun buildPoolStats(pool: AccountPool): PoolStatsDto =
+    assembleStats(
+        runtimes = pool.snapshotGlobal(),
+        perAcc = UsageRepo.totalsPerAccount(),
+        poolWide = UsageRepo.poolTotals(),
         activeAccountId = pool.activeAccountId,
-        totalEffectiveRemaining = effRemaining,
-        totalEffectiveCapacity = effCapacity,
-        totalRequests = pt.requests,
-        totalInputTokens = pt.input,
-        totalOutputTokens = pt.output,
-        totalCacheReadTokens = pt.cacheRead,
-        totalCacheWriteTokens = pt.cacheWrite,
-        totalCost = pt.cost,
         nextFiveHourReset = pool.nextReset(WindowKind.FIVE_HOUR)?.toString(),
         nextWeeklyReset = pool.nextReset(WindowKind.WEEKLY)?.toString(),
+    )
+
+/** Stats for one user's personal accounts (the "My Accounts" view + admin oversight). */
+private suspend fun buildOwnedStats(pool: AccountPool, userId: Int): PoolStatsDto {
+    val runtimes = pool.snapshotOwned(userId)
+    val ids = runtimes.map { it.id }.toSet()
+    val perAcc = UsageRepo.totalsForAccounts(ids)
+    val poolWide = perAcc.values.fold(Totals()) { a, b ->
+        Totals(a.requests + b.requests, a.input + b.input, a.output + b.output,
+            a.cacheRead + b.cacheRead, a.cacheWrite + b.cacheWrite, a.cost + b.cost)
+    }
+    return assembleStats(
+        runtimes = runtimes,
+        perAcc = perAcc,
+        poolWide = poolWide,
+        activeAccountId = pool.activeAccountId.takeIf { it in ids },
+        nextFiveHourReset = pool.nextResetOwned(userId, WindowKind.FIVE_HOUR)?.toString(),
+        nextWeeklyReset = pool.nextResetOwned(userId, WindowKind.WEEKLY)?.toString(),
+    )
+}
+
+private fun assembleStats(
+    runtimes: List<org.claudeproxy.accounts.AccountRuntime>,
+    perAcc: Map<Int, Totals>,
+    poolWide: Totals,
+    activeAccountId: Int?,
+    nextFiveHourReset: String?,
+    nextWeeklyReset: String?,
+): PoolStatsDto {
+    val createdAt = AccountRepo.createdAtMap()
+    val accounts = runtimes.map { rt ->
+        rt.toDto(createdAt[rt.id]?.toString() ?: Instant.now().toString(), perAcc[rt.id] ?: Totals())
+    }
+    return PoolStatsDto(
+        totalAccounts = runtimes.size,
+        healthyAccounts = runtimes.count { it.enabled && it.health == org.claudeproxy.model.AccountHealth.OK },
+        activeAccountId = activeAccountId,
+        totalEffectiveRemaining = accounts.sumOf { it.effectiveRemaining ?: 0.0 },
+        totalEffectiveCapacity = runtimes.sumOf { it.coefficient },
+        totalRequests = poolWide.requests,
+        totalInputTokens = poolWide.input,
+        totalOutputTokens = poolWide.output,
+        totalCacheReadTokens = poolWide.cacheRead,
+        totalCacheWriteTokens = poolWide.cacheWrite,
+        totalCost = poolWide.cost,
+        nextFiveHourReset = nextFiveHourReset,
+        nextWeeklyReset = nextWeeklyReset,
         accounts = accounts,
     )
 }
@@ -222,6 +254,125 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
         } catch (e: Exception) {
             call.respond(HttpStatusCode.BadGateway, MessageResponse("OAuth exchange failed: ${e.message}"))
         }
+    }
+}
+
+// ---- personal accounts (per-user, requires accounts.own.manage) ----
+
+private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
+    get("/my/accounts") {
+        val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
+        call.respond(buildOwnedStats(pool, user.id))
+    }
+    post("/my/accounts") {
+        val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
+        val req = call.receive<CreateAccountRequest>()
+        val type = AccountType.fromString(req.type)
+            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Unknown type ${req.type}"))
+        val secret = when (type) {
+            AccountType.API_KEY -> {
+                val key = req.apiKey ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("apiKey required"))
+                AccountSecret(apiKey = key)
+            }
+            AccountType.OAUTH, AccountType.OAUTH_STATIC -> {
+                val access = req.accessToken ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("accessToken required"))
+                AccountSecret(accessToken = access, refreshToken = req.refreshToken, expiresAt = req.expiresAt)
+            }
+        }
+        val id = AccountRepo.create(req.name, type, null, req.priority, req.threshold, req.coefficient, secret, createdBy = user.id, ownerId = user.id)
+        pool.reload()
+        runCatching { probe.probe(id) }
+        call.respond(buildOwnedStats(pool, user.id))
+    }
+    patch("/my/accounts/{id}") {
+        val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        if (!AccountRepo.isOwnedBy(id, user.id)) return@patch call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+        val req = call.receive<UpdateAccountRequest>()
+        // personal accounts are never grouped
+        AccountRepo.updateConfig(id, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.clientId, clearGroup = true)
+        pool.reload()
+        call.respond(buildOwnedStats(pool, user.id))
+    }
+    delete("/my/accounts/{id}") {
+        val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@delete call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        if (!AccountRepo.isOwnedBy(id, user.id)) return@delete call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+        AccountRepo.delete(id)
+        pool.reload()
+        call.respond(OkResponse())
+    }
+    post("/my/accounts/{id}/refresh-limits") {
+        val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        if (!AccountRepo.isOwnedBy(id, user.id)) return@post call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+        probe.probe(id)
+        call.respond(buildOwnedStats(pool, user.id))
+    }
+    post("/my/accounts/refresh-limits") {
+        val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
+        pool.snapshotOwned(user.id).forEach { probe.probe(it.id) }
+        call.respond(buildOwnedStats(pool, user.id))
+    }
+    post("/my/accounts/oauth/start") {
+        val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
+        val pkce = ClaudeOAuth.newPkce()
+        val state = ClaudeOAuth.randomState()
+        OAuthAddRepo.create(state, pkce.verifier, user.id)
+        call.respond(OAuthStartResponse(ClaudeOAuth.buildAuthorizeUrl(pkce.challenge, state), state))
+    }
+    post("/my/accounts/oauth/complete") {
+        val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
+        val req = call.receive<OAuthCompleteRequest>()
+        val verifier = OAuthAddRepo.consume(req.state)
+            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Invalid or expired state"))
+        val (code, stateFromCode) = ClaudeOAuth.splitCode(req.code)
+        try {
+            val result = ClaudeOAuth.exchangeCode(Http.client, code, verifier, stateFromCode ?: req.state)
+            val secret = AccountSecret(accessToken = result.accessToken, refreshToken = result.refreshToken, expiresAt = result.expiresAtMillis)
+            val type = if (result.refreshToken != null) AccountType.OAUTH else AccountType.OAUTH_STATIC
+            val id = AccountRepo.create(req.name, type, null, req.priority, req.threshold, req.coefficient, secret, createdBy = user.id, ownerId = user.id)
+            pool.reload()
+            runCatching { probe.probe(id) }
+            call.respond(buildOwnedStats(pool, user.id))
+        } catch (e: Exception) {
+            call.respond(HttpStatusCode.BadGateway, MessageResponse("OAuth exchange failed: ${e.message}"))
+        }
+    }
+}
+
+// ---- admin oversight of any user's personal accounts (requires users.manage) ----
+
+private fun Route.userAccountRoutes(pool: AccountPool, probe: LimitProbe) {
+    get("/users/{id}/accounts") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+            ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        call.respond(buildOwnedStats(pool, uid))
+    }
+    patch("/users/{id}/accounts/{aid}") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+        val aid = call.parameters["aid"]?.toIntOrNull()
+        if (uid == null || aid == null) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        if (!AccountRepo.isOwnedBy(aid, uid)) return@patch call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+        val req = call.receive<UpdateAccountRequest>()
+        AccountRepo.updateConfig(aid, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.clientId, clearGroup = true)
+        pool.reload()
+        call.respond(buildOwnedStats(pool, uid))
+    }
+    delete("/users/{id}/accounts/{aid}") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+        val aid = call.parameters["aid"]?.toIntOrNull()
+        if (uid == null || aid == null) return@delete call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        if (!AccountRepo.isOwnedBy(aid, uid)) return@delete call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+        AccountRepo.delete(aid)
+        pool.reload()
+        call.respond(buildOwnedStats(pool, uid))
     }
 }
 
@@ -427,8 +578,10 @@ private fun buildWindows(days: Int, endDate: java.time.LocalDate, includeAccount
     }
 
     // (accountId, kind) -> per-bucket [sum, count]
+    val personal = AccountRepo.personalIds()
     val agg = HashMap<Pair<Int, String>, Array<DoubleArray>>()
     org.claudeproxy.repo.WindowSnapshotRepo.fetch(start, end).forEach { s ->
+        if (s.accountId in personal) return@forEach
         val i = ((s.ts.toEpochMilli() - start.toEpochMilli()) / widthMs).toInt().coerceIn(0, buckets - 1)
         val arr = agg.getOrPut(s.accountId to s.kind) { arrayOf(DoubleArray(buckets), DoubleArray(buckets)) }
         arr[0][i] += s.util; arr[1][i] += 1.0
@@ -520,7 +673,8 @@ private fun Route.statsRoutes() {
     get("/stats/mine") {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
-        val today = UsageRepo.userTotals(user.id, UserRepo.startOfUtcDay())
+        // "today" mirrors the daily-limit basis (shared-pool spend only); all-time/history stay complete.
+        val today = UsageRepo.userTotals(user.id, UserRepo.startOfUtcDay(), globalOnly = true)
         val total = UsageRepo.userTotals(user.id)
         val recent = UsageRepo.recentForUser(user.id, 100)
         call.respond(

@@ -87,6 +87,9 @@ object Accounts : Table("accounts") {
     val rateLimitedUntil = timestamp("rate_limited_until").nullable()
     // distinct per-account device/client identifier sent upstream
     val clientId = varchar("client_id", 64).nullable()
+    // null = global (shared pool); otherwise a personal account owned by this user, tried
+    // before the global pool and excluded from global statistics.
+    val ownerId = integer("owner_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE).nullable()
     val createdBy = integer("created_by").references(Users.id).nullable()
     val createdAt = timestamp("created_at")
     override val primaryKey = PrimaryKey(id)

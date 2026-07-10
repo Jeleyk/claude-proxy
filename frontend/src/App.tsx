@@ -3,14 +3,14 @@ import { api, has, UserDto } from './api';
 import { Icon, IconButton, ThemeToggle } from './ui';
 import { Login } from './pages/Login';
 import { Dashboard } from './pages/Dashboard';
-import { Accounts } from './pages/Accounts';
+import { MyAccounts } from './pages/MyAccounts';
 import { Users } from './pages/Users';
 import { Tokens } from './pages/Tokens';
 import { ModelPricing } from './pages/ModelPricing';
 import { Stats } from './pages/Stats';
 import { MyStats } from './pages/MyStats';
 
-type View = 'dashboard' | 'accounts' | 'users' | 'tokens' | 'pricing' | 'stats' | 'mystats';
+type View = 'dashboard' | 'myaccounts' | 'users' | 'tokens' | 'pricing' | 'stats' | 'mystats';
 
 interface NavDef {
   key: View;
@@ -22,7 +22,7 @@ interface NavDef {
 
 const NAV: NavDef[] = [
   { key: 'dashboard', label: 'Dashboard', icon: 'dashboard', perm: 'ACCOUNTS_VIEW' },
-  { key: 'accounts', label: 'Accounts', icon: 'accounts', perm: 'ACCOUNTS_VIEW' },
+  { key: 'myaccounts', label: 'My Accounts', icon: 'accounts', perm: 'ACCOUNTS_OWN_MANAGE' },
   { key: 'mystats', label: 'My Stats', icon: 'mystats', perm: 'STATS_VIEW_OWN' },
   { key: 'stats', label: 'Statistics', icon: 'stats', anyPerm: ['STATS_VIEW', 'STATS_VIEW_RECENT', 'STATS_VIEW_ACCOUNTS'] },
   { key: 'tokens', label: 'Proxy Tokens', icon: 'tokens', perm: 'PROXY_USE' },
@@ -124,8 +124,8 @@ export function App() {
           <div className="right"><ThemeToggle /></div>
         </header>
         <div className="main-scroll">
-          {activeView === 'dashboard' && <Dashboard />}
-          {activeView === 'accounts' && <Accounts user={user} />}
+          {activeView === 'dashboard' && <Dashboard user={user} />}
+          {activeView === 'myaccounts' && <MyAccounts />}
           {activeView === 'mystats' && <MyStats canReset={has(user, 'STATS_RESET_OWN')} />}
           {activeView === 'stats' && <Stats user={user} />}
           {activeView === 'tokens' && <Tokens />}

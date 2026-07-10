@@ -12,6 +12,7 @@ import org.claudeproxy.model.WindowKind
 import org.claudeproxy.model.WindowLimit
 import org.claudeproxy.model.WindowLimitDto
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.upsert
@@ -27,6 +28,7 @@ data class AccountRuntime(
     val name: String,
     val type: AccountType,
     val groupId: Int?,
+    val ownerId: Int?,
     val priority: Int,
     val threshold: Double,
     val coefficient: Double,
@@ -41,7 +43,7 @@ data class AccountRuntime(
         val effRemaining = usage?.let { coefficient * (1.0 - it) }
             ?: if (type == AccountType.API_KEY) coefficient else null
         return AccountDto(
-            id = id, name = name, type = type.name, groupId = groupId, priority = priority,
+            id = id, name = name, type = type.name, groupId = groupId, ownerId = ownerId, priority = priority,
             threshold = threshold, coefficient = coefficient, enabled = enabled,
             health = health.name,
             fiveHour = limit.window(WindowKind.FIVE_HOUR)?.toDto(),
@@ -95,6 +97,7 @@ object AccountRepo {
                 name = row[Accounts.name],
                 type = AccountType.fromString(row[Accounts.type]) ?: AccountType.API_KEY,
                 groupId = row[Accounts.groupId],
+                ownerId = row[Accounts.ownerId],
                 priority = row[Accounts.priority],
                 threshold = row[Accounts.threshold],
                 coefficient = row[Accounts.coefficient],
@@ -116,14 +119,32 @@ object AccountRepo {
         Accounts.selectAll().associate { it[Accounts.id] to it[Accounts.name] }
     }
 
+    /** Ids of every personal (owner-scoped) account — used to keep them out of global stats. */
+    fun personalIds(): Set<Int> = transaction {
+        Accounts.selectAll().mapNotNull { row -> row[Accounts.id].takeIf { row[Accounts.ownerId] != null } }.toSet()
+    }
+
+    /** True if account [id] exists and is owned by [userId] (a personal account of that user). */
+    fun isOwnedBy(id: Int, userId: Int): Boolean = transaction {
+        Accounts.selectAll().where { (Accounts.id eq id) and (Accounts.ownerId eq userId) }.any()
+    }
+
+    /** Detach global accounts created by [userId] so the user can be deleted (Postgres FK). */
+    fun clearCreatedBy(userId: Int) = transaction {
+        Accounts.update({ Accounts.createdBy eq userId }) { it[createdBy] = null }
+    }
+
     fun create(
         name: String, type: AccountType, groupId: Int?, priority: Int, threshold: Double, coefficient: Double,
-        secret: AccountSecret, createdBy: Int?, clientId: String? = java.util.UUID.randomUUID().toString(),
+        secret: AccountSecret, createdBy: Int?, ownerId: Int? = null,
+        clientId: String? = java.util.UUID.randomUUID().toString(),
     ): Int = transaction {
         val id = Accounts.insert {
             it[Accounts.name] = name
             it[Accounts.type] = type.name
-            it[Accounts.groupId] = groupId
+            // personal accounts are owner-scoped, never grouped
+            it[Accounts.groupId] = if (ownerId != null) null else groupId
+            it[Accounts.ownerId] = ownerId
             it[Accounts.priority] = priority
             it[Accounts.threshold] = threshold
             it[Accounts.coefficient] = coefficient

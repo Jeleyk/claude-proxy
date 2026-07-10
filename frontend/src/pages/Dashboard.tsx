@@ -1,36 +1,15 @@
 import { useEffect, useState } from 'react';
-import { AccountDto, api, fmtReset, fmtTokens, fmtUsd, GroupDto, PoolStats, WindowLimitDto } from '../api';
+import { AccountDto, api, GroupDto, has, PoolStats, UserDto } from '../api';
+import { AccountEditModal, AccountsTable, AddAccountModal, globalAccountApi, Groups, PoolCards } from '../accounts';
 
-function WindowCell({ w, isApi }: { w: WindowLimitDto | null; isApi: boolean }) {
-  if (isApi) return <span className="hint">n/a</span>;
-  if (!w || (w.usageFraction == null && w.resetAt == null && w.status !== 'REJECTED')) {
-    return <span className="hint">—</span>;
-  }
-  // Prefer the real percentage; only fall back to a "limited" flag if that's all we know.
-  const hasPct = w.usageFraction != null;
-  const frac = w.usageFraction ?? (w.status === 'REJECTED' ? 1 : 0);
-  return (
-    <div className="win">
-      <div className="win-top">
-        <span>{hasPct ? `${Math.round(frac * 100)}%` : (w.status === 'REJECTED' ? 'limited' : '—')}</span>
-        <span>reset <b>{fmtReset(w.resetAt)}</b></span>
-      </div>
-      <div className="bar"><span style={{ width: `${Math.round(frac * 100)}%` }} /></div>
-    </div>
-  );
-}
-
-function healthBadge(a: AccountDto) {
-  const cls = !a.enabled ? 'muted' : a.health === 'OK' ? 'ok' : a.health === 'REFRESH_FAILED' ? 'warn' : 'bad';
-  const label = !a.enabled ? 'disabled' : a.rateLimitedUntil && new Date(a.rateLimitedUntil) > new Date() ? 'limited' : a.health.toLowerCase().replace('_', ' ');
-  return <span className={`badge ${cls}`}>{label}</span>;
-}
-
-export function Dashboard() {
+export function Dashboard({ user }: { user: UserDto }) {
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [groups, setGroups] = useState<GroupDto[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [editing, setEditing] = useState<AccountDto | null>(null);
+  const [adding, setAdding] = useState(false);
+  const canManage = has(user, 'ACCOUNTS_MANAGE');
 
   async function load() {
     try {
@@ -44,12 +23,11 @@ export function Dashboard() {
     setRefreshing(true);
     try { setStats(await api.refreshAll()); } catch (e: any) { setErr(e.message); } finally { setRefreshing(false); }
   }
+  async function toggle(a: AccountDto, v: boolean) { setStats(await api.updateAccount(a.id, { enabled: v })); }
+  async function del(a: AccountDto) { if (confirm(`Delete account "${a.name}"?`)) { await api.deleteAccount(a.id); setStats(await api.accounts()); } }
+  async function refreshOne(a: AccountDto) { setStats(await api.refreshOne(a.id)); }
 
   if (err) return <div className="err">{err}</div>;
-
-  const groupName = (id: number | null) => groups.find((g) => g.id === id)?.name;
-  const capPct = stats && stats.totalEffectiveCapacity > 0 ? stats.totalEffectiveRemaining / stats.totalEffectiveCapacity : 0;
-  const activeName = stats?.activeAccountId ? stats.accounts.find((a) => a.id === stats.activeAccountId)?.name ?? `#${stats.activeAccountId}` : '—';
 
   return (
     <div className="main-inner">
@@ -58,66 +36,29 @@ export function Dashboard() {
           <h1>Dashboard</h1>
           <p className="sub" style={{ margin: 0 }}>Live account pool.</p>
         </div>
-        <button className="ghost" disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Refreshing…' : '↻ Refresh limits'}</button>
+        <div className="row">
+          {canManage && <button onClick={() => setAdding(true)}>+ Add account</button>}
+          <button className="ghost" disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Refreshing…' : '↻ Refresh limits'}</button>
+        </div>
       </div>
 
       {!stats ? (<div className="hint">Loading pool…</div>) : (
-      <>
-      <div className="cards" style={{ marginTop: 18 }}>
-        <div className="card"><div className="label">Accounts healthy</div><div className="value">{stats.healthyAccounts}/{stats.totalAccounts}</div></div>
-        <div className="card"><div className="label">Active now</div><div className="value" style={{ fontSize: 20 }}>{activeName}</div></div>
-        <div className="card">
-          <div className="label">Pool capacity left</div>
-          <div className="value">{Math.round(capPct * 100)}%</div>
-          <div className="hint">{stats.totalEffectiveRemaining.toFixed(2)} / {stats.totalEffectiveCapacity.toFixed(2)} weighted</div>
-        </div>
-        <div className="card"><div className="label">Total requests</div><div className="value">{stats.totalRequests.toLocaleString()}</div></div>
-        <div className="card">
-          <div className="label">Total cost</div>
-          <div className="value">{fmtUsd(stats.totalCost)}</div>
-          <div className="hint">{fmtTokens(stats.totalInputTokens)} in / {fmtTokens(stats.totalOutputTokens)} out</div>
-          <div className="hint">{fmtTokens(stats.totalCacheReadTokens)} cache-r / {fmtTokens(stats.totalCacheWriteTokens)} cache-w</div>
-        </div>
-        <div className="card">
-          <div className="label">Next reset</div>
-          <div className="value" style={{ fontSize: 18 }}>5h: {fmtReset(stats.nextFiveHourReset)}</div>
-          <div className="hint">weekly: {fmtReset(stats.nextWeeklyReset)}</div>
-        </div>
-      </div>
+        <>
+          <PoolCards stats={stats} scope="global" />
+          {canManage && <div style={{ marginTop: 18 }}><Groups groups={groups} onChange={setGroups} onAccountsChange={setStats} /></div>}
+          <h2>Accounts by priority</h2>
+          <AccountsTable stats={stats} groups={groups} showGroup canManage={canManage}
+            onEdit={setEditing} onToggle={toggle} onDelete={del} onRefreshOne={refreshOne} />
+        </>
+      )}
 
-      <h2>Accounts by priority</h2>
-      <div className="tablewrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Prio</th><th>Name</th><th>Group</th><th>Type</th>
-              <th>5-hour</th><th>Weekly</th><th>Coef</th><th>Eff. left</th><th>Cost</th><th>Tokens in/out · cache r/w</th><th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {stats.accounts.map((a) => (
-              <tr key={a.id}>
-                <td className="num">{a.priority}</td>
-                <td>{a.name} {a.id === stats.activeAccountId && <span className="badge active">active</span>}</td>
-                <td>{a.groupId ? <span className="grouptag">{groupName(a.groupId) ?? `#${a.groupId}`}</span> : <span className="hint">—</span>}</td>
-                <td><span className="badge muted">{a.type.toLowerCase()}</span></td>
-                <td><WindowCell w={a.fiveHour} isApi={a.type === 'API_KEY'} /></td>
-                <td><WindowCell w={a.weekly} isApi={a.type === 'API_KEY'} /></td>
-                <td className="num">×{a.coefficient}</td>
-                <td className="num">{a.effectiveRemaining == null ? '—' : a.effectiveRemaining.toFixed(2)}</td>
-                <td className="num">{fmtUsd(a.totalCost)}</td>
-                <td className="num">
-                  {fmtTokens(a.totalInputTokens)} / {fmtTokens(a.totalOutputTokens)}
-                  <div className="hint">cache {fmtTokens(a.totalCacheReadTokens)} / {fmtTokens(a.totalCacheWriteTokens)}</div>
-                </td>
-                <td>{healthBadge(a)}</td>
-              </tr>
-            ))}
-            {stats.accounts.length === 0 && <tr><td colSpan={11} className="hint">No accounts yet. Add one on the Accounts page.</td></tr>}
-          </tbody>
-        </table>
-      </div>
-      </>
+      {editing && (
+        <AccountEditModal a={editing} groups={groups} scope="global" update={api.updateAccount}
+          onClose={() => setEditing(null)} onSaved={(s) => { setStats(s); setEditing(null); }} />
+      )}
+      {adding && (
+        <AddAccountModal scope="global" groups={groups} accountApi={globalAccountApi}
+          onClose={() => setAdding(false)} onDone={setStats} />
       )}
     </div>
   );

@@ -8,6 +8,7 @@ enum class Permission {
     PROXY_USE,          // may route requests through the proxy
     STATS_VIEW_OWN,     // may view only their own usage statistics
     STATS_RESET_OWN,    // may reset their own stats (resets daily spend — can bypass a limit)
+    ACCOUNTS_OWN_MANAGE,// may manage their own personal accounts (tried before the global pool)
     STATS_VIEW_RECENT,  // may view the list of recent requests (pool-wide)
     STATS_VIEW_ACCOUNTS,// may see which account each request/stat came from
     ACCOUNTS_VIEW,      // may view upstream accounts + their limits
@@ -91,6 +92,8 @@ data class AccountDto(
     val name: String,
     val type: String,
     val groupId: Int?,
+    // null = global (shared pool); otherwise the owning user's id (personal account)
+    val ownerId: Int? = null,
     val priority: Int,
     val threshold: Double,
     val coefficient: Double,

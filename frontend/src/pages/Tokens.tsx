@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, fmtTokens, fmtUsd, ProxyTokenDto, UserDto } from '../api';
-import { CodeBlock, Copy } from '../ui';
+import { ConnectScripts, Copy } from '../ui';
 
 export function Tokens() {
   const [tokens, setTokens] = useState<ProxyTokenDto[]>([]);
@@ -31,15 +31,6 @@ export function Tokens() {
   }
 
   const tok = revealed?.token;
-  const exportBase = `export ANTHROPIC_BASE_URL=${base}`;
-  const exportTok = (t: string) => `export ANTHROPIC_AUTH_TOKEN=${t}`;
-  const both = (t: string) => `${exportBase}\n${exportTok(t)}`;
-  const wrapper = (t: string) =>
-    `mkdir -p ~/.local/bin && cat > ~/.local/bin/claude-proxy <<'EOF'\n` +
-    `#!/usr/bin/env bash\n` +
-    `ANTHROPIC_BASE_URL="${base}" ANTHROPIC_AUTH_TOKEN="${t}" exec claude "$@"\n` +
-    `EOF\n` +
-    `chmod +x ~/.local/bin/claude-proxy && echo 'Installed. Run: claude-proxy [claude args]'`;
 
   return (
     <div className="main-inner">
@@ -66,10 +57,8 @@ export function Tokens() {
 
       <div className="panel narrow">
         <h2 style={{ marginTop: 0 }}>Connect Claude Code</h2>
-        <p className="hint">Proxy base URL:</p>
-        <CodeBlock text={exportBase} />
-        <p className="hint">Then set your token and run <span className="mono">claude</span>:</p>
-        <CodeBlock text={`export ANTHROPIC_AUTH_TOKEN=<your-proxy-token>\nclaude`} />
+        <p className="hint">Pick your OS, then paste into your terminal (swap in a token you create below):</p>
+        <ConnectScripts base={base} token="<your-proxy-token>" />
       </div>
 
       <div className="panel narrow">
@@ -87,11 +76,7 @@ export function Tokens() {
             </div>
             <div className="mono" style={{ margin: '8px 0', wordBreak: 'break-all' }}>{tok}</div>
 
-            <p className="hint" style={{ marginBottom: 4 }}>Ready-to-paste export (both lines):</p>
-            <CodeBlock text={both(tok)} />
-
-            <p className="hint" style={{ marginBottom: 4 }}>Or install a <span className="mono">claude-proxy</span> wrapper command (paste once, then run <span className="mono">claude-proxy [args]</span>):</p>
-            <CodeBlock text={wrapper(tok)} />
+            <ConnectScripts base={base} token={tok} wrapper />
           </div>
         )}
       </div>

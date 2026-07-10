@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, fmtTokens, fmtUsd, GroupDto, RoleDto, UserDto } from '../api';
+import { AccountDto, api, fmtTokens, fmtUsd, GroupDto, PoolStats, RoleDto, UserDto } from '../api';
 import { Check, Modal, Switch } from '../ui';
 
 export function Users({ isAdmin }: { isAdmin: boolean }) {
@@ -8,6 +8,7 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
   const [groups, setGroups] = useState<GroupDto[]>([]);
   const [allPerms, setAllPerms] = useState<string[]>([]);
   const [editing, setEditing] = useState<UserDto | 'new' | null>(null);
+  const [accountsFor, setAccountsFor] = useState<UserDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   async function load() {
@@ -51,6 +52,7 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
                 <td>
                   <div className="row">
                     <button className="sm ghost" onClick={() => setEditing(u)}>Edit</button>
+                    <button className="sm ghost" onClick={() => setAccountsFor(u)}>Accounts</button>
                     <button className="sm ghost" onClick={async () => { if (confirm(`Reset ${u.username}'s statistics?`)) { const r = await api.resetUserStats(u.id); alert(r.message); load(); } }}>Reset stats</button>
                     <button className="sm danger" onClick={async () => { if (confirm(`Delete ${u.username}?`)) { await api.deleteUser(u.id); load(); } }}>Delete</button>
                   </div>
@@ -69,7 +71,50 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
         <UserModal user={editing === 'new' ? null : editing} roles={roles} groups={groups}
           onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />
       )}
+      {accountsFor && <UserAccountsModal user={accountsFor} onClose={() => setAccountsFor(null)} />}
     </div>
+  );
+}
+
+/** Admin oversight of one user's personal accounts (view + enable/disable + delete). */
+function UserAccountsModal({ user, onClose }: { user: UserDto; onClose: () => void }) {
+  const [stats, setStats] = useState<PoolStats | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function load() { try { setStats(await api.userAccounts(user.id)); } catch (e: any) { setErr(e.message); } }
+  useEffect(() => { load(); }, []);
+
+  async function toggle(a: AccountDto, v: boolean) { setStats(await api.updateUserAccount(user.id, a.id, { enabled: v })); }
+  async function del(a: AccountDto) { if (confirm(`Delete ${user.username}'s account "${a.name}"?`)) setStats(await api.deleteUserAccount(user.id, a.id)); }
+  const pct = (f: number | null | undefined) => (f != null ? `${Math.round(f * 100)}%` : '—');
+
+  return (
+    <Modal title={`${user.username} · personal accounts`} onClose={onClose} width={640}
+      footer={<button className="ghost" onClick={onClose}>Close</button>}>
+      {err && <div className="err">{err}</div>}
+      {!stats ? <div className="hint">Loading…</div>
+        : stats.accounts.length === 0 ? <p className="hint">This user has no personal accounts.</p> : (
+          <div className="tablewrap">
+            <table>
+              <thead><tr><th>Prio</th><th>Name</th><th>Type</th><th>5h</th><th>Weekly</th><th>Cost</th><th>On</th><th></th></tr></thead>
+              <tbody>
+                {stats.accounts.map((a) => (
+                  <tr key={a.id}>
+                    <td className="num">{a.priority}</td>
+                    <td><b>{a.name}</b></td>
+                    <td><span className="badge muted">{a.type.toLowerCase()}</span></td>
+                    <td className="num">{a.type === 'API_KEY' ? <span className="hint">n/a</span> : pct(a.fiveHour?.usageFraction)}</td>
+                    <td className="num">{a.type === 'API_KEY' ? <span className="hint">n/a</span> : pct(a.weekly?.usageFraction)}</td>
+                    <td className="num">{fmtUsd(a.totalCost)}</td>
+                    <td><Switch checked={a.enabled} onChange={(v) => toggle(a, v)} /></td>
+                    <td><button className="sm danger" onClick={() => del(a)}>Delete</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+    </Modal>
   );
 }
 
