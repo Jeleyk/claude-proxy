@@ -14,8 +14,11 @@ import io.ktor.server.request.httpMethod
 import io.ktor.server.request.receive
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondBytesWriter
+import io.ktor.utils.io.readAvailable
 import io.ktor.utils.io.readRemaining
 import io.ktor.utils.io.writeFully
+import io.ktor.utils.io.writeStringUtf8
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.io.readByteArray
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -155,31 +158,60 @@ class UpstreamForwarder(
 
             val contentType = response.headers["Content-Type"]?.let { runCatching { ContentType.parse(it) }.getOrNull() }
             val isEventStream = contentType?.match(ContentType.Text.EventStream) == true
+            log.info("relay acct#{} status={} ctype='{}' sse={}", account.id, status.value, response.headers["Content-Type"], isEventStream)
 
             if (isEventStream) {
-                // Stream SSE through to the client while teeing token usage out of the stream.
+                // Stream SSE to the client in real time while teeing token usage out of the stream.
+                // Anthropic can stay silent for 30s+ during adaptive "thinking" on a large context;
+                // we flush the response head immediately and inject SSE keep-alive comments during
+                // silence so the client (and Cloudflare/nginx) don't abort before the first real
+                // event — which showed up as nginx "upstream prematurely closed connection while
+                // reading response header" and an endless client retry loop.
                 val model = modelFromRequest(bodyBytes)
                 val scanner = SseUsageScanner()
                 val src = response.bodyAsChannel()
+                var relayed = 0L
+                var chunks = 0
+                var keepalives = 0
+                val buf = ByteArray(16 * 1024)
                 // A client that disconnects mid-stream closes the write channel; that's normal,
                 // not an error. Swallow it and still record whatever usage we scanned.
                 try {
                     call.respondBytesWriter(status = status, contentType = contentType) {
+                        // Send the response head + an ignored SSE comment right away so the client
+                        // enters streaming mode immediately, even if the first event is far off.
+                        writeStringUtf8(": keep-alive\n\n")
+                        flush()
                         while (!src.isClosedForRead) {
-                            val packet = src.readRemaining(16 * 1024L)
-                            while (!packet.exhausted()) {
-                                val bytes = packet.readByteArray()
-                                if (bytes.isNotEmpty()) {
-                                    scanner.feed(bytes, 0, bytes.size)
-                                    writeFully(bytes)
+                            // Wait for upstream data, but bound the wait so we can emit keep-alives.
+                            // awaitContent() never consumes bytes, so cancelling it on timeout is safe.
+                            val ready = withTimeoutOrNull(15_000L) { src.awaitContent(1) }
+                            when {
+                                ready == null -> {
+                                    // upstream silent (thinking) → keep the connection warm
+                                    writeStringUtf8(": keep-alive\n\n")
+                                    flush()
+                                    keepalives++
+                                }
+                                ready == false -> {} // channel closed; while-condition ends the loop
+                                else -> {
+                                    // data is ready → read whatever is available and forward it now
+                                    val n = src.readAvailable(buf, 0, buf.size)
+                                    if (n > 0) {
+                                        scanner.feed(buf, 0, n)
+                                        writeFully(buf, 0, n)
+                                        relayed += n
+                                        chunks++
+                                        flush()
+                                    }
                                 }
                             }
-                            flush()
                         }
+                        log.info("relay acct#{} drained relayed={} chunks={} keepalives={}", account.id, relayed, chunks, keepalives)
                     }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     if (e is kotlinx.coroutines.CancellationException) throw e
-                    log.debug("client disconnected mid-stream for account {}: {}", account.id, e.message)
+                    log.warn("relay acct#{} write failed after {} bytes / {} chunks: {}", account.id, relayed, chunks, e.toString())
                 }
                 UsageRepo.record(account.id, userId, scanner.input, scanner.cacheRead, scanner.cacheCreation, scanner.output, status.value, model)
             } else {

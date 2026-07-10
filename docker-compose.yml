@@ -30,6 +30,12 @@ services:
       - "127.0.0.1:8787:8787"
     env_file: .env
     environment:
+      # Bind to all interfaces INSIDE the container so Docker's published port
+      # (127.0.0.1:8787 on the host) can reach it. Overrides BIND_HOST from .env.
+      BIND_HOST: "0.0.0.0"
+      # Public domain — required so CORS allows the SPA's Origin (https://<domain>);
+      # otherwise Ktor CORS answers /api/* with an empty 403. Also sets publicBaseUrl.
+      PUBLIC_DOMAIN: "proxy.example.com"
       DATABASE_URL: jdbc:postgresql://postgres:5432/claudeproxy
       DATABASE_USER: claudeproxy
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-claudeproxy}
