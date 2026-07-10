@@ -58,9 +58,20 @@ fun main() {
             connector { host = config.bindHost; port = config.port }
             // Claude Code sends many/large headers (Stainless SDK x-stainless-*, anthropic-beta,
             // long tokens). The Netty defaults (~8 KB) reject them at the decoder → nginx 502.
-            maxInitialLineLength = 64 * 1024
-            maxHeaderSize = 512 * 1024
-            maxChunkSize = 512 * 1024
+            maxInitialLineLength = 256 * 1024
+            maxHeaderSize = 1024 * 1024
+            maxChunkSize = 1024 * 1024
+            // Log any channel-level exception (e.g. decoder TooLongFrameException) that would
+            // otherwise close the connection before the request reaches the application pipeline.
+            channelPipelineConfig = {
+                addLast("exlog", object : io.netty.channel.ChannelInboundHandlerAdapter() {
+                    private val plog = org.slf4j.LoggerFactory.getLogger("NettyChannel")
+                    override fun exceptionCaught(ctx: io.netty.channel.ChannelHandlerContext, cause: Throwable) {
+                        plog.warn("channel exception (pre-handler): {}", cause.toString())
+                        ctx.fireExceptionCaught(cause)
+                    }
+                })
+            }
         },
     ) {
         module(config, pool, engine, refresher, probe, scheduler)
