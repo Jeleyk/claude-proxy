@@ -151,6 +151,7 @@ export const api = {
   statsRecent: () => req<UsageEvent[]>('GET', '/api/stats/recent'),
   statsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/daily?days=${days}${end ? `&end=${end}` : ''}`),
   statsWindows: (days: number, end?: string) => req<WindowStats>('GET', `/api/stats/windows?days=${days}${end ? `&end=${end}` : ''}`),
+  statsTokens: (days: number, end?: string) => req<TokenStats>('GET', `/api/stats/tokens?days=${days}${end ? `&end=${end}` : ''}`),
   myStats: () => req<MyStats>('GET', '/api/stats/mine'),
   resetAllStats: () => req<{ message: string }>('POST', '/api/stats/reset'),
   resetUserStats: (id: number) => req<{ message: string }>('POST', `/api/users/${id}/stats/reset`),
@@ -180,6 +181,18 @@ export interface WindowStats {
   totalFiveHour: (number | null)[];
   totalWeekly: (number | null)[];
   perAccount: WindowSeries[];
+  canViewAccounts: boolean;
+}
+
+export interface TokenKindSeries { input: number[]; output: number[]; cacheRead: number[]; cacheWrite: number[]; }
+export interface ModelTokenSeries extends TokenKindSeries { model: string; }
+export interface AccountTokenSeries extends TokenKindSeries { accountId: number; accountName: string | null; }
+export interface TokenStats {
+  days: string[];
+  total: TokenKindSeries;
+  perModel: ModelTokenSeries[];
+  perAccount: AccountTokenSeries[];
+  models: string[];
   canViewAccounts: boolean;
 }
 

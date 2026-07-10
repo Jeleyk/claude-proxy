@@ -1,8 +1,27 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
+// Editorial categorical palette — mid-tone, legible on both cream and warm-dark.
 export const SERIES_COLORS = [
-  '#d97757', '#6ea8fe', '#4ade80', '#fbbf24', '#c084fc', '#22d3ee', '#f472b6', '#a3e635',
+  '#c96442', '#5a7fb0', '#4f9d69', '#c08a2e', '#8b6db0', '#3f9aa0', '#c56b8a', '#8f9350',
 ];
+
+/** Track the container's pixel width so the SVG viewBox renders 1:1 at any size
+    (crisp text, no inner horizontal scroll) — key for 3-up + mobile layouts. */
+function useMeasuredWidth(fallback = 560, min = 220) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [w, setW] = useState(fallback);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      const cw = entries[0]?.contentRect.width ?? 0;
+      if (cw > 0) setW(Math.max(min, Math.round(cw)));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return { ref, w };
+}
 
 export interface Series { name: string; color: string; values: number[]; }
 
@@ -11,27 +30,26 @@ export function StackedBarChart({ days, series, height = 200, fmt }: {
   days: string[]; series: Series[]; height?: number; fmt: (n: number) => string;
 }) {
   const [hover, setHover] = useState<number | null>(null);
-  const W = 720, H = height;
-  const padL = 52, padR = 12, padT = 12, padB = 26;
+  const { ref, w } = useMeasuredWidth();
+  const W = w, H = height;
+  const padL = 48, padR = 10, padT = 12, padB = 26;
   const plotW = W - padL - padR, plotH = H - padT - padB;
 
   const totals = days.map((_, i) => series.reduce((s, se) => s + (se.values[i] || 0), 0));
   const max = Math.max(0.0000001, ...totals);
-  // nice-ish upper bound
   const niceMax = niceCeil(max);
   const bandW = plotW / Math.max(1, days.length);
-  const barW = Math.min(38, bandW * 0.62);
+  const barW = Math.min(38, bandW * 0.64);
   const x = (i: number) => padL + i * bandW + (bandW - barW) / 2;
   const y = (v: number) => padT + plotH - (v / niceMax) * plotH;
 
   const gridLines = 4;
-  const everyN = Math.ceil(days.length / 8);
+  const everyN = Math.max(1, Math.ceil(days.length / Math.max(4, Math.floor(plotW / 46))));
 
   return (
-    <div style={{ position: 'relative', width: '100%', overflowX: 'auto' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', minWidth: 420 }}
+    <div ref={ref} style={{ position: 'relative', width: '100%' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }}
         onMouseLeave={() => setHover(null)}>
-        {/* y grid + labels */}
         {Array.from({ length: gridLines + 1 }).map((_, g) => {
           const v = (niceMax / gridLines) * g;
           const yy = y(v);
@@ -42,12 +60,11 @@ export function StackedBarChart({ days, series, height = 200, fmt }: {
             </g>
           );
         })}
-        {/* bars */}
         {days.map((d, i) => {
           let acc = 0;
           return (
             <g key={i} onMouseEnter={() => setHover(i)}>
-              <rect x={padL + i * bandW} y={padT} width={bandW} height={plotH} fill={hover === i ? 'rgba(255,255,255,.04)' : 'transparent'} />
+              <rect x={padL + i * bandW} y={padT} width={bandW} height={plotH} fill={hover === i ? 'var(--accent-soft)' : 'transparent'} />
               {series.map((se, si) => {
                 const v = se.values[i] || 0;
                 if (v <= 0) return null;
@@ -62,14 +79,14 @@ export function StackedBarChart({ days, series, height = 200, fmt }: {
         })}
       </svg>
       {hover != null && (
-        <div style={{ position: 'absolute', top: 4, right: 12, background: 'var(--panel-2)', border: '1px solid var(--border-2)', borderRadius: 8, padding: '8px 10px', fontSize: 12, pointerEvents: 'none', minWidth: 130 }}>
+        <div style={{ position: 'absolute', top: 4, right: 10, background: 'var(--panel-2)', border: '1px solid var(--border-2)', borderRadius: 8, padding: '8px 10px', fontSize: 12, pointerEvents: 'none', minWidth: 130, boxShadow: 'var(--shadow)' }}>
           <div style={{ color: 'var(--muted)', marginBottom: 4 }}>{days[hover]}</div>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>{fmt(totals[hover])}</div>
           {series.filter((s) => (s.values[hover] || 0) > 0).slice(0, 8).map((s, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ width: 8, height: 8, borderRadius: 2, background: s.color, display: 'inline-block' }} />
               <span style={{ flex: 1, color: 'var(--muted)' }}>{s.name}</span>
-              <span>{fmt(s.values[hover] || 0)}</span>
+              <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(s.values[hover] || 0)}</span>
             </div>
           ))}
         </div>
@@ -83,13 +100,14 @@ export interface Line { name: string; color: string; values: (number | null)[]; 
 /** Multi-line chart over evenly-spaced buckets. Values are 0..1 fractions shown as %. */
 export function LineChart({ labels, lines, height = 170 }: { labels: string[]; lines: Line[]; height?: number }) {
   const [hover, setHover] = useState<number | null>(null);
-  const W = 720, H = height;
-  const padL = 42, padR = 12, padT = 10, padB = 22;
+  const { ref, w } = useMeasuredWidth();
+  const W = w, H = height;
+  const padL = 40, padR = 10, padT = 10, padB = 22;
   const plotW = W - padL - padR, plotH = H - padT - padB;
   const n = labels.length;
   const x = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
   const y = (v: number) => padT + plotH - Math.max(0, Math.min(1, v)) * plotH;
-  const everyN = Math.max(1, Math.ceil(n / 8));
+  const everyN = Math.max(1, Math.ceil(n / Math.max(4, Math.floor(plotW / 46))));
 
   function path(vals: (number | null)[]): string {
     let d = ''; let pen = false;
@@ -101,8 +119,8 @@ export function LineChart({ labels, lines, height = 170 }: { labels: string[]; l
   }
 
   return (
-    <div style={{ position: 'relative', width: '100%', overflowX: 'auto' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', minWidth: 420 }}
+    <div ref={ref} style={{ position: 'relative', width: '100%' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }}
         onMouseMove={(e) => {
           const r = (e.currentTarget as SVGElement).getBoundingClientRect();
           const px = ((e.clientX - r.left) / r.width) * W;
@@ -125,7 +143,7 @@ export function LineChart({ labels, lines, height = 170 }: { labels: string[]; l
         ))}
       </svg>
       {hover != null && (
-        <div style={{ position: 'absolute', top: 4, right: 12, background: 'var(--panel-2)', border: '1px solid var(--border-2)', borderRadius: 8, padding: '8px 10px', fontSize: 12, pointerEvents: 'none', minWidth: 120 }}>
+        <div style={{ position: 'absolute', top: 4, right: 10, background: 'var(--panel-2)', border: '1px solid var(--border-2)', borderRadius: 8, padding: '8px 10px', fontSize: 12, pointerEvents: 'none', minWidth: 120, boxShadow: 'var(--shadow)' }}>
           <div style={{ color: 'var(--muted)', marginBottom: 4 }}>{labels[hover]}</div>
           {lines.map((l, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

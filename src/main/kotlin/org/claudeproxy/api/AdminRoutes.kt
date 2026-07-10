@@ -371,6 +371,48 @@ private fun buildDaily(days: Int, endDate: java.time.LocalDate, includeAccounts:
     return DailyStatsPayload(dayLabels, totalCost.toList(), totalReq.toList(), series, includeAccounts)
 }
 
+/** Build per-day token breakdowns (by model + account) for a window of [days] ending at [endDate] (UTC). */
+private fun buildTokens(days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean): TokenStatsPayload {
+    val n = days.coerceIn(1, 90)
+    val startDate = endDate.minusDays((n - 1).toLong())
+    val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val dayLabels = (0 until n).map { startDate.plusDays(it.toLong()).toString() }
+    val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
+
+    // Each series is four per-day arrays: [input, output, cacheRead, cacheWrite].
+    fun kinds() = Array(4) { LongArray(n) }
+    val total = kinds()
+    val perModel = HashMap<String, Array<LongArray>>()
+    val perAccount = HashMap<Int, Array<LongArray>>()
+    UsageRepo.tokenBuckets(start, end).forEach { b ->
+        val i = idx[b.date] ?: return@forEach
+        val m = perModel.getOrPut(b.model ?: "unknown") { kinds() }
+        val a = perAccount.getOrPut(b.accountId) { kinds() }
+        // total, per-model and per-account all accumulate the same four kinds at day i
+        listOf(total, m, a).forEach { k ->
+            k[0][i] += b.input; k[1][i] += b.output; k[2][i] += b.cacheRead; k[3][i] += b.cacheWrite
+        }
+    }
+
+    val models = perModel.keys.sorted()
+    val modelSeries = models.map { model ->
+        val k = perModel.getValue(model)
+        TokenModelSeriesDto(model, k[0].toList(), k[1].toList(), k[2].toList(), k[3].toList())
+    }
+    val names = AccountRepo.namesMap()
+    val accountSeries = if (includeAccounts)
+        perAccount.entries.sortedByDescending { (_, k) -> k.sumOf { it.sum() } }
+            .map { (aid, k) -> TokenAccountSeriesDto(aid, names[aid], k[0].toList(), k[1].toList(), k[2].toList(), k[3].toList()) }
+    else emptyList()
+
+    return TokenStatsPayload(
+        dayLabels,
+        TokenTotalsDto(total[0].toList(), total[1].toList(), total[2].toList(), total[3].toList()),
+        modelSeries, accountSeries, models, includeAccounts,
+    )
+}
+
 /** Build bucketed window-utilization series (5h + weekly) for a range, with carry-forward. */
 private fun buildWindows(days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean): WindowStatsPayload {
     val n = days.coerceIn(1, 30)
@@ -448,6 +490,15 @@ private fun Route.statsRoutes() {
         val endDate = call.parameters["end"]?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
             ?: java.time.LocalDate.now(java.time.ZoneOffset.UTC)
         call.respond(buildDaily(days, endDate, user.canAccounts()))
+    }
+    // Per-day token breakdown (by model + account) for the token charts. Default: last 7 days ending today (UTC).
+    get("/stats/tokens") {
+        call.requirePermission(Permission.STATS_VIEW)
+        val user = call.requireUser()
+        val days = call.parameters["days"]?.toIntOrNull() ?: 7
+        val endDate = call.parameters["end"]?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
+            ?: java.time.LocalDate.now(java.time.ZoneOffset.UTC)
+        call.respond(buildTokens(days, endDate, user.canAccounts()))
     }
     post("/stats/reset") {
         call.requirePermission(Permission.STATS_VIEW)

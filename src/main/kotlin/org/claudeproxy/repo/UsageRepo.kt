@@ -35,6 +35,13 @@ data class ModelUsageDto(val model: String?, val requests: Long, val cleanTokens
 @Serializable
 data class DailyBucketDto(val accountId: Int, val date: String, val cost: Double, val requests: Long, val tokens: Long)
 
+/** One (account, model, day) bucket with the four token kinds kept separate. */
+@Serializable
+data class TokenBucketDto(
+    val accountId: Int, val model: String?, val date: String,
+    val input: Long, val output: Long, val cacheRead: Long, val cacheWrite: Long,
+)
+
 /** Token counters + USD cost bundle. */
 class Totals(
     val requests: Long = 0, val input: Long = 0, val output: Long = 0,
@@ -122,6 +129,22 @@ object UsageRepo {
                 a[2] += row[UsageEvents.inputTokens] + row[UsageEvents.outputTokens] + row[UsageEvents.cacheReadTokens] + row[UsageEvents.cacheWriteTokens]
             }
         acc.map { (k, a) -> DailyBucketDto(k.first, k.second, a[0], a[1].toLong(), a[2].toLong()) }
+    }
+
+    /** Daily (account, model, day) token buckets in [start, end), bucketed by UTC date, kinds kept apart. */
+    fun tokenBuckets(start: Instant, end: Instant): List<TokenBucketDto> = transaction {
+        val acc = HashMap<Triple<Int, String?, String>, LongArray>() // (accountId, model, date) -> [in, out, cacheRead, cacheWrite]
+        UsageEvents.selectAll()
+            .where { (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
+            .forEach { row ->
+                val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
+                val a = acc.getOrPut(Triple(row[UsageEvents.accountId], row[UsageEvents.model], date)) { LongArray(4) }
+                a[0] += row[UsageEvents.inputTokens]
+                a[1] += row[UsageEvents.outputTokens]
+                a[2] += row[UsageEvents.cacheReadTokens]
+                a[3] += row[UsageEvents.cacheWriteTokens]
+            }
+        acc.map { (k, a) -> TokenBucketDto(k.first, k.second, k.third, a[0], a[1], a[2], a[3]) }
     }
 
     fun clearAll(): Int = transaction { UsageEvents.deleteAll() }

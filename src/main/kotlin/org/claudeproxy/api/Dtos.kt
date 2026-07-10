@@ -131,6 +131,43 @@ data class DailyStatsPayload(
 )
 
 @Serializable
+data class TokenTotalsDto(                  // per-day token counts, four kinds kept apart
+    val input: List<Long>,
+    val output: List<Long>,
+    val cacheRead: List<Long>,
+    val cacheWrite: List<Long>,
+)
+
+@Serializable
+data class TokenModelSeriesDto(
+    val model: String,                     // "unknown" when the DB model is null
+    val input: List<Long>,
+    val output: List<Long>,
+    val cacheRead: List<Long>,
+    val cacheWrite: List<Long>,
+)
+
+@Serializable
+data class TokenAccountSeriesDto(
+    val accountId: Int,
+    val accountName: String?,
+    val input: List<Long>,
+    val output: List<Long>,
+    val cacheRead: List<Long>,
+    val cacheWrite: List<Long>,
+)
+
+@Serializable
+data class TokenStatsPayload(
+    val days: List<String>,                // date labels (UTC), oldest→newest
+    val total: TokenTotalsDto,             // summed across all accounts and models
+    val perModel: List<TokenModelSeriesDto>,   // one entry per distinct model, sorted alphabetically
+    val perAccount: List<TokenAccountSeriesDto>, // empty if the viewer can't see accounts
+    val models: List<String>,              // sorted distinct model labels (incl. "unknown")
+    val canViewAccounts: Boolean,
+)
+
+@Serializable
 data class WindowSeriesDto(
     val accountId: Int,
     val accountName: String?,
