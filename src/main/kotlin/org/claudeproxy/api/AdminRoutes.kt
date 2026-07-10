@@ -369,7 +369,62 @@ private fun buildDaily(days: Int, endDate: java.time.LocalDate, includeAccounts:
     return DailyStatsPayload(dayLabels, totalCost.toList(), totalReq.toList(), series, includeAccounts)
 }
 
+/** Build bucketed window-utilization series (5h + weekly) for a range, with carry-forward. */
+private fun buildWindows(days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean): WindowStatsPayload {
+    val n = days.coerceIn(1, 30)
+    val startDate = endDate.minusDays((n - 1).toLong())
+    val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val buckets = (n * 24).coerceAtMost(168)  // ~hourly, capped
+    val widthMs = (end.toEpochMilli() - start.toEpochMilli()).toDouble() / buckets
+    val labels = (0 until buckets).map {
+        java.time.Instant.ofEpochMilli(start.toEpochMilli() + (it * widthMs).toLong())
+            .atZone(java.time.ZoneOffset.UTC).toLocalDateTime().toString().substring(5, 16)
+    }
+
+    // (accountId, kind) -> per-bucket [sum, count]
+    val agg = HashMap<Pair<Int, String>, Array<DoubleArray>>()
+    org.claudeproxy.repo.WindowSnapshotRepo.fetch(start, end).forEach { s ->
+        val i = ((s.ts.toEpochMilli() - start.toEpochMilli()) / widthMs).toInt().coerceIn(0, buckets - 1)
+        val arr = agg.getOrPut(s.accountId to s.kind) { arrayOf(DoubleArray(buckets), DoubleArray(buckets)) }
+        arr[0][i] += s.util; arr[1][i] += 1.0
+    }
+    // average per bucket then carry the last known value forward across gaps
+    fun series(accountId: Int, kind: String): List<Double?> {
+        val arr = agg[accountId to kind] ?: return List(buckets) { null }
+        val out = arrayOfNulls<Double>(buckets)
+        var last: Double? = null
+        for (i in 0 until buckets) {
+            if (arr[1][i] > 0) last = arr[0][i] / arr[1][i]
+            out[i] = last
+        }
+        return out.toList()
+    }
+
+    val accountIds = agg.keys.map { it.first }.distinct()
+    val names = AccountRepo.namesMap()
+    val perAccount = if (includeAccounts)
+        accountIds.sorted().map { WindowSeriesDto(it, names[it], series(it, "5h"), series(it, "7d")) }
+    else emptyList()
+
+    fun total(kind: String): List<Double?> = (0 until buckets).map { i ->
+        val vals = accountIds.mapNotNull { series(it, kind)[i] }
+        if (vals.isEmpty()) null else vals.average()
+    }
+
+    return WindowStatsPayload(labels, total("5h"), total("7d"), perAccount, includeAccounts)
+}
+
 private fun Route.statsRoutes() {
+    // Window-utilization (5h + weekly) trend over time.
+    get("/stats/windows") {
+        call.requirePermission(Permission.STATS_VIEW)
+        val user = call.requireUser()
+        val days = call.parameters["days"]?.toIntOrNull() ?: 7
+        val endDate = call.parameters["end"]?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
+            ?: java.time.LocalDate.now(java.time.ZoneOffset.UTC)
+        call.respond(buildWindows(days, endDate, user.canAccounts()))
+    }
     // Per-account summary over the last N hours (full stats).
     get("/stats/summary") {
         call.requirePermission(Permission.STATS_VIEW)
@@ -404,7 +459,9 @@ private fun Route.statsRoutes() {
     }
     post("/stats/mine/reset") {
         val user = call.requireUser()
-        if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
+        // Resetting own stats zeroes today's spend, so it can bypass a daily limit — gate it.
+        val ok = Permission.STATS_RESET_OWN in user.permissions || Permission.ADMIN in user.permissions
+        if (!ok) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_RESET_OWN")
         call.respond(MessageResponse("Cleared ${UsageRepo.clearUser(user.id)} of your usage records"))
     }
     get("/stats/mine") {

@@ -74,7 +74,7 @@ export function App() {
       <div className="main">
         {activeView === 'dashboard' && <Dashboard />}
         {activeView === 'accounts' && <Accounts user={user} />}
-        {activeView === 'mystats' && <MyStats />}
+        {activeView === 'mystats' && <MyStats canReset={has(user, 'STATS_RESET_OWN')} />}
         {activeView === 'stats' && <Stats user={user} />}
         {activeView === 'tokens' && <Tokens />}
         {activeView === 'pricing' && <ModelPricing />}

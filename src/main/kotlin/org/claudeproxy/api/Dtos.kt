@@ -131,6 +131,23 @@ data class DailyStatsPayload(
 )
 
 @Serializable
+data class WindowSeriesDto(
+    val accountId: Int,
+    val accountName: String?,
+    val fiveHour: List<Double?>,   // 0..1 utilization per bucket (null = no data)
+    val weekly: List<Double?>,
+)
+
+@Serializable
+data class WindowStatsPayload(
+    val buckets: List<String>,             // time labels, oldest→newest
+    val totalFiveHour: List<Double?>,      // average 5h utilization across accounts
+    val totalWeekly: List<Double?>,
+    val perAccount: List<WindowSeriesDto>, // empty if the viewer can't see accounts
+    val canViewAccounts: Boolean,
+)
+
+@Serializable
 data class OkResponse(val ok: Boolean = true)
 
 @Serializable

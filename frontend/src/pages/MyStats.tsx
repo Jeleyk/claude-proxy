@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, fmtTokens, fmtUsd, MyStats as MyStatsDto } from '../api';
 
-export function MyStats() {
+export function MyStats({ canReset }: { canReset: boolean }) {
   const [s, setS] = useState<MyStatsDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -22,7 +22,7 @@ export function MyStats() {
     <div className="main-inner">
       <div className="section-head" style={{ marginTop: 0 }}>
         <div><h1>My statistics</h1><p className="sub" style={{ margin: 0 }}>Your own usage only. Refreshes every 8s.</p></div>
-        <button className="ghost" onClick={async () => { if (confirm('Reset your own statistics? This cannot be undone.')) { await api.resetMyStats(); load(); } }}>Reset my stats</button>
+        {canReset && <button className="ghost" onClick={async () => { if (confirm('Reset your own statistics? This cannot be undone.')) { await api.resetMyStats(); load(); } }}>Reset my stats</button>}
       </div>
 
       <div className="cards" style={{ marginTop: 18 }}>

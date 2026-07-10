@@ -128,6 +128,17 @@ object UsageEvents : Table("usage_events") {
     override val primaryKey = PrimaryKey(id)
 }
 
+/** Time series of observed window utilization (0..1) per account per window. */
+object WindowSnapshots : Table("window_snapshots") {
+    val id = long("id").autoIncrement()
+    val accountId = integer("account_id").references(Accounts.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    val windowKind = varchar("window_kind", 8)   // "5h" | "7d"
+    val utilization = double("utilization")
+    val ts = timestamp("ts")
+    override val primaryKey = PrimaryKey(id)
+    init { index(false, accountId, windowKind, ts) }
+}
+
 object OAuthAddSessions : Table("oauth_add_sessions") {
     val id = varchar("id", 64)          // state
     val pkceVerifier = varchar("pkce_verifier", 256)
@@ -139,5 +150,5 @@ object OAuthAddSessions : Table("oauth_add_sessions") {
 val ALL_TABLES = arrayOf(
     Users, Settings, ModelPrices, Roles, RolePermissions, UserRoles, ProxyTokens,
     AccountGroups, UserGroupAccess,
-    Accounts, AccountSecrets, AccountLimits, UsageEvents, OAuthAddSessions,
+    Accounts, AccountSecrets, AccountLimits, UsageEvents, WindowSnapshots, OAuthAddSessions,
 )

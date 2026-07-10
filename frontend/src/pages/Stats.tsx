@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import { api, DailyStats, fmtUsd, has, UsageEvent, UsageSummary, UserDto } from '../api';
-import { SERIES_COLORS, StackedBarChart } from '../Chart';
+import { api, DailyStats, fmtUsd, has, UsageEvent, UsageSummary, UserDto, WindowStats } from '../api';
+import { LineChart, SERIES_COLORS, StackedBarChart } from '../Chart';
+
+const C5H = '#6ea8fe', CWK = '#d97757';
 
 function todayUtc(): string { return new Date().toISOString().slice(0, 10); }
 function shiftDate(d: string, days: number): string {
@@ -13,6 +15,7 @@ export function Stats({ user }: { user: UserDto }) {
   const canAccounts = has(user, 'STATS_VIEW_ACCOUNTS') || canStats;
 
   const [daily, setDaily] = useState<DailyStats | null>(null);
+  const [windows, setWindows] = useState<WindowStats | null>(null);
   const [summary, setSummary] = useState<UsageSummary[]>([]);
   const [recent, setRecent] = useState<UsageEvent[]>([]);
   const [endDate, setEndDate] = useState(todayUtc());
@@ -21,7 +24,7 @@ export function Stats({ user }: { user: UserDto }) {
 
   async function load() {
     try {
-      if (canStats) { setDaily(await api.statsDaily(days, endDate)); setSummary(await api.statsSummary()); }
+      if (canStats) { setDaily(await api.statsDaily(days, endDate)); setWindows(await api.statsWindows(days, endDate)); setSummary(await api.statsSummary()); }
       if (canRecent) setRecent(await api.statsRecent());
     } catch (e: any) { setErr(e.message); }
   }
@@ -84,6 +87,29 @@ export function Stats({ user }: { user: UserDto }) {
               </div>
             </div>
           ))}
+
+          {windows && (
+            <>
+              <h2>Window utilization — all accounts (avg)</h2>
+              <div className="panel">
+                <LineChart labels={windows.buckets} lines={[
+                  { name: '5-hour', color: C5H, values: windows.totalFiveHour },
+                  { name: 'weekly', color: CWK, values: windows.totalWeekly },
+                ]} />
+              </div>
+              {canAccounts && windows.perAccount.map((a) => (
+                <div key={a.accountId}>
+                  <h2>{a.accountName ?? `#${a.accountId}`} — window utilization</h2>
+                  <div className="panel">
+                    <LineChart labels={windows.buckets} height={150} lines={[
+                      { name: '5-hour', color: C5H, values: a.fiveHour },
+                      { name: 'weekly', color: CWK, values: a.weekly },
+                    ]} />
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
 
           <h2>Per account (24h)</h2>
           <div className="tablewrap">

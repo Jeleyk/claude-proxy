@@ -123,6 +123,10 @@ class AccountPool {
         } ?: return
         runCatching { AccountRepo.persistLimit(id, updated.limit) }
             .onFailure { log.warn("persist limit failed for {}: {}", id, it.message) }
+        // Append utilization history points for the trend graphs (throttled internally).
+        updated.limit.windows.forEach { (kind, w) ->
+            w.utilization?.let { org.claudeproxy.repo.WindowSnapshotRepo.record(id, kind, it) }
+        }
     }
 
     /** Mark an account hard rate-limited until the given reset instant (429 handling). */

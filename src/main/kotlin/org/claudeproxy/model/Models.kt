@@ -7,6 +7,7 @@ import java.time.Instant
 enum class Permission {
     PROXY_USE,          // may route requests through the proxy
     STATS_VIEW_OWN,     // may view only their own usage statistics
+    STATS_RESET_OWN,    // may reset their own stats (resets daily spend — can bypass a limit)
     STATS_VIEW_RECENT,  // may view the list of recent requests (pool-wide)
     STATS_VIEW_ACCOUNTS,// may see which account each request/stat came from
     ACCOUNTS_VIEW,      // may view upstream accounts + their limits

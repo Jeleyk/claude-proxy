@@ -146,6 +146,7 @@ export const api = {
   statsSummary: () => req<UsageSummary[]>('GET', '/api/stats/summary'),
   statsRecent: () => req<UsageEvent[]>('GET', '/api/stats/recent'),
   statsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/daily?days=${days}${end ? `&end=${end}` : ''}`),
+  statsWindows: (days: number, end?: string) => req<WindowStats>('GET', `/api/stats/windows?days=${days}${end ? `&end=${end}` : ''}`),
   myStats: () => req<MyStats>('GET', '/api/stats/mine'),
   resetAllStats: () => req<{ message: string }>('POST', '/api/stats/reset'),
   resetUserStats: (id: number) => req<{ message: string }>('POST', `/api/users/${id}/stats/reset`),
@@ -167,6 +168,14 @@ export interface DailyStats {
   totalCost: number[];
   totalRequests: number[];
   perAccount: AccountSeries[];
+  canViewAccounts: boolean;
+}
+export interface WindowSeries { accountId: number; accountName: string | null; fiveHour: (number | null)[]; weekly: (number | null)[]; }
+export interface WindowStats {
+  buckets: string[];
+  totalFiveHour: (number | null)[];
+  totalWeekly: (number | null)[];
+  perAccount: WindowSeries[];
   canViewAccounts: boolean;
 }
 

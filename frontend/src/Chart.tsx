@@ -78,6 +78,68 @@ export function StackedBarChart({ days, series, height = 200, fmt }: {
   );
 }
 
+export interface Line { name: string; color: string; values: (number | null)[]; }
+
+/** Multi-line chart over evenly-spaced buckets. Values are 0..1 fractions shown as %. */
+export function LineChart({ labels, lines, height = 170 }: { labels: string[]; lines: Line[]; height?: number }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const W = 720, H = height;
+  const padL = 42, padR = 12, padT = 10, padB = 22;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const n = labels.length;
+  const x = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const y = (v: number) => padT + plotH - Math.max(0, Math.min(1, v)) * plotH;
+  const everyN = Math.max(1, Math.ceil(n / 8));
+
+  function path(vals: (number | null)[]): string {
+    let d = ''; let pen = false;
+    vals.forEach((v, i) => {
+      if (v == null) { pen = false; return; }
+      d += `${pen ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)} `; pen = true;
+    });
+    return d;
+  }
+
+  return (
+    <div style={{ position: 'relative', width: '100%', overflowX: 'auto' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', minWidth: 420 }}
+        onMouseMove={(e) => {
+          const r = (e.currentTarget as SVGElement).getBoundingClientRect();
+          const px = ((e.clientX - r.left) / r.width) * W;
+          const i = Math.round(((px - padL) / plotW) * (n - 1));
+          setHover(i >= 0 && i < n ? i : null);
+        }}
+        onMouseLeave={() => setHover(null)}>
+        {[0, 0.25, 0.5, 0.75, 1].map((f, g) => (
+          <g key={g}>
+            <line x1={padL} x2={W - padR} y1={y(f)} y2={y(f)} stroke="var(--border)" strokeWidth={1} />
+            <text x={padL - 6} y={y(f) + 3} textAnchor="end" fontSize={10} fill="var(--faint)">{Math.round(f * 100)}%</text>
+          </g>
+        ))}
+        {hover != null && <line x1={x(hover)} x2={x(hover)} y1={padT} y2={padT + plotH} stroke="var(--border-2)" strokeWidth={1} />}
+        {lines.map((l, li) => (
+          <path key={li} d={path(l.values)} fill="none" stroke={l.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+        ))}
+        {labels.map((lb, i) => (i % everyN === 0) && (
+          <text key={i} x={x(i)} y={H - 6} textAnchor="middle" fontSize={9} fill="var(--faint)">{lb.slice(0, 5)}</text>
+        ))}
+      </svg>
+      {hover != null && (
+        <div style={{ position: 'absolute', top: 4, right: 12, background: 'var(--panel-2)', border: '1px solid var(--border-2)', borderRadius: 8, padding: '8px 10px', fontSize: 12, pointerEvents: 'none', minWidth: 120 }}>
+          <div style={{ color: 'var(--muted)', marginBottom: 4 }}>{labels[hover]}</div>
+          {lines.map((l, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: l.color, display: 'inline-block' }} />
+              <span style={{ flex: 1, color: 'var(--muted)' }}>{l.name}</span>
+              <span>{l.values[hover] == null ? '—' : `${Math.round((l.values[hover] as number) * 100)}%`}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function niceCeil(v: number): number {
   if (v <= 0) return 1;
   const pow = Math.pow(10, Math.floor(Math.log10(v)));
