@@ -95,6 +95,8 @@ private suspend fun buildPoolStats(pool: AccountPool): PoolStatsDto {
         totalRequests = pt.requests,
         totalInputTokens = pt.input,
         totalOutputTokens = pt.output,
+        totalCacheReadTokens = pt.cacheRead,
+        totalCacheWriteTokens = pt.cacheWrite,
         totalCost = pt.cost,
         nextFiveHourReset = pool.nextReset(WindowKind.FIVE_HOUR)?.toString(),
         nextWeeklyReset = pool.nextReset(WindowKind.WEEKLY)?.toString(),

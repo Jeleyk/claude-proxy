@@ -61,7 +61,7 @@ export function MyStats({ canReset }: { canReset: boolean }) {
       <h2>Recent requests</h2>
       <div className="tablewrap">
         <table>
-          <thead><tr><th>Time</th><th>Account</th><th>Model</th><th>In</th><th>Out</th><th>Cost</th><th>Status</th></tr></thead>
+          <thead><tr><th>Time</th><th>Account</th><th>Model</th><th>In</th><th>Out</th><th>Cache R</th><th>Cache W</th><th>Cost</th><th>Status</th></tr></thead>
           <tbody>
             {s.recent.map((e) => (
               <tr key={e.id}>
@@ -70,11 +70,13 @@ export function MyStats({ canReset }: { canReset: boolean }) {
                 <td className="hint">{e.model ?? '—'}</td>
                 <td className="num">{e.inputTokens}</td>
                 <td className="num">{e.outputTokens}</td>
+                <td className="num">{e.cacheReadTokens}</td>
+                <td className="num">{e.cacheWriteTokens}</td>
                 <td className="num">{fmtUsd(e.cost)}</td>
                 <td>{statusBadge(e.httpStatus)}</td>
               </tr>
             ))}
-            {s.recent.length === 0 && <tr><td colSpan={7} className="hint">No requests yet.</td></tr>}
+            {s.recent.length === 0 && <tr><td colSpan={9} className="hint">No requests yet.</td></tr>}
           </tbody>
         </table>
       </div>

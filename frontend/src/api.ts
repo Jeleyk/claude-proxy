@@ -48,6 +48,8 @@ export interface AccountDto {
   effectiveRemaining: number | null;
   totalInputTokens: number;
   totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
   totalCost: number;
   totalRequests: number;
   clientId: string | null;
@@ -62,6 +64,8 @@ export interface PoolStats {
   totalEffectiveCapacity: number;
   totalInputTokens: number;
   totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
   totalCost: number;
   totalRequests: number;
   nextFiveHourReset: string | null;

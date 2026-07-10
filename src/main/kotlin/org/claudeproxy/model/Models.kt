@@ -106,6 +106,8 @@ data class AccountDto(
     // cumulative counters for this account (all-time)
     val totalInputTokens: Long,
     val totalOutputTokens: Long,
+    val totalCacheReadTokens: Long,
+    val totalCacheWriteTokens: Long,
     val totalCost: Double,
     val totalRequests: Long,
     val clientId: String?,
@@ -133,6 +135,8 @@ data class PoolStatsDto(
     // pool-wide counters (all-time)
     val totalInputTokens: Long,
     val totalOutputTokens: Long,
+    val totalCacheReadTokens: Long,
+    val totalCacheWriteTokens: Long,
     val totalCost: Double,
     val totalRequests: Long,
     // nearest reset times across the pool, per window

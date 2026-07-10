@@ -3,10 +3,12 @@ package org.claudeproxy.repo
 import kotlinx.serialization.Serializable
 import org.claudeproxy.db.ModelPrices
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insertIgnore
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.sql.update
 import org.jetbrains.exposed.sql.upsert
 
 @Serializable
@@ -30,11 +32,12 @@ object ModelPriceRepo {
 
     fun seedDefaults() {
         transaction {
-            // pattern to (input, output, cacheRead, cacheWrite)
+            // pattern to (input, output, cacheRead, cacheWrite) in USD per 1M tokens.
+            // Anthropic list prices: cache-read ≈ 0.1× input, cache-write ≈ 1.25× input (5-min TTL).
             listOf(
                 Quad("haiku", 1.0, 5.0, 0.1, 1.25),
                 Quad("sonnet", 3.0, 15.0, 0.3, 3.75),
-                Quad("opus", 15.0, 75.0, 1.5, 18.75),
+                Quad("opus", 5.0, 25.0, 0.5, 6.25),
             ).forEach { p ->
                 ModelPrices.insertIgnore {
                     it[pattern] = p.pattern
@@ -43,6 +46,20 @@ object ModelPriceRepo {
                     it[cacheReadPrice] = p.cacheRead
                     it[cacheWritePrice] = p.cacheWrite
                 }
+            }
+            // One-time self-heal: earlier builds seeded Opus at the retired 4.1 list price
+            // (15/75/1.5/18.75) — exactly 3× the current Opus 4.x price — and insertIgnore never
+            // overwrote it. Correct only rows still holding those exact stale values, so an admin's
+            // custom price is never clobbered. Idempotent: after the fix the row no longer matches.
+            ModelPrices.update({
+                (ModelPrices.pattern eq "opus") and (ModelPrices.inputPrice eq 15.0) and
+                    (ModelPrices.outputPrice eq 75.0) and (ModelPrices.cacheReadPrice eq 1.5) and
+                    (ModelPrices.cacheWritePrice eq 18.75)
+            }) {
+                it[inputPrice] = 5.0
+                it[outputPrice] = 25.0
+                it[cacheReadPrice] = 0.5
+                it[cacheWritePrice] = 6.25
             }
         }
         invalidate()

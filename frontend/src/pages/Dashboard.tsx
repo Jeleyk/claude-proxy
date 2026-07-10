@@ -76,6 +76,7 @@ export function Dashboard() {
           <div className="label">Total cost</div>
           <div className="value">{fmtUsd(stats.totalCost)}</div>
           <div className="hint">{fmtTokens(stats.totalInputTokens)} in / {fmtTokens(stats.totalOutputTokens)} out</div>
+          <div className="hint">{fmtTokens(stats.totalCacheReadTokens)} cache-r / {fmtTokens(stats.totalCacheWriteTokens)} cache-w</div>
         </div>
         <div className="card">
           <div className="label">Next reset</div>
@@ -90,7 +91,7 @@ export function Dashboard() {
           <thead>
             <tr>
               <th>Prio</th><th>Name</th><th>Group</th><th>Type</th>
-              <th>5-hour</th><th>Weekly</th><th>Coef</th><th>Eff. left</th><th>Cost</th><th>Tokens in/out</th><th>Status</th>
+              <th>5-hour</th><th>Weekly</th><th>Coef</th><th>Eff. left</th><th>Cost</th><th>Tokens in/out · cache r/w</th><th>Status</th>
             </tr>
           </thead>
           <tbody>
@@ -105,7 +106,10 @@ export function Dashboard() {
                 <td className="num">×{a.coefficient}</td>
                 <td className="num">{a.effectiveRemaining == null ? '—' : a.effectiveRemaining.toFixed(2)}</td>
                 <td className="num">{fmtUsd(a.totalCost)}</td>
-                <td className="num">{fmtTokens(a.totalInputTokens)} / {fmtTokens(a.totalOutputTokens)}</td>
+                <td className="num">
+                  {fmtTokens(a.totalInputTokens)} / {fmtTokens(a.totalOutputTokens)}
+                  <div className="hint">cache {fmtTokens(a.totalCacheReadTokens)} / {fmtTokens(a.totalCacheWriteTokens)}</div>
+                </td>
                 <td>{healthBadge(a)}</td>
               </tr>
             ))}

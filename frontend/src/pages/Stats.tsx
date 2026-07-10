@@ -137,7 +137,7 @@ export function Stats({ user }: { user: UserDto }) {
           <h2>Recent requests</h2>
           <div className="tablewrap">
             <table>
-              <thead><tr><th>Time</th>{canAccounts && <th>Account</th>}<th>Model</th><th>In</th><th>Out</th><th>Cost</th><th>Status</th></tr></thead>
+              <thead><tr><th>Time</th>{canAccounts && <th>Account</th>}<th>Model</th><th>In</th><th>Out</th><th>Cache R</th><th>Cache W</th><th>Cost</th><th>Status</th></tr></thead>
               <tbody>
                 {recent.map((e) => (
                   <tr key={e.id}>
@@ -146,11 +146,13 @@ export function Stats({ user }: { user: UserDto }) {
                     <td className="hint">{e.model ?? '—'}</td>
                     <td className="num">{e.inputTokens}</td>
                     <td className="num">{e.outputTokens}</td>
+                    <td className="num">{e.cacheReadTokens}</td>
+                    <td className="num">{e.cacheWriteTokens}</td>
                     <td className="num">{fmtUsd(e.cost)}</td>
                     <td><span className={`badge ${e.httpStatus >= 200 && e.httpStatus < 300 ? 'ok' : e.httpStatus === 429 ? 'warn' : 'bad'}`}>{e.httpStatus}</span></td>
                   </tr>
                 ))}
-                {recent.length === 0 && <tr><td colSpan={canAccounts ? 7 : 6} className="hint">No requests yet.</td></tr>}
+                {recent.length === 0 && <tr><td colSpan={canAccounts ? 9 : 8} className="hint">No requests yet.</td></tr>}
               </tbody>
             </table>
           </div>
