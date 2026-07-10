@@ -2,6 +2,7 @@ package org.claudeproxy.proxy
 
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
+import io.ktor.server.request.httpMethod
 import io.ktor.server.request.receive
 import io.ktor.server.request.uri
 import io.ktor.server.response.respond
@@ -32,6 +33,8 @@ class ProxyEngine(
     private val log = LoggerFactory.getLogger("ProxyEngine")
 
     suspend fun handle(call: ApplicationCall) {
+        log.info("IN {} {} clen={} te={} expect={}", call.request.httpMethod.value, call.request.uri,
+            call.request.headers["content-length"], call.request.headers["transfer-encoding"], call.request.headers["expect"])
         // Inbound auth: proxy token from Authorization: Bearer, or x-api-key.
         val token = extractInboundToken(call)
         if (token == null) {
@@ -53,8 +56,11 @@ class ProxyEngine(
         // (ungrouped accounts are always available).
         val allowedGroups: Set<Int>? = if (Permission.ADMIN in perms) null else UserRepo.allowedGroupsOf(userId)
 
-        val bodyBytes = runCatching { call.receive<ByteArray>() }.getOrDefault(ByteArray(0))
+        val bodyBytes = runCatching { call.receive<ByteArray>() }
+            .onFailure { log.warn("body read failed for {}: {}", call.request.uri, it.toString()) }
+            .getOrDefault(ByteArray(0))
         val pathAndQuery = call.request.uri
+        log.info("BODY {} bytes for {}", bodyBytes.size, pathAndQuery)
 
         // Requests that don't consume subscription quota (token counting, model listing)
         // should always work if any account exists — no limit checks, ignore rate-limit.
@@ -132,11 +138,18 @@ class ProxyEngine(
     }
 }
 
+private val routeLog = LoggerFactory.getLogger("ProxyRoute")
+
 /** Mounts the proxy under Anthropic API paths. Claude Code appends /v1/... to the base URL. */
 fun Route.proxyRoutes(engine: ProxyEngine) {
     route("/v1/{...}") {
         handle {
-            engine.handle(call)
+            try {
+                engine.handle(call)
+            } catch (t: Throwable) {
+                routeLog.error("proxy handler threw for {} {}: {}", call.request.httpMethod.value, call.request.uri, t.toString(), t)
+                throw t
+            }
         }
     }
 }
