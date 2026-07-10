@@ -73,6 +73,7 @@ class UpstreamForwarder(
         bodyBytes: ByteArray,
         userId: Int?,
         canRetry: Boolean = false,
+        allowedGroups: Set<Int>? = null,
     ): ForwardResult {
         val method = call.request.httpMethod
         val url = "$upstreamBaseUrl$pathAndQuery"
@@ -169,10 +170,14 @@ class UpstreamForwarder(
                 // reading response header" and an endless client retry loop.
                 val model = modelFromRequest(bodyBytes)
                 val scanner = SseUsageScanner()
+                val errorScan = SseErrorScanner()
                 val src = response.bodyAsChannel()
                 var relayed = 0L
                 var chunks = 0
                 var keepalives = 0
+                // Set when a retryable error surfaces mid-stream (after the head went out):
+                // the status we record for this attempt instead of the 200 we already sent.
+                var streamErrorStatus: Int? = null
                 val buf = ByteArray(16 * 1024)
                 // A client that disconnects mid-stream closes the write channel; that's normal,
                 // not an error. Swallow it and still record whatever usage we scanned.
@@ -199,6 +204,19 @@ class UpstreamForwarder(
                                     val n = src.readAvailable(buf, 0, buf.size)
                                     if (n > 0) {
                                         scanner.feed(buf, 0, n)
+                                        errorScan.feed(buf, 0, n)
+                                        val errType = errorScan.retryableType
+                                        if (errType != null) {
+                                            // A limit/overload surfaced *inside* the stream, so the
+                                            // 200 head is already out and we can't retry another
+                                            // account transparently. Don't relay the raw error frame;
+                                            // hand the client a normalized retryable error so it
+                                            // re-sends the whole request (which then picks a different
+                                            // account). If the inject fails, we break out and let the
+                                            // truncated stream force the retry instead.
+                                            streamErrorStatus = injectStreamError(this, errType, account, userId, allowedGroups)
+                                            break
+                                        }
                                         writeFully(buf, 0, n)
                                         relayed += n
                                         chunks++
@@ -213,7 +231,7 @@ class UpstreamForwarder(
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     log.warn("relay acct#{} write failed after {} bytes / {} chunks: {}", account.id, relayed, chunks, e.toString())
                 }
-                UsageRepo.record(account.id, userId, scanner.input, scanner.cacheRead, scanner.cacheCreation, scanner.output, status.value, model)
+                UsageRepo.record(account.id, userId, scanner.input, scanner.cacheRead, scanner.cacheCreation, scanner.output, streamErrorStatus ?: status.value, model)
             } else {
                 // Buffer JSON (single message) so we can extract token usage.
                 val bytes = response.readRawBytes()
@@ -222,6 +240,54 @@ class UpstreamForwarder(
             }
             ForwardResult.Served
         }
+    }
+
+    /**
+     * A retryable error appeared mid-stream. Park the account if it was a real rate-limit,
+     * then write a normalized Anthropic-shaped `error` event to the client so it retries.
+     * When another account is available we send `overloaded_error` (retry now → lands on the
+     * other account); when the pool is exhausted we send `rate_limit_error` with a "retry in Ns"
+     * hint. Returns the status to record for this attempt. If the write fails (client already
+     * gone), the broken stream itself triggers the client's retry.
+     */
+    private suspend fun injectStreamError(
+        channel: io.ktor.utils.io.ByteWriteChannel,
+        errType: String,
+        account: AccountRuntime,
+        userId: Int?,
+        allowedGroups: Set<Int>?,
+    ): Int {
+        // A genuine rate-limit means this account should be skipped on the retry; park it.
+        if (errType == "rate_limit_error") {
+            val cur = pool.get(account.id)?.limit ?: account.limit
+            val until = cur.windows.values.mapNotNull { it.resetAt }.minOrNull() ?: Instant.now().plusSeconds(60)
+            pool.markRateLimited(account.id, until)
+        }
+        val hasAlt = pool.availability(userId, allowedGroups).healthy > 0
+        val type: String
+        val message: String
+        val status: Int
+        if (hasAlt) {
+            type = "overloaded_error"
+            message = "claude-proxy: account limit hit mid-stream, switching account — retry"
+            status = 529
+        } else {
+            val secs = pool.earliestReset()?.let {
+                maxOf(1L, java.time.Duration.between(Instant.now(), it).seconds)
+            }
+            type = "rate_limit_error"
+            message = "claude-proxy: all accounts rate-limited" + (secs?.let { "; retry in ${it}s" } ?: "")
+            status = 429
+        }
+        val frame = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"$type\",\"message\":\"$message\"}}\n\n"
+        runCatching {
+            channel.writeStringUtf8(frame)
+            channel.flush()
+        }.onFailure {
+            log.warn("mid-stream error inject failed acct#{}: {}", account.id, it.toString())
+        }
+        log.warn("mid-stream {} acct#{} -> injected {} (hasAlt={})", errType, account.id, type, hasAlt)
+        return status
     }
 
     private fun applyAuth(builder: io.ktor.client.request.HttpRequestBuilder, account: AccountRuntime) {

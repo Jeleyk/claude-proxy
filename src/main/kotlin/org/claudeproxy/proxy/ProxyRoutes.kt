@@ -67,7 +67,7 @@ class ProxyEngine(
         if (isFreePath(pathAndQuery)) {
             val account = pool.selectAny(userId, allowedGroups)
             if (account == null) { respondNoAccount(call, userId, allowedGroups); return }
-            forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = false)
+            forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = false, allowedGroups = allowedGroups)
             return
         }
 
@@ -98,7 +98,7 @@ class ProxyEngine(
         for ((i, account) in order.withIndex()) {
             pool.markActive(account.id)
             val isLast = i == order.lastIndex
-            when (forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = !isLast)) {
+            when (forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = !isLast, allowedGroups = allowedGroups)) {
                 is ForwardResult.Served -> return
                 is ForwardResult.Retry -> log.info("Account {} unavailable, trying next", account.id)
             }
