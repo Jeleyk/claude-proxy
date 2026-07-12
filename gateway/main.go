@@ -9,16 +9,20 @@ import (
 	"time"
 
 	"claudeproxy/gateway/internal/config"
+	"claudeproxy/gateway/internal/control"
+	"claudeproxy/gateway/internal/proxy"
 )
 
 func main() {
 	cfg := config.Load()
+	ctrl := control.New(cfg.ServiceURL, cfg.InternalToken)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"message":"ok"}`))
 	})
-	// The datapath handler is mounted on "/" in Task B3.
+	// Datapath: everything else forwards to Anthropic via the control API.
+	mux.Handle("/", proxy.NewHandler(cfg, ctrl))
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
