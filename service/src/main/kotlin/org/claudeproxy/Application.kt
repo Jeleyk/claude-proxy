@@ -45,6 +45,7 @@ fun main() {
     val config = Config.load()
     Secrets.init(Crypto(config.masterKey))
     Db.init(config)
+    org.claudeproxy.cache.RedisCache.init(config.redisUrl)
 
     val pool = AccountPool()
     val forwarder = UpstreamForwarder(pool, config.upstreamBaseUrl)

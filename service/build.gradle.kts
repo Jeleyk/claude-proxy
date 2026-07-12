@@ -44,6 +44,9 @@ dependencies {
     // Security
     implementation("at.favre.lib:bcrypt:0.10.2")
 
+    // Redis cache + pub/sub (service-internal accelerator; DB stays source of truth)
+    implementation("io.lettuce:lettuce-core:6.4.0.RELEASE")
+
     // Serialization / util
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
@@ -76,14 +79,8 @@ tasks.test {
     useJUnitPlatform()
 }
 
-// Build the React SPA into src/main/resources/static (served by Ktor).
-val buildFrontend = tasks.register<Exec>("buildFrontend") {
-    workingDir = file("frontend")
-    commandLine("sh", "-c", "pnpm install && pnpm build")
-}
-tasks.named("processResources") { mustRunAfter(buildFrontend) }
-
-// Fat jar for deployment
+// Fat jar for deployment. The UI is no longer baked in — nginx serves the SPA (see
+// deploy/Dockerfile.nginx). This jar is the service only (API + datapath).
 tasks.register<Jar>("fatJar") {
     archiveClassifier.set("all")
     manifest {
@@ -97,13 +94,4 @@ tasks.register<Jar>("fatJar") {
     from({
         configurations.runtimeClasspath.get().filter { it.name.endsWith("jar") }.map { zipTree(it) }
     })
-}
-
-// One command to produce a self-contained fat jar with the UI baked in:
-//   ./gradlew bundle   ->  build/libs/claude-proxy-<version>-all.jar
-tasks.named<Jar>("fatJar") { mustRunAfter(buildFrontend) }
-tasks.register("bundle") {
-    group = "build"
-    description = "Build the frontend and package a self-contained fat jar."
-    dependsOn(buildFrontend, "fatJar")
 }
