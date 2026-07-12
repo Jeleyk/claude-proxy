@@ -7,7 +7,6 @@ import io.ktor.server.application.install
 import io.ktor.server.engine.applicationEnvironment
 import io.ktor.server.engine.connector
 import io.ktor.server.engine.embeddedServer
-import io.ktor.server.http.content.singlePageApplication
 import io.ktor.server.netty.Netty
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
@@ -17,6 +16,9 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.accounts.LimitProbe
@@ -24,6 +26,8 @@ import org.claudeproxy.accounts.LimitScheduler
 import org.claudeproxy.accounts.TokenRefresher
 import org.claudeproxy.api.MessageResponse
 import org.claudeproxy.api.adminRoutes
+import org.claudeproxy.api.internalRoutes
+import org.claudeproxy.datapath.DatapathService
 import org.claudeproxy.auth.ForbiddenException
 import org.claudeproxy.auth.UnauthorizedException
 import org.claudeproxy.auth.installSecurity
@@ -133,6 +137,7 @@ fun Application.module(
     kotlinx.coroutines.runBlocking { pool.reload() }
     refresher.start(GlobalScope)
     scheduler.start(GlobalScope)
+    startSessionMapPruner()
 
     routing {
         get("/healthz") { call.respond(MessageResponse("ok")) }
@@ -143,13 +148,24 @@ fun Application.module(
         // Management REST API.
         adminRoutes(pool, probe, config.publicBaseUrl)
 
-        // React SPA (built into resources/static). Declared last so it only catches
-        // unmatched GETs and falls back to index.html for client-side routes.
-        singlePageApplication {
-            useResources = true
-            filesPath = "static"
-            defaultPage = "index.html"
-            applicationRoute = "/"
-        }
+        // Private control API for the Go gateway (never routed publicly by nginx).
+        internalRoutes(DatapathService(pool), config.internalToken)
+
+        // The SPA is served by the nginx router (see deploy/), not by the service.
+    }
+}
+
+/**
+ * Daily TTL sweep for session-id rotation state. Rows first seen more than
+ * SESSION_MAP_TTL_DAYS ago (default 30) are dead — a Claude Code session never lives that long.
+ */
+private fun startSessionMapPruner() = GlobalScope.launch {
+    val ttl = java.time.Duration.ofDays(envOrProp("SESSION_MAP_TTL_DAYS")?.toLongOrNull() ?: 30L)
+    while (isActive) {
+        runCatching {
+            val n = org.claudeproxy.repo.SessionMapRepo.pruneOlderThan(java.time.Instant.now().minus(ttl))
+            if (n > 0) log.info("Pruned {} session-map rows older than {} days", n, ttl.toDays())
+        }.onFailure { log.warn("session-map prune failed: {}", it.message) }
+        delay(java.time.Duration.ofHours(24).toMillis())
     }
 }
