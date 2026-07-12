@@ -1,12 +1,16 @@
 .git
 .gradle
+.kotlin
 build
+service/.gradle
+service/.kotlin
+service/build
 frontend/node_modules
 frontend/dist
-src/main/resources/static/assets
 data
 *.db
 *.db-*
 .env
 .idea
 pgdata
+.DS_Store

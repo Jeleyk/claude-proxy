@@ -1,48 +1,11 @@
-import { ReactNode, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  api, DailyStats, fmtTokens, fmtUsd, has, TokenKindSeries, TokenStats,
+  api, DailyStats, fmtTokens, fmtUsd, has, ModelBreakdown, TokenKindSeries, TokenStats,
   UsageEvent, UsageSummary, UserDto, WindowStats,
 } from '../api';
 import { LineChart, Series, SERIES_COLORS, StackedBarChart } from '../Chart';
+import { Legend, sumKinds, shiftDate, todayUtc, tokenSeries, TOKEN_KINDS, W5H, WWK } from './statsShared';
 import { Segmented, Select } from '../ui';
-
-const W5H = '#5a7fb0', WWK = '#c96442';
-const TOKEN_KINDS: { key: keyof TokenKindSeries; label: string; color: string }[] = [
-  { key: 'input', label: 'Input', color: '#c96442' },
-  { key: 'output', label: 'Output', color: '#5a7fb0' },
-  { key: 'cacheRead', label: 'Cache read', color: '#4f9d69' },
-  { key: 'cacheWrite', label: 'Cache write', color: '#c08a2e' },
-];
-
-function todayUtc(): string { return new Date().toISOString().slice(0, 10); }
-function shiftDate(d: string, days: number): string {
-  const dt = new Date(d + 'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate() + days); return dt.toISOString().slice(0, 10);
-}
-function sumKinds(s: TokenKindSeries): number {
-  return (['input', 'output', 'cacheRead', 'cacheWrite'] as const)
-    .reduce((t, k) => t + (s[k] || []).reduce((a, b) => a + b, 0), 0);
-}
-function tokenSeries(src: TokenKindSeries, hidden: Set<string>): Series[] {
-  return TOKEN_KINDS.filter((k) => !hidden.has(k.key)).map((k) => ({ name: k.label, color: k.color, values: src[k.key] || [] }));
-}
-
-/** Legend chips; interactive (toggles series) when `onToggle` is supplied. */
-function Legend({ items, hidden, onToggle }: {
-  items: { key: string; label: string; color: string }[];
-  hidden?: Set<string>; onToggle?: (k: string) => void;
-}) {
-  return (
-    <div className="legend">
-      {items.map((it) => {
-        const off = !!hidden?.has(it.key);
-        const inner: ReactNode = (<><span className="sw" style={{ background: it.color }} />{it.label}</>);
-        return onToggle
-          ? <button key={it.key} type="button" className={'lg' + (off ? ' off' : '')} onClick={() => onToggle(it.key)}>{inner}</button>
-          : <span key={it.key} className="lg">{inner}</span>;
-      })}
-    </div>
-  );
-}
 
 export function Stats({ user }: { user: UserDto }) {
   const canStats = has(user, 'STATS_VIEW');
@@ -54,6 +17,8 @@ export function Stats({ user }: { user: UserDto }) {
   const [tokens, setTokens] = useState<TokenStats | null>(null);
   const [summary, setSummary] = useState<UsageSummary[]>([]);
   const [recent, setRecent] = useState<UsageEvent[]>([]);
+  const [models, setModels] = useState<ModelBreakdown | null>(null);
+  const [modelPeriod, setModelPeriod] = useState<'today' | 'all'>('all');
   const [endDate, setEndDate] = useState(todayUtc());
   const [days, setDays] = useState(7);
   const [err, setErr] = useState<string | null>(null);
@@ -65,11 +30,11 @@ export function Stats({ user }: { user: UserDto }) {
   async function load() {
     try {
       if (canStats) {
-        const [d, w, t, s] = await Promise.all([
+        const [d, w, t, s, m] = await Promise.all([
           api.statsDaily(days, endDate), api.statsWindows(days, endDate),
-          api.statsTokens(days, endDate), api.statsSummary(),
+          api.statsTokens(days, endDate), api.statsSummary(), api.statsModels(),
         ]);
-        setDaily(d); setWindows(w); setTokens(t); setSummary(s);
+        setDaily(d); setWindows(w); setTokens(t); setSummary(s); setModels(m);
       }
       if (canRecent) setRecent(await api.statsRecent());
       setErr(null);
@@ -214,6 +179,37 @@ export function Stats({ user }: { user: UserDto }) {
               </div>
             </>
           )}
+
+          {/* pool-wide per-model breakdown with a today / all-time toggle */}
+          {(() => {
+            const rows = models ? (modelPeriod === 'today' ? models.today : models.allTime) : [];
+            return (
+              <>
+                <div className="head-row">
+                  <h2>By model</h2>
+                  <Segmented<'today' | 'all'> value={modelPeriod} onChange={setModelPeriod} options={[
+                    { value: 'today', label: 'Today' }, { value: 'all', label: 'All time' },
+                  ]} />
+                </div>
+                <div className="tablewrap">
+                  <table>
+                    <thead><tr><th>Model</th><th className="num">Requests</th><th className="num">Tokens</th><th className="num">Cost</th></tr></thead>
+                    <tbody>
+                      {rows.map((m, i) => (
+                        <tr key={i}>
+                          <td className="mono">{m.model ?? '—'}</td>
+                          <td className="num">{m.requests.toLocaleString()}</td>
+                          <td className="num">{m.cleanTokens.toLocaleString()}</td>
+                          <td className="num">{fmtUsd(m.cost)}</td>
+                        </tr>
+                      ))}
+                      {rows.length === 0 && <tr><td colSpan={4} className="empty">No usage {modelPeriod === 'today' ? 'today' : 'yet'}.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            );
+          })()}
 
           <h2>Per account (24h)</h2>
           <div className="tablewrap">

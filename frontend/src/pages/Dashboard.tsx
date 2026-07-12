@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AccountDto, api, GroupDto, has, PoolStats, UserDto } from '../api';
-import { AccountEditModal, AccountsTable, AddAccountModal, globalAccountApi, Groups, PoolCards } from '../accounts';
+import { AccountEditModal, AccountsTable, AddAccountModal, globalAccountApi, GroupsModal, PoolCards } from '../accounts';
 
 export function Dashboard({ user }: { user: UserDto }) {
   const [stats, setStats] = useState<PoolStats | null>(null);
@@ -9,6 +9,7 @@ export function Dashboard({ user }: { user: UserDto }) {
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<AccountDto | null>(null);
   const [adding, setAdding] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState(false);
   const canManage = has(user, 'ACCOUNTS_MANAGE');
 
   async function load() {
@@ -38,6 +39,7 @@ export function Dashboard({ user }: { user: UserDto }) {
         </div>
         <div className="row">
           {canManage && <button onClick={() => setAdding(true)}>+ Add account</button>}
+          {canManage && <button className="ghost" onClick={() => setGroupsOpen(true)}>Edit groups</button>}
           <button className="ghost" disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Refreshing…' : '↻ Refresh limits'}</button>
         </div>
       </div>
@@ -45,7 +47,6 @@ export function Dashboard({ user }: { user: UserDto }) {
       {!stats ? (<div className="hint">Loading pool…</div>) : (
         <>
           <PoolCards stats={stats} scope="global" />
-          {canManage && <div style={{ marginTop: 18 }}><Groups groups={groups} onChange={setGroups} onAccountsChange={setStats} /></div>}
           <h2>Accounts by priority</h2>
           <AccountsTable stats={stats} groups={groups} showGroup canManage={canManage}
             onEdit={setEditing} onToggle={toggle} onDelete={del} onRefreshOne={refreshOne} />
@@ -59,6 +60,9 @@ export function Dashboard({ user }: { user: UserDto }) {
       {adding && (
         <AddAccountModal scope="global" groups={groups} accountApi={globalAccountApi}
           onClose={() => setAdding(false)} onDone={setStats} />
+      )}
+      {groupsOpen && (
+        <GroupsModal groups={groups} onChange={setGroups} onAccountsChange={setStats} onClose={() => setGroupsOpen(false)} />
       )}
     </div>
   );

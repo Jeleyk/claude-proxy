@@ -10,3 +10,9 @@ data/
 .DS_Store
 local.properties
 pgdata/
+
+# Build artifacts / non-hygienic
+*.tsbuildinfo
+
+# Superpowers (local agent scratch: skills, specs, plans)
+docs/superpowers/

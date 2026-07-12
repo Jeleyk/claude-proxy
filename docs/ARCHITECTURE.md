@@ -1,10 +1,14 @@
 # Architecture
 
-A single Ktor application serves two surfaces on the same origin:
+An nginx router (in `docker-compose`) fronts three components on one origin:
 
-- **Datapath** — `/v1/{...}` transparently proxies the Anthropic API for Claude Code.
-- **Management API + SPA** — `/api/*` REST endpoints and the React admin UI (served from
-  `resources/static`).
+- **Datapath** — `/gateway/{...}` (nginx strips the prefix → the service sees `/v1/{...}`)
+  transparently proxies the Anthropic API for Claude Code. Served by the Kotlin **service**
+  today; a Go **gateway** in Spec B (nginx flips one `proxy_pass`).
+- **Management API** — `/api/*` REST endpoints on the Kotlin **service**.
+- **SPA** — the React admin UI, static files served by nginx at `/` (react-router).
+
+The Kotlin service (`service/`) still owns all business logic; it no longer serves the UI.
 
 ## Request lifecycle (datapath)
 
@@ -73,11 +77,13 @@ compared to the user's optional `dailyCostLimit`.
 
 ## Frontend
 
-React 18 + Vite + TS in `frontend/src/`, built into `resources/static` and served by Ktor.
-Pages: Dashboard (pool), Accounts, Tokens, Stats (cost + window-utilization SVG charts),
-MyStats, ModelPricing, Users, Login. Charts are hand-rolled SVG in `Chart.tsx`; shared
-components in `ui.tsx`; API client + types in `api.ts`. In dev, Vite (`:5173`) proxies `/api`
-and `/v1` to the backend; in production everything is same-origin.
+React 18 + Vite + TS in `frontend/src/`, built to `frontend/dist` and served by the nginx
+router. Section URLs use **react-router-dom** (`/dashboard`, `/my/accounts`, `/my/stats`,
+`/stats`, `/tokens`, `/pricing`, `/users`); nginx `try_files` falls unknown paths back to
+`index.html`. Pages: Dashboard (pool), Accounts, Tokens, Stats (cost + window-utilization SVG
+charts), MyStats, ModelPricing, Users, Login. Charts are hand-rolled SVG in `Chart.tsx`; shared
+components in `ui.tsx`; API client + types in `api.ts`. In dev, Vite (`:5173`) proxies `/api`,
+`/gateway`, `/v1`, `/healthz` to the service; in production everything is same-origin via nginx.
 
 ## Server engine tuning (`Application.kt`)
 

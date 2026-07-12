@@ -3,7 +3,7 @@
 // admin oversight view on the Users page.
 import { useState } from 'react';
 import { AccountDto, api, fmtReset, fmtTokens, fmtUsd, GroupDto, PoolStats, WindowLimitDto } from './api';
-import { Modal, Segmented, Switch } from './ui';
+import { Modal, NumberInput, Segmented, Switch } from './ui';
 
 /** The scope-specific API calls a table/modal needs. Bound to the global or personal endpoints. */
 export interface AccountApi {
@@ -66,7 +66,7 @@ export function PoolCards({ stats, scope }: { stats: PoolStats; scope: Scope }) 
       <div className="card">
         <div className="label">Capacity left</div>
         <div className="value">{Math.round(capPct * 100)}%</div>
-        <div className="hint">{stats.totalEffectiveRemaining.toFixed(2)} / {stats.totalEffectiveCapacity.toFixed(2)} weighted</div>
+        <div className="hint">{stats.totalEffectiveRemaining.toFixed(2)} / {stats.totalEffectiveCapacity.toFixed(2)} weighted · 5-hour</div>
       </div>
       <div className="card"><div className="label">Total requests</div><div className="value">{stats.totalRequests.toLocaleString()}</div></div>
       <div className="card">
@@ -86,6 +86,33 @@ export function PoolCards({ stats, scope }: { stats: PoolStats; scope: Scope }) 
 
 /* ---------------------------------------------------------------- rich table */
 
+interface HoverState { a: AccountDto; x: number; y: number; }
+
+/** Cursor-following breakdown for the "Total" tokens column (in/out/cache + cost + requests). */
+function TokenTooltip({ h }: { h: HoverState }) {
+  const { a } = h;
+  const total = a.totalInputTokens + a.totalOutputTokens + a.totalCacheReadTokens + a.totalCacheWriteTokens;
+  // clamp within the viewport so it never spills off the edges
+  const left = Math.min(h.x + 16, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 210);
+  const above = typeof window !== 'undefined' && h.y > window.innerHeight - 200;
+  const top = above ? h.y - 200 : h.y + 16;
+  const row = (label: string, val: string, cls = '') => (
+    <div className={`tp-row ${cls}`.trim()}><span>{label}</span><b>{val}</b></div>
+  );
+  return (
+    <div className="tokpop" style={{ left, top }}>
+      {row('Input', a.totalInputTokens.toLocaleString())}
+      {row('Output', a.totalOutputTokens.toLocaleString())}
+      {row('Cache read', a.totalCacheReadTokens.toLocaleString())}
+      {row('Cache write', a.totalCacheWriteTokens.toLocaleString())}
+      <div className="tp-div" />
+      {row('Total tokens', total.toLocaleString())}
+      {row('Requests', a.totalRequests.toLocaleString())}
+      {row('Cost', fmtUsd(a.totalCost), 'cost')}
+    </div>
+  );
+}
+
 export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onToggle, onDelete, onRefreshOne }: {
   stats: PoolStats;
   groups: GroupDto[];
@@ -97,19 +124,22 @@ export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onT
   onRefreshOne: (a: AccountDto) => void;
 }) {
   const groupName = (id: number | null) => groups.find((g) => g.id === id)?.name;
-  const cols = 10 + (showGroup ? 1 : 0) + (canManage ? 1 : 0);
+  const [hover, setHover] = useState<HoverState | null>(null);
+  const cols = 8 + (showGroup ? 1 : 0) + (canManage ? 1 : 0);
   return (
     <div className="tablewrap">
       <table>
         <thead>
           <tr>
             <th>Prio</th><th>Name</th>{showGroup && <th>Group</th>}<th>Type</th>
-            <th>5-hour</th><th>Weekly</th><th>Coef</th><th>Eff. left</th><th>Cost</th>
-            <th>Tokens in/out · cache r/w</th><th>Status</th>{canManage && <th></th>}
+            <th>5-hour</th><th>Weekly</th><th>Coef</th>
+            <th className="num">Total</th><th>Status</th>{canManage && <th></th>}
           </tr>
         </thead>
         <tbody>
-          {stats.accounts.map((a) => (
+          {stats.accounts.map((a) => {
+            const total = a.totalInputTokens + a.totalOutputTokens + a.totalCacheReadTokens + a.totalCacheWriteTokens;
+            return (
             <tr key={a.id}>
               <td className="num">{a.priority}</td>
               <td>{a.name} {a.id === stats.activeAccountId && <span className="badge active">active</span>}</td>
@@ -118,11 +148,11 @@ export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onT
               <td><WindowCell w={a.fiveHour} isApi={a.type === 'API_KEY'} /></td>
               <td><WindowCell w={a.weekly} isApi={a.type === 'API_KEY'} /></td>
               <td className="num">×{a.coefficient}</td>
-              <td className="num">{a.effectiveRemaining == null ? '—' : a.effectiveRemaining.toFixed(2)}</td>
-              <td className="num">{fmtUsd(a.totalCost)}</td>
-              <td className="num">
-                {fmtTokens(a.totalInputTokens)} / {fmtTokens(a.totalOutputTokens)}
-                <div className="hint">cache {fmtTokens(a.totalCacheReadTokens)} / {fmtTokens(a.totalCacheWriteTokens)}</div>
+              <td className="num totalcell"
+                onMouseEnter={(e) => setHover({ a, x: e.clientX, y: e.clientY })}
+                onMouseMove={(e) => setHover({ a, x: e.clientX, y: e.clientY })}
+                onMouseLeave={() => setHover((h) => (h?.a.id === a.id ? null : h))}>
+                {fmtTokens(total)}
               </td>
               <td>{healthBadge(a)}</td>
               {canManage && (
@@ -136,10 +166,11 @@ export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onT
                 </td>
               )}
             </tr>
-          ))}
+          ); })}
           {stats.accounts.length === 0 && <tr><td colSpan={cols} className="hint">No accounts yet.</td></tr>}
         </tbody>
       </table>
+      {hover && <TokenTooltip h={hover} />}
     </div>
   );
 }
@@ -155,35 +186,45 @@ export function GroupSelect({ value, groups, onChange }: { value: number | null;
   );
 }
 
-export function Groups({ groups, onChange, onAccountsChange }: { groups: GroupDto[]; onChange: (g: GroupDto[]) => void; onAccountsChange: (s: PoolStats) => void }) {
-  const [name, setName] = useState('');
-  async function create() { if (!name.trim()) return; onChange(await api.createGroup(name.trim())); setName(''); }
-  async function del(id: number) {
-    if (!confirm('Delete group? Accounts in it become ungrouped.')) return;
-    await api.deleteGroup(id); onChange(await api.groups()); onAccountsChange(await api.accounts());
-  }
-  async function rename(id: number, cur: string) {
-    const n = prompt('Rename group', cur); if (n && n.trim()) onChange(await api.renameGroup(id, n.trim()));
+/** One editable group row inside the modal: inline rename + delete. */
+function GroupRow({ g, onChange, onAccountsChange }: { g: GroupDto; onChange: (g: GroupDto[]) => void; onAccountsChange: (s: PoolStats) => void }) {
+  const [name, setName] = useState(g.name);
+  const dirty = name.trim() !== g.name && name.trim() !== '';
+  async function save() { if (dirty) onChange(await api.renameGroup(g.id, name.trim())); }
+  async function del() {
+    if (!confirm(`Delete group "${g.name}"? Accounts in it become ungrouped.`)) return;
+    await api.deleteGroup(g.id); onChange(await api.groups()); onAccountsChange(await api.accounts());
   }
   return (
-    <div className="panel narrow">
-      <h2 style={{ marginTop: 0 }}>Account groups</h2>
-      <p className="hint" style={{ marginTop: -4 }}>Group accounts to grant users access to a subset. Ungrouped accounts are usable by everyone.</p>
-      <div className="pillrow" style={{ marginBottom: 12 }}>
-        {groups.map((g) => (
-          <span key={g.id} className="grouptag" style={{ padding: '5px 10px', display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-            {g.name} <span className="hint">({g.accountCount})</span>
-            <a onClick={() => rename(g.id, g.name)} style={{ cursor: 'pointer' }}>✎</a>
-            <a onClick={() => del(g.id)} style={{ cursor: 'pointer', color: 'var(--bad)' }}>×</a>
-          </span>
-        ))}
-        {groups.length === 0 && <span className="hint">No groups yet.</span>}
-      </div>
-      <div className="row">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="new group name" onKeyDown={(e) => e.key === 'Enter' && create()} />
-        <button onClick={create}>Add group</button>
-      </div>
+    <div className="grouprow">
+      <input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && save()} />
+      <span className="gr-count">{g.accountCount} acct{g.accountCount === 1 ? '' : 's'}</span>
+      {dirty && <button className="sm" onClick={save}>Save</button>}
+      <button className="sm danger" onClick={del}>Delete</button>
     </div>
+  );
+}
+
+/** Modal to manage account groups: list current (rename/delete) + create new. */
+export function GroupsModal({ groups, onChange, onAccountsChange, onClose }: {
+  groups: GroupDto[]; onChange: (g: GroupDto[]) => void; onAccountsChange: (s: PoolStats) => void; onClose: () => void;
+}) {
+  const [name, setName] = useState('');
+  async function create() { if (!name.trim()) return; onChange(await api.createGroup(name.trim())); setName(''); }
+  return (
+    <Modal title="Account groups" onClose={onClose} footer={<button className="ghost" onClick={onClose}>Close</button>}>
+      <p className="hint" style={{ marginTop: 0 }}>Group accounts to grant users access to a subset. Ungrouped accounts are usable by everyone.</p>
+      <div style={{ marginBottom: 16 }}>
+        {groups.length === 0 && <p className="hint">No groups yet.</p>}
+        {groups.map((g) => <GroupRow key={g.id} g={g} onChange={onChange} onAccountsChange={onAccountsChange} />)}
+      </div>
+      <label className="field" style={{ marginBottom: 0 }}><span>New group</span>
+        <div className="row">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="group name" onKeyDown={(e) => e.key === 'Enter' && create()} />
+          <button onClick={create}>Add</button>
+        </div>
+      </label>
+    </Modal>
   );
 }
 
@@ -195,10 +236,11 @@ export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }:
 }) {
   const [name, setName] = useState(a.name);
   const [prio, setPrio] = useState(a.priority);
-  const [thr, setThr] = useState(a.threshold);
+  const [thrPct, setThrPct] = useState(Math.round(a.threshold * 100));
   const [coef, setCoef] = useState(a.coefficient);
+  const [overThreshold, setOverThreshold] = useState(a.overThreshold);
   const [group, setGroup] = useState<number | null>(a.groupId);
-  const [clientId, setClientId] = useState(a.clientId ?? '');
+  const [deviceId, setDeviceId] = useState(a.deviceId ?? '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const isGlobal = scope === 'global';
@@ -206,25 +248,33 @@ export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }:
   async function save() {
     setBusy(true); setErr(null);
     try {
-      const body: any = { name, priority: prio, threshold: thr, coefficient: coef, clientId: clientId.trim() || undefined };
+      const body: any = { name, priority: prio, threshold: thrPct / 100, coefficient: coef, overThreshold, deviceId: deviceId.trim() || undefined };
       if (isGlobal) { body.groupId = group; body.clearGroup = group == null; }
       onSaved(await update(a.id, body));
     } catch (e: any) { setErr(e.message); setBusy(false); }
   }
-  function regen() { setClientId(crypto.randomUUID()); }
+  // 64-hex, shaped like a genuine Claude Code device id.
+  function regen() {
+    const b = new Uint8Array(32); crypto.getRandomValues(b);
+    setDeviceId(Array.from(b, (x) => x.toString(16).padStart(2, '0')).join(''));
+  }
 
   return (
     <Modal title={`Edit ${a.name}`} onClose={onClose}
       footer={<><button className="ghost" onClick={onClose}>Cancel</button><button disabled={busy} onClick={save}>{busy ? '…' : 'Save'}</button></>}>
       <label className="field"><span>Name</span><input value={name} onChange={(e) => setName(e.target.value)} /></label>
       <div className="grid2">
-        <label className="field"><span>Priority (lower = used first)</span><input type="number" value={prio} onChange={(e) => setPrio(Math.trunc(+e.target.value))} /></label>
+        <label className="field"><span>Priority (lower = used first)</span><NumberInput value={prio} onChange={(v) => setPrio(Math.trunc(v))} allowNegative /></label>
         {isGlobal && <label className="field"><span>Group</span><GroupSelect value={group} groups={groups} onChange={setGroup} /></label>}
-        <label className="field"><span>Threshold (0–1)</span><input type="number" step="0.05" min="0" max="1" value={thr} onChange={(e) => setThr(+e.target.value)} /></label>
-        <label className="field"><span>Coefficient (×1 / ×5 / ×20)</span><input type="number" step="0.5" min="0" value={coef} onChange={(e) => setCoef(+e.target.value)} /></label>
+        <label className="field"><span>Threshold (%)</span><NumberInput value={thrPct} onChange={setThrPct} min={0} max={100} /></label>
+        <label className="field"><span>Coefficient (×1 / ×5 / ×20)</span><NumberInput value={coef} onChange={setCoef} min={0} step={0.5} /></label>
       </div>
-      <label className="field"><span>Client ID (per-account device identity sent upstream)</span>
-        <div className="row"><input className="mono" value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="uuid" /><button className="ghost sm" onClick={regen} type="button">Regenerate</button></div>
+      <label className="field switch-field">
+        <span>Over-threshold fallback<br /><small className="hint">Keep using this account past its threshold when every account is saturated. Off by default.</small></span>
+        <Switch checked={overThreshold} onChange={setOverThreshold} />
+      </label>
+      <label className="field"><span>Device ID (per-account fingerprint sent in request body)</span>
+        <div className="row"><input className="mono" value={deviceId} onChange={(e) => setDeviceId(e.target.value)} placeholder="64 hex chars" /><button className="ghost sm" onClick={regen} type="button">Regenerate</button></div>
       </label>
       <p className="hint">Type <b>{a.type.toLowerCase()}</b> · created {new Date(a.createdAt).toLocaleString()}</p>
       {err && <div className="err">{err}</div>}
@@ -243,7 +293,7 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
   const [name, setName] = useState('');
   const [groupId, setGroupId] = useState<number | null>(null);
   const [priority, setPriority] = useState(100);
-  const [threshold, setThreshold] = useState(0.9);
+  const [thresholdPct, setThresholdPct] = useState(90);
   const [coefficient, setCoefficient] = useState(1);
   // credential fields
   const [type, setType] = useState('API_KEY');
@@ -262,7 +312,7 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
   async function submitCred() {
     setBusy(true); setErr(null);
     try {
-      const body: any = { name, type, priority, threshold, coefficient, ...groupBody() };
+      const body: any = { name, type, priority, threshold: thresholdPct / 100, coefficient, ...groupBody() };
       if (type === 'API_KEY') body.apiKey = apiKey;
       else { body.accessToken = accessToken; if (refreshToken) body.refreshToken = refreshToken; }
       onDone(await accountApi.create(body));
@@ -277,7 +327,7 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
   async function completeOauth() {
     if (!oauthState) return; setBusy(true); setErr(null);
     try {
-      onDone(await accountApi.oauthComplete({ state: oauthState, code, name, priority, threshold, coefficient, ...groupBody() }));
+      onDone(await accountApi.oauthComplete({ state: oauthState, code, name, priority, threshold: thresholdPct / 100, coefficient, ...groupBody() }));
       onClose();
     } catch (e: any) { setErr(e.message); setBusy(false); }
   }
@@ -309,9 +359,9 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
               </select>
             </label>
             {isGlobal && <label className="field"><span>Group</span><GroupSelect value={groupId} groups={groups} onChange={setGroupId} /></label>}
-            <label className="field"><span>Priority (lower = first)</span><input type="number" value={priority} onChange={(e) => setPriority(+e.target.value)} /></label>
-            <label className="field"><span>Threshold (0–1)</span><input type="number" step="0.05" value={threshold} onChange={(e) => setThreshold(+e.target.value)} /></label>
-            <label className="field"><span>Coefficient (×1 / ×5 / ×20)</span><input type="number" step="0.5" value={coefficient} onChange={(e) => setCoefficient(+e.target.value)} /></label>
+            <label className="field"><span>Priority (lower = first)</span><NumberInput value={priority} onChange={(v) => setPriority(Math.trunc(v))} allowNegative /></label>
+            <label className="field"><span>Threshold (%)</span><NumberInput value={thresholdPct} onChange={setThresholdPct} min={0} max={100} /></label>
+            <label className="field"><span>Coefficient (×1 / ×5 / ×20)</span><NumberInput value={coefficient} onChange={setCoefficient} min={0} step={0.5} /></label>
           </div>
           {type === 'API_KEY'
             ? <label className="field"><span>API key</span><input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-ant-api03-…" /></label>
@@ -330,8 +380,8 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
           <label className="field"><span>Account name</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. max-oauth-1" /></label>
           <div className="grid2">
             {isGlobal && <label className="field"><span>Group</span><GroupSelect value={groupId} groups={groups} onChange={setGroupId} /></label>}
-            <label className="field"><span>Priority</span><input type="number" value={priority} onChange={(e) => setPriority(+e.target.value)} /></label>
-            <label className="field"><span>Coefficient</span><input type="number" step="0.5" value={coefficient} onChange={(e) => setCoefficient(+e.target.value)} /></label>
+            <label className="field"><span>Priority</span><NumberInput value={priority} onChange={(v) => setPriority(Math.trunc(v))} allowNegative /></label>
+            <label className="field"><span>Coefficient</span><NumberInput value={coefficient} onChange={setCoefficient} min={0} step={0.5} /></label>
           </div>
           {oauthState && <label className="field"><span>Authorization code</span><input value={code} onChange={(e) => setCode(e.target.value)} placeholder="paste code (or code#state)" /></label>}
         </>

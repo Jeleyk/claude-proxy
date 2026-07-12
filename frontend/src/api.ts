@@ -9,6 +9,7 @@ export interface UserDto {
   allowedGroups: number[];
   allGroups: boolean;
   dailyCostLimit: number | null;
+  preferGlobalPool: boolean;
   todayCost: number;
   todayInputTokens: number;
   todayOutputTokens: number;
@@ -41,6 +42,7 @@ export interface AccountDto {
   threshold: number;
   coefficient: number;
   enabled: boolean;
+  overThreshold: boolean;
   health: string;
   fiveHour: WindowLimitDto | null;
   weekly: WindowLimitDto | null;
@@ -53,7 +55,7 @@ export interface AccountDto {
   totalCacheWriteTokens: number;
   totalCost: number;
   totalRequests: number;
-  clientId: string | null;
+  deviceId: string | null;
   createdAt: string;
 }
 
@@ -119,6 +121,8 @@ export const api = {
     req<UserDto>('POST', '/api/auth/login', { username, password }),
   logout: () => req<unknown>('POST', '/api/auth/logout'),
   me: () => req<UserDto>('GET', '/api/auth/me'),
+  updateProfile: (b: { currentPassword: string; username?: string; password?: string }) =>
+    req<UserDto>('PATCH', '/api/account', b),
 
   accounts: () => req<PoolStats>('GET', '/api/accounts'),
   createAccount: (b: unknown) => req<PoolStats>('POST', '/api/accounts', b),
@@ -165,10 +169,15 @@ export const api = {
 
   statsSummary: () => req<UsageSummary[]>('GET', '/api/stats/summary'),
   statsRecent: () => req<UsageEvent[]>('GET', '/api/stats/recent'),
+  statsModels: () => req<ModelBreakdown>('GET', '/api/stats/models'),
   statsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/daily?days=${days}${end ? `&end=${end}` : ''}`),
   statsWindows: (days: number, end?: string) => req<WindowStats>('GET', `/api/stats/windows?days=${days}${end ? `&end=${end}` : ''}`),
   statsTokens: (days: number, end?: string) => req<TokenStats>('GET', `/api/stats/tokens?days=${days}${end ? `&end=${end}` : ''}`),
   myStats: () => req<MyStats>('GET', '/api/stats/mine'),
+  myStatsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/mine/daily?days=${days}${end ? `&end=${end}` : ''}`),
+  myStatsWindows: (days: number, end?: string) => req<WindowStats>('GET', `/api/stats/mine/windows?days=${days}${end ? `&end=${end}` : ''}`),
+  myStatsTokens: (days: number, end?: string) => req<TokenStats>('GET', `/api/stats/mine/tokens?days=${days}${end ? `&end=${end}` : ''}`),
+  setAccountOrder: (preferGlobalPool: boolean) => req<UserDto>('PATCH', '/api/my/account-order', { preferGlobalPool }),
   resetAllStats: () => req<{ message: string }>('POST', '/api/stats/reset'),
   resetUserStats: (id: number) => req<{ message: string }>('POST', `/api/users/${id}/stats/reset`),
   resetMyStats: () => req<{ message: string }>('POST', '/api/stats/mine/reset'),
@@ -177,11 +186,12 @@ export const api = {
 export interface UsageSummary { accountId: number; accountName: string | null; requests: number; inputTokens: number; outputTokens: number; cost: number; }
 export interface UsageEvent { id: number; accountId: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; cost: number; httpStatus: number; model: string | null; }
 export interface ModelUsage { model: string | null; requests: number; cleanTokens: number; cost: number; }
+export interface ModelBreakdown { today: ModelUsage[]; allTime: ModelUsage[]; }
 export interface MyStats {
   todayCost: number; todayClean: number; todayRequests: number;
   totalCost: number; totalClean: number; totalRequests: number;
   dailyCostLimit: number | null;
-  perModel: ModelUsage[]; recent: UsageEvent[];
+  perModel: ModelUsage[]; perModelToday: ModelUsage[]; recent: UsageEvent[];
 }
 export interface AccountSeries { accountId: number; accountName: string | null; cost: number[]; requests: number[]; }
 export interface DailyStats {

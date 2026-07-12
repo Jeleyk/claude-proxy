@@ -6,7 +6,8 @@ export function Tokens() {
   const [tokens, setTokens] = useState<ProxyTokenDto[]>([]);
   const [name, setName] = useState('');
   const [revealed, setRevealed] = useState<ProxyTokenDto | null>(null);
-  const [base, setBase] = useState(window.location.origin);
+  // The datapath is fronted by nginx under /gateway (Claude Code appends /v1/...).
+  const [base, setBase] = useState(window.location.origin + '/gateway');
   const [me, setMe] = useState<UserDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -14,7 +15,7 @@ export function Tokens() {
     try {
       setTokens(await api.tokens());
       const c = await api.config().catch(() => ({ publicBaseUrl: '' }));
-      if (c.publicBaseUrl) setBase(c.publicBaseUrl);
+      if (c.publicBaseUrl) setBase(c.publicBaseUrl + '/gateway');
       setMe(await api.me().catch(() => null));
     } catch (e: any) { setErr(e.message); }
   }

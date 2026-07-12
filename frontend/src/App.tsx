@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
+import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { api, has, UserDto } from './api';
-import { Icon, IconButton, ThemeToggle } from './ui';
+import { Icon, IconButton, Modal, ThemeToggle } from './ui';
 import { Login } from './pages/Login';
 import { Dashboard } from './pages/Dashboard';
 import { MyAccounts } from './pages/MyAccounts';
@@ -10,10 +11,8 @@ import { ModelPricing } from './pages/ModelPricing';
 import { Stats } from './pages/Stats';
 import { MyStats } from './pages/MyStats';
 
-type View = 'dashboard' | 'myaccounts' | 'users' | 'tokens' | 'pricing' | 'stats' | 'mystats';
-
 interface NavDef {
-  key: View;
+  path: string;
   label: string;
   icon: string;
   perm?: string;
@@ -21,27 +20,52 @@ interface NavDef {
 }
 
 const NAV: NavDef[] = [
-  { key: 'dashboard', label: 'Dashboard', icon: 'dashboard', perm: 'ACCOUNTS_VIEW' },
-  { key: 'myaccounts', label: 'My Accounts', icon: 'accounts', perm: 'ACCOUNTS_OWN_MANAGE' },
-  { key: 'mystats', label: 'My Stats', icon: 'mystats', perm: 'STATS_VIEW_OWN' },
-  { key: 'stats', label: 'Statistics', icon: 'stats', anyPerm: ['STATS_VIEW', 'STATS_VIEW_RECENT', 'STATS_VIEW_ACCOUNTS'] },
-  { key: 'tokens', label: 'Proxy Tokens', icon: 'tokens', perm: 'PROXY_USE' },
-  { key: 'pricing', label: 'Model Pricing', icon: 'pricing', perm: 'ADMIN' },
-  { key: 'users', label: 'Users & Roles', icon: 'users', perm: 'USERS_MANAGE' },
+  { path: '/dashboard', label: 'Dashboard', icon: 'dashboard', perm: 'ACCOUNTS_VIEW' },
+  { path: '/my/accounts', label: 'My Accounts', icon: 'accounts', perm: 'ACCOUNTS_OWN_MANAGE' },
+  { path: '/my/stats', label: 'My Stats', icon: 'mystats', perm: 'STATS_VIEW_OWN' },
+  { path: '/stats', label: 'Statistics', icon: 'stats', anyPerm: ['STATS_VIEW', 'STATS_VIEW_RECENT', 'STATS_VIEW_ACCOUNTS'] },
+  { path: '/tokens', label: 'Proxy Tokens', icon: 'tokens', perm: 'PROXY_USE' },
+  { path: '/pricing', label: 'Model Pricing', icon: 'pricing', perm: 'ADMIN' },
+  { path: '/users', label: 'Users & Roles', icon: 'users', perm: 'USERS_MANAGE' },
 ];
+
+const navAllowed = (u: UserDto, n: NavDef) =>
+  (!n.perm || has(u, n.perm)) && (!n.anyPerm || n.anyPerm.some((p) => has(u, p)));
+
+/** First section the user is allowed to see — the landing target for `/` and unknown paths. */
+function firstAllowedPath(u: UserDto): string {
+  return NAV.find((n) => navAllowed(u, n))?.path ?? '/tokens';
+}
 
 export function App() {
   const [user, setUser] = useState<UserDto | null>(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<View>('dashboard');
-  const [collapsed, setCollapsed] = useState(() => {
-    try { return localStorage.getItem('cp-sidebar-collapsed') === '1'; } catch { return false; }
-  });
-  const [drawerOpen, setDrawerOpen] = useState(false);
 
   useEffect(() => {
     api.me().then(setUser).catch(() => setUser(null)).finally(() => setLoading(false));
   }, []);
+
+  if (loading) return <div className="login-wrap">Loading…</div>;
+  if (!user) return <Login onLogin={setUser} />;
+
+  return (
+    <BrowserRouter>
+      <Shell user={user} setUser={setUser} />
+    </BrowserRouter>
+  );
+}
+
+/** The authenticated app shell: sidebar, topbar, and the routed section content. */
+function Shell({ user, setUser }: { user: UserDto; setUser: (u: UserDto | null) => void }) {
+  const location = useLocation();
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem('cp-sidebar-collapsed') === '1'; } catch { return false; }
+  });
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+
+  // Close the mobile drawer whenever the route changes.
+  useEffect(() => { setDrawerOpen(false); }, [location.pathname]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDrawerOpen(false); };
@@ -57,21 +81,15 @@ export function App() {
     });
   }
 
-  if (loading) return <div className="login-wrap">Loading…</div>;
-  if (!user) return <Login onLogin={(u) => { setUser(u); setView(firstAllowed(u)); }} />;
-
-  const navAllowed = (n: NavDef) =>
-    (!n.perm || has(user, n.perm)) && (!n.anyPerm || n.anyPerm.some((p) => has(user, p)));
-  const allowed = NAV.filter(navAllowed);
-  const activeView = allowed.some((n) => n.key === view) ? view : (allowed[0]?.key ?? 'tokens');
-  const activeLabel = allowed.find((n) => n.key === activeView)?.label ?? 'claude-proxy';
-
   async function logout() {
     await api.logout().catch(() => {});
     setUser(null);
   }
 
-  function go(key: View) { setView(key); setDrawerOpen(false); }
+  const allowed = NAV.filter((n) => navAllowed(user, n));
+  const active = NAV.find((n) => n.path === location.pathname);
+  const activeLabel = active?.label ?? 'claude-proxy';
+  const landing = firstAllowedPath(user);
 
   return (
     <div className={'app' + (collapsed ? ' collapsed' : '') + (drawerOpen ? ' drawer-open' : '')}>
@@ -84,17 +102,15 @@ export function App() {
         </div>
         <nav>
           {allowed.map((n) => (
-            <button
-              key={n.key}
-              type="button"
-              className={'navitem' + (n.key === activeView ? ' active' : '')}
-              onClick={() => go(n.key)}
+            <NavLink
+              key={n.path}
+              to={n.path}
+              className={({ isActive }) => 'navitem' + (isActive ? ' active' : '')}
               title={collapsed ? n.label : undefined}
-              aria-current={n.key === activeView ? 'page' : undefined}
             >
               <Icon name={n.icon} />
               <span className="label">{n.label}</span>
-            </button>
+            </NavLink>
           ))}
         </nav>
         <div className="spacer" />
@@ -106,9 +122,9 @@ export function App() {
             <span>{user.roles.join(', ') || 'no roles'}</span>
           </div>
           <div className="row" style={{ justifyContent: 'space-between' }}>
-            <button className="ghost sm" onClick={logout}>
+            <button className="ghost sm settings-btn" onClick={() => setProfileOpen(true)} title="Settings">
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                <Icon name="logout" size={15} /><span className="logout-label">Log out</span>
+                <Icon name="settings" size={15} /><span className="settings-label">Settings</span>
               </span>
             </button>
             <IconButton className="collapse-btn" icon={collapsed ? 'expand' : 'collapse'}
@@ -124,20 +140,86 @@ export function App() {
           <div className="right"><ThemeToggle /></div>
         </header>
         <div className="main-scroll">
-          {activeView === 'dashboard' && <Dashboard user={user} />}
-          {activeView === 'myaccounts' && <MyAccounts />}
-          {activeView === 'mystats' && <MyStats canReset={has(user, 'STATS_RESET_OWN')} />}
-          {activeView === 'stats' && <Stats user={user} />}
-          {activeView === 'tokens' && <Tokens />}
-          {activeView === 'pricing' && <ModelPricing />}
-          {activeView === 'users' && <Users isAdmin={has(user, 'ADMIN')} />}
+          <Routes>
+            <Route path="/dashboard" element={<RequirePerm user={user} perm="ACCOUNTS_VIEW"><Dashboard user={user} /></RequirePerm>} />
+            <Route path="/my/accounts" element={<RequirePerm user={user} perm="ACCOUNTS_OWN_MANAGE"><MyAccounts user={user} onUserChange={setUser} /></RequirePerm>} />
+            <Route path="/my/stats" element={<RequirePerm user={user} perm="STATS_VIEW_OWN"><MyStats canReset={has(user, 'STATS_RESET_OWN')} /></RequirePerm>} />
+            <Route path="/stats" element={<RequirePerm user={user} anyPerm={['STATS_VIEW', 'STATS_VIEW_RECENT', 'STATS_VIEW_ACCOUNTS']}><Stats user={user} /></RequirePerm>} />
+            <Route path="/tokens" element={<RequirePerm user={user} perm="PROXY_USE"><Tokens /></RequirePerm>} />
+            <Route path="/pricing" element={<RequirePerm user={user} perm="ADMIN"><ModelPricing /></RequirePerm>} />
+            <Route path="/users" element={<RequirePerm user={user} perm="USERS_MANAGE"><Users isAdmin={has(user, 'ADMIN')} /></RequirePerm>} />
+            <Route path="*" element={<Navigate to={landing} replace />} />
+          </Routes>
         </div>
       </div>
+
+      {profileOpen && <ProfileModal user={user} onClose={() => setProfileOpen(false)} onSaved={setUser} onLogout={logout} />}
     </div>
   );
 }
 
-function firstAllowed(u: UserDto): View {
-  const first = NAV.find((n) => (!n.perm || has(u, n.perm)) && (!n.anyPerm || n.anyPerm.some((p) => has(u, p))));
-  return (first?.key ?? 'tokens') as View;
+/** Redirects to the user's first allowed section when they lack permission for a route. */
+function RequirePerm({ user, perm, anyPerm, children }: { user: UserDto; perm?: string; anyPerm?: string[]; children: JSX.Element }) {
+  const ok = (!perm || has(user, perm)) && (!anyPerm || anyPerm.some((p) => has(user, p)));
+  return ok ? children : <Navigate to={firstAllowedPath(user)} replace />;
+}
+
+/** Self-service settings: change your own username/password, and log out. */
+function ProfileModal({ user, onClose, onSaved, onLogout }: { user: UserDto; onClose: () => void; onSaved: (u: UserDto) => void; onLogout: () => void }) {
+  const [username, setUsername] = useState(user.username);
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [current, setCurrent] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState(false);
+
+  const nameChanged = username.trim() !== '' && username.trim() !== user.username;
+  const wantsPassword = password !== '';
+  const canSave = current !== '' && (nameChanged || wantsPassword) && !busy;
+
+  async function save() {
+    setErr(null); setOk(false);
+    if (wantsPassword && password !== confirm) { setErr('New passwords do not match'); return; }
+    setBusy(true);
+    try {
+      const updated = await api.updateProfile({
+        currentPassword: current,
+        username: nameChanged ? username.trim() : undefined,
+        password: wantsPassword ? password : undefined,
+      });
+      onSaved(updated);
+      setOk(true); setPassword(''); setConfirm(''); setCurrent('');
+    } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  return (
+    <Modal title="Settings" onClose={onClose}
+      footer={<>
+        <button className="danger" onClick={onLogout}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}><Icon name="logout" size={15} />Log out</span>
+        </button>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
+          <button className="ghost" onClick={onClose}>Close</button>
+          <button disabled={!canSave} onClick={save}>{busy ? '…' : 'Save changes'}</button>
+        </div>
+      </>}>
+      <label className="field"><span>Username</span>
+        <input value={username} onChange={(e) => { setUsername(e.target.value); setOk(false); }} autoComplete="username" />
+      </label>
+      <label className="field"><span>New password <span className="hint">· leave blank to keep</span></span>
+        <input type="password" value={password} onChange={(e) => { setPassword(e.target.value); setOk(false); }} autoComplete="new-password" />
+      </label>
+      {wantsPassword && (
+        <label className="field"><span>Confirm new password</span>
+          <input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+        </label>
+      )}
+      <label className="field" style={{ marginBottom: 0 }}><span>Current password <span className="hint">· required to save</span></span>
+        <input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} autoComplete="current-password" />
+      </label>
+      {err && <div className="err">{err}</div>}
+      {ok && <div className="hint" style={{ color: 'var(--ok)', marginTop: 8 }}>Saved.</div>}
+    </Modal>
+  );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AccountDto, api, fmtTokens, fmtUsd, GroupDto, PoolStats, RoleDto, UserDto } from '../api';
-import { Check, Modal, Switch } from '../ui';
+import { Check, Modal, NumberInput, Switch } from '../ui';
 
 export function Users({ isAdmin }: { isAdmin: boolean }) {
   const [users, setUsers] = useState<UserDto[]>([]);
@@ -190,7 +190,7 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
           <div style={{ marginTop: 10 }}>
             <div className="row">
               <span className="hint">$</span>
-              <input type="number" step="0.5" min="0" value={limitVal} onChange={(e) => setLimitVal(+e.target.value)} />
+              <NumberInput value={limitVal} onChange={setLimitVal} min={0} step={0.5} />
               <span className="hint">per day (UTC)</span>
             </div>
           </div>

@@ -1,20 +1,22 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// Dev: proxy API + proxy datapath to the Kotlin backend on :8787.
-// Build: emit straight into the backend's static resources so one jar serves everything.
+// Dev: proxy the API + datapath to the Kotlin service on :8787. In Spec B the /gateway
+// target flips to the Go gateway's dev port; the service keeps /api + /healthz.
+// Build: emit to ./dist — the nginx image serves it (no longer baked into the jar).
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
     proxy: {
       '/api': 'http://127.0.0.1:8787',
+      '/gateway': 'http://127.0.0.1:8787',
       '/v1': 'http://127.0.0.1:8787',
       '/healthz': 'http://127.0.0.1:8787',
     },
   },
   build: {
-    outDir: '../src/main/resources/static',
+    outDir: 'dist',
     emptyOutDir: true,
   },
 });

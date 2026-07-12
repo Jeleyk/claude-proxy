@@ -18,6 +18,7 @@ const ICON_PATHS: Record<string, ReactNode> = {
   moon: (<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z" />),
   auto: (<><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4" /></>),
   logout: (<><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" /><path d="M10 17l5-5-5-5" /><path d="M15 12H3" /></>),
+  settings: (<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>),
   sparkle: (<path d="M12 3l1.9 5.6a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z" />),
 };
 
@@ -56,17 +57,51 @@ export function Select({ value, options, onChange, minWidth, ariaLabel }: {
   );
 }
 
+/* ---------------------------------------------------------------- number input
+   Spinner-free numeric field. Commits on blur/Enter: empty or (unless allowNegative)
+   negative values snap to `min` (0 by default), and the value is clamped to [min, max]. */
+export function NumberInput({ value, onChange, min = 0, max, step, allowNegative = false, placeholder, className = '', mono = false }: {
+  value: number; onChange: (v: number) => void;
+  min?: number | null; max?: number | null; step?: number; allowNegative?: boolean;
+  placeholder?: string; className?: string; mono?: boolean;
+}) {
+  const [text, setText] = useState(() => String(value));
+  // reflect external value changes (only fires when `value` itself changes, so it never
+  // clobbers an in-progress edit triggered by unrelated re-renders)
+  useEffect(() => { setText(String(value)); }, [value]);
+
+  function commit() {
+    let n = text.trim() === '' ? NaN : Number(text);
+    if (!isFinite(n)) n = 0;
+    if (!allowNegative && n < 0) n = 0;
+    if (min != null && n < min) n = min;
+    if (max != null && n > max) n = max;
+    onChange(n);
+    setText(String(n));
+  }
+  return (
+    <input
+      type="text" inputMode="decimal" step={step}
+      className={`num-input${mono ? ' mono' : ''} ${className}`.trim()}
+      value={text} placeholder={placeholder}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+    />
+  );
+}
+
 /* ---------------------------------------------------------------- segmented */
-export function Segmented<T extends string | number>({ value, options, onChange, className = '' }: {
-  value: T; options: { value: T; label: ReactNode }[]; onChange: (v: T) => void; className?: string;
+export function Segmented<T extends string | number>({ value, options, onChange, className = '', disabled = false }: {
+  value: T; options: { value: T; label: ReactNode }[]; onChange: (v: T) => void; className?: string; disabled?: boolean;
 }) {
   return (
-    <div className={`segmented ${className}`} role="group">
+    <div className={`segmented ${className}` + (disabled ? ' disabled' : '')} role="group">
       {options.map((o) => (
-        <button key={String(o.value)} type="button"
+        <button key={String(o.value)} type="button" disabled={disabled}
           className={'seg' + (o.value === value ? ' active' : '')}
           aria-pressed={o.value === value}
-          onClick={() => onChange(o.value)}>{o.label}</button>
+          onClick={() => { if (!disabled) onChange(o.value); }}>{o.label}</button>
       ))}
     </div>
   );

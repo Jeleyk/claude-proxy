@@ -19,40 +19,47 @@ stats manages everything.
 - **Account types**: API key (`x-api-key`), OAuth (access + refresh, auto-refreshed in the background), OAuth static (access only).
 - **Add accounts in the UI** by pasting a credential, or via the **Login with Claude** OAuth (PKCE) flow.
 - **Users, roles & permissions** — `proxy.use`, `accounts.view`, `stats.view`, `accounts.manage`, `users.manage`, `admin`.
-- **Encrypted secrets at rest** (AES-256-GCM), SQLite storage, single self-contained jar.
+- **Encrypted secrets at rest** (AES-256-GCM); Postgres (prod) or SQLite (local) storage.
+
+## Layout
+
+`frontend/` (React SPA) · `service/` (Kotlin API + datapath) · `gateway/` (Go proxy — planned) ·
+`deploy/` (nginx router config + Dockerfiles). An nginx router fronts everything: `/` → SPA,
+`/api` → service, `/gateway` → datapath.
 
 ## Requirements
 
 - JDK 21+ (tested on Temurin 25)
-- Node 18+ and `pnpm` (only to build the UI)
+- Node 18+ and `pnpm` (to build the UI)
+- Docker + Docker Compose (for the full local stack)
 
-## Quick start (local)
+## Quick start (local, full stack)
 
 ```bash
-cp .env.example .env        # set MASTER_KEY, ADMIN_PASSWORD, ...
-./gradlew bundle            # builds the React UI + a self-contained fat jar
-java -jar build/libs/claude-proxy-0.1.0-all.jar
+cp .env.example .env         # set MASTER_KEY, ADMIN_PASSWORD, ...
+docker-compose up -d --build # nginx (:8080) + service + postgres
 ```
 
-Open http://127.0.0.1:8787 and sign in with the bootstrap admin.
+Open http://127.0.0.1:8080 and sign in with the bootstrap admin.
 
 ### Point Claude Code at the proxy
 
 Create a proxy token in the UI (**Proxy Tokens** page), then:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080/gateway
 export ANTHROPIC_AUTH_TOKEN=<your-proxy-token>
 claude
 ```
 
 ## Development
 
-Run the backend and the Vite dev server separately (Vite proxies `/api` and `/v1`):
+Run the service and the Vite dev server separately (Vite proxies `/api`, `/gateway`, `/v1`,
+`/healthz` to the service — no nginx needed in dev):
 
 ```bash
-# terminal 1 — backend (reads .env)
-./gradlew run
+# terminal 1 — service (reads .env)
+cd service && ./gradlew run
 # terminal 2 — frontend with HMR on http://localhost:5173
 cd frontend && pnpm install && pnpm dev
 ```
@@ -60,8 +67,9 @@ cd frontend && pnpm install && pnpm dev
 ## Server deployment
 
 Set `BIND_HOST=0.0.0.0`, a strong `MASTER_KEY`/`SESSION_SECRET`, and `PUBLIC_DOMAIN`
-to your host. Put a TLS-terminating reverse proxy (Caddy/nginx) in front. The single
-fat jar serves both the UI and the proxy datapath.
+to your host. The compose **nginx** router serves the UI and fans out to the service; put a
+TLS-terminating reverse proxy (Caddy/host nginx + Cloudflare) in front of it. See
+[`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## Configuration
 
