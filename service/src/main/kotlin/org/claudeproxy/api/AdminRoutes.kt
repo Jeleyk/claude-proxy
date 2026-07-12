@@ -61,6 +61,7 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
             call.respond(ModelPriceRepo.list())
         }
         authRoutes()
+        profileRoutes()
         accountRoutes(pool, probe)
         myAccountRoutes(pool, probe)
         groupRoutes(pool)
@@ -160,6 +161,26 @@ private fun Route.authRoutes() {
     }
 }
 
+// ---- self-service profile (any authenticated user) ----
+
+private fun Route.profileRoutes() {
+    // Change your own username and/or password. Current password gates the change.
+    patch("/account") {
+        val user = call.requireUser()
+        val req = call.receive<UpdateProfileRequest>()
+        if (!UserRepo.verifyPassword(user.id, req.currentPassword)) {
+            return@patch call.respond(HttpStatusCode.Unauthorized, MessageResponse("Current password is incorrect"))
+        }
+        val newName = req.username?.trim()?.takeIf { it.isNotBlank() }
+        if (newName != null && newName != user.username && UserRepo.usernameTaken(newName, user.id)) {
+            return@patch call.respond(HttpStatusCode.Conflict, MessageResponse("Username already taken"))
+        }
+        val newPassword = req.password?.takeIf { it.isNotBlank() }
+        UserRepo.updateSelf(user.id, newName, newPassword)
+        call.respond(UserRepo.get(user.id) ?: MessageResponse("updated"))
+    }
+}
+
 // ---- accounts ----
 
 private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
@@ -194,7 +215,7 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateAccountRequest>()
-        AccountRepo.updateConfig(id, req.name, req.groupId, req.priority, req.threshold, req.coefficient, req.enabled, req.clientId, req.clearGroup)
+        AccountRepo.updateConfig(id, req.name, req.groupId, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, req.clearGroup, req.overThreshold)
         pool.reload()
         call.respond(buildPoolStats(pool))
     }
@@ -291,7 +312,7 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
         if (!AccountRepo.isOwnedBy(id, user.id)) return@patch call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
         val req = call.receive<UpdateAccountRequest>()
         // personal accounts are never grouped
-        AccountRepo.updateConfig(id, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.clientId, clearGroup = true)
+        AccountRepo.updateConfig(id, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold)
         pool.reload()
         call.respond(buildOwnedStats(pool, user.id))
     }
@@ -342,6 +363,13 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
             call.respond(HttpStatusCode.BadGateway, MessageResponse("OAuth exchange failed: ${e.message}"))
         }
     }
+    // Switch whether the global pool or personal accounts are tried first for this user's requests.
+    patch("/my/account-order") {
+        val user = call.requirePermission(Permission.ACCOUNTS_ORDER_TOGGLE)
+        val req = call.receive<AccountOrderRequest>()
+        UserRepo.setPreferGlobalPool(user.id, req.preferGlobalPool)
+        call.respond(UserRepo.get(user.id) ?: MessageResponse("updated"))
+    }
 }
 
 // ---- admin oversight of any user's personal accounts (requires users.manage) ----
@@ -360,7 +388,7 @@ private fun Route.userAccountRoutes(pool: AccountPool, probe: LimitProbe) {
         if (uid == null || aid == null) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         if (!AccountRepo.isOwnedBy(aid, uid)) return@patch call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
         val req = call.receive<UpdateAccountRequest>()
-        AccountRepo.updateConfig(aid, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.clientId, clearGroup = true)
+        AccountRepo.updateConfig(aid, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold)
         pool.reload()
         call.respond(buildOwnedStats(pool, uid))
     }
@@ -498,8 +526,16 @@ private fun org.claudeproxy.repo.UserAuth.canAccounts() =
 private fun org.claudeproxy.repo.UserAuth.canOwn() =
     Permission.STATS_VIEW_OWN in permissions || Permission.STATS_VIEW in permissions
 
-/** Build the daily-cost time series for a window of [days] ending at [endDate] (UTC). */
-private fun buildDaily(days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean): DailyStatsPayload {
+/**
+ * Build the daily-cost time series for a window of [days] ending at [endDate] (UTC).
+ * [fetch] supplies the buckets (pool-wide or one user's); [accountFilter], when set, limits the
+ * per-account series to those account ids (the total always reflects every bucket returned).
+ */
+private fun buildDaily(
+    days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean,
+    accountFilter: Set<Int>? = null,
+    fetch: (java.time.Instant, java.time.Instant) -> List<org.claudeproxy.repo.DailyBucketDto> = UsageRepo::dailyBuckets,
+): DailyStatsPayload {
     val n = days.coerceIn(1, 90)
     val startDate = endDate.minusDays((n - 1).toLong())
     val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
@@ -508,7 +544,7 @@ private fun buildDaily(days: Int, endDate: java.time.LocalDate, includeAccounts:
     val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
     val totalCost = DoubleArray(n); val totalReq = LongArray(n)
     val perAcc = HashMap<Int, Pair<DoubleArray, LongArray>>()
-    UsageRepo.dailyBuckets(start, end).forEach { b ->
+    fetch(start, end).forEach { b ->
         val i = idx[b.date] ?: return@forEach
         totalCost[i] += b.cost; totalReq[i] += b.requests
         val (c, r) = perAcc.getOrPut(b.accountId) { DoubleArray(n) to LongArray(n) }
@@ -516,14 +552,23 @@ private fun buildDaily(days: Int, endDate: java.time.LocalDate, includeAccounts:
     }
     val names = AccountRepo.namesMap()
     val series = if (includeAccounts)
-        perAcc.entries.sortedByDescending { it.value.first.sum() }
+        perAcc.entries.filter { accountFilter == null || it.key in accountFilter }
+            .sortedByDescending { it.value.first.sum() }
             .map { (aid, cr) -> AccountSeriesDto(aid, names[aid], cr.first.toList(), cr.second.toList()) }
     else emptyList()
     return DailyStatsPayload(dayLabels, totalCost.toList(), totalReq.toList(), series, includeAccounts)
 }
 
-/** Build per-day token breakdowns (by model + account) for a window of [days] ending at [endDate] (UTC). */
-private fun buildTokens(days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean): TokenStatsPayload {
+/**
+ * Build per-day token breakdowns (by model + account) for a window of [days] ending at [endDate] (UTC).
+ * [fetch] supplies the buckets (pool-wide or one user's); [accountFilter], when set, limits the
+ * per-account series to those account ids (total + per-model always reflect every bucket returned).
+ */
+private fun buildTokens(
+    days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean,
+    accountFilter: Set<Int>? = null,
+    fetch: (java.time.Instant, java.time.Instant) -> List<org.claudeproxy.repo.TokenBucketDto> = UsageRepo::tokenBuckets,
+): TokenStatsPayload {
     val n = days.coerceIn(1, 90)
     val startDate = endDate.minusDays((n - 1).toLong())
     val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
@@ -536,7 +581,7 @@ private fun buildTokens(days: Int, endDate: java.time.LocalDate, includeAccounts
     val total = kinds()
     val perModel = HashMap<String, Array<LongArray>>()
     val perAccount = HashMap<Int, Array<LongArray>>()
-    UsageRepo.tokenBuckets(start, end).forEach { b ->
+    fetch(start, end).forEach { b ->
         val i = idx[b.date] ?: return@forEach
         val m = perModel.getOrPut(b.model ?: "unknown") { kinds() }
         val a = perAccount.getOrPut(b.accountId) { kinds() }
@@ -553,7 +598,8 @@ private fun buildTokens(days: Int, endDate: java.time.LocalDate, includeAccounts
     }
     val names = AccountRepo.namesMap()
     val accountSeries = if (includeAccounts)
-        perAccount.entries.sortedByDescending { (_, k) -> k.sumOf { it.sum() } }
+        perAccount.entries.filter { accountFilter == null || it.key in accountFilter }
+            .sortedByDescending { (_, k) -> k.sumOf { it.sum() } }
             .map { (aid, k) -> TokenAccountSeriesDto(aid, names[aid], k[0].toList(), k[1].toList(), k[2].toList(), k[3].toList()) }
     else emptyList()
 
@@ -564,8 +610,15 @@ private fun buildTokens(days: Int, endDate: java.time.LocalDate, includeAccounts
     )
 }
 
-/** Build bucketed window-utilization series (5h + weekly) for a range, with carry-forward. */
-private fun buildWindows(days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean): WindowStatsPayload {
+/**
+ * Build bucketed window-utilization series (5h + weekly) for a range, with carry-forward.
+ * [keep] decides which account ids contribute — pool-wide excludes personal accounts; the
+ * per-user view keeps only that user's personal accounts.
+ */
+private fun buildWindows(
+    days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean,
+    keep: ((Int) -> Boolean)? = null,
+): WindowStatsPayload {
     val n = days.coerceIn(1, 30)
     val startDate = endDate.minusDays((n - 1).toLong())
     val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
@@ -577,11 +630,11 @@ private fun buildWindows(days: Int, endDate: java.time.LocalDate, includeAccount
             .atZone(java.time.ZoneOffset.UTC).toLocalDateTime().toString().substring(5, 16)
     }
 
-    // (accountId, kind) -> per-bucket [sum, count]
-    val personal = AccountRepo.personalIds()
+    // (accountId, kind) -> per-bucket [sum, count]. Default keep: exclude personal accounts (pool-wide).
+    val includeAccount = keep ?: AccountRepo.personalIds().let { personal -> { id: Int -> id !in personal } }
     val agg = HashMap<Pair<Int, String>, Array<DoubleArray>>()
     org.claudeproxy.repo.WindowSnapshotRepo.fetch(start, end).forEach { s ->
-        if (s.accountId in personal) return@forEach
+        if (!includeAccount(s.accountId)) return@forEach
         val i = ((s.ts.toEpochMilli() - start.toEpochMilli()) / widthMs).toInt().coerceIn(0, buckets - 1)
         val arr = agg.getOrPut(s.accountId to s.kind) { arrayOf(DoubleArray(buckets), DoubleArray(buckets)) }
         arr[0][i] += s.util; arr[1][i] += 1.0
@@ -628,12 +681,17 @@ private fun Route.statsRoutes() {
         val sinceHours = call.parameters["sinceHours"]?.toLongOrNull() ?: 24L
         call.respond(UsageRepo.summarySince(Instant.now().minusSeconds(sinceHours * 3600)))
     }
-    // Recent requests list. Account attribution only if the viewer may see accounts.
+    // Recent requests list (latest 20). Account attribution only if the viewer may see accounts.
     get("/stats/recent") {
         val user = call.requireUser()
         if (!user.canRecent()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_RECENT")
-        val recent = UsageRepo.recent(200)
+        val recent = UsageRepo.recent(20)
         call.respond(if (user.canAccounts()) recent else recent.map { it.copy(accountName = null, accountId = 0) })
+    }
+    // Pool-wide per-model breakdown: today (UTC) + all-time, for the client-side toggle.
+    get("/stats/models") {
+        call.requirePermission(Permission.STATS_VIEW)
+        call.respond(ModelBreakdownPayload(today = UsageRepo.perModel(UserRepo.startOfUtcDay()), allTime = UsageRepo.perModel()))
     }
     // Daily cost time series (graphs). Default: last 7 days ending today (UTC).
     get("/stats/daily") {
@@ -676,15 +734,49 @@ private fun Route.statsRoutes() {
         // "today" mirrors the daily-limit basis (shared-pool spend only); all-time/history stay complete.
         val today = UsageRepo.userTotals(user.id, UserRepo.startOfUtcDay(), globalOnly = true)
         val total = UsageRepo.userTotals(user.id)
-        val recent = UsageRepo.recentForUser(user.id, 100)
+        val recent = UsageRepo.recentForUser(user.id, 20)
         call.respond(
             MyStatsPayload(
                 todayCost = today.cost, todayClean = today.clean, todayRequests = today.requests,
                 totalCost = total.cost, totalClean = total.clean, totalRequests = total.requests,
                 dailyCostLimit = UserRepo.dailyLimitOf(user.id),
                 perModel = UsageRepo.userPerModel(user.id),
+                perModelToday = UsageRepo.userPerModel(user.id, UserRepo.startOfUtcDay()),
                 recent = if (user.canAccounts()) recent else recent.map { it.copy(accountName = null, accountId = 0) },
             ),
         )
     }
+    // Per-user charts mirroring the pool-wide graphs: Spend/Tokens cover ALL of the user's own
+    // usage (any account), while per-account + window series are scoped to the user's personal accounts.
+    get("/stats/mine/daily") {
+        val user = call.requireUser()
+        if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
+        val (days, endDate) = call.rangeParams()
+        call.respond(buildDaily(days, endDate, includeAccounts = true,
+            accountFilter = AccountRepo.personalIdsOf(user.id),
+            fetch = { s, e -> UsageRepo.dailyBucketsForUser(user.id, s, e) }))
+    }
+    get("/stats/mine/tokens") {
+        val user = call.requireUser()
+        if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
+        val (days, endDate) = call.rangeParams()
+        call.respond(buildTokens(days, endDate, includeAccounts = true,
+            accountFilter = AccountRepo.personalIdsOf(user.id),
+            fetch = { s, e -> UsageRepo.tokenBucketsForUser(user.id, s, e) }))
+    }
+    get("/stats/mine/windows") {
+        val user = call.requireUser()
+        if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
+        val (days, endDate) = call.rangeParams()
+        val mine = AccountRepo.personalIdsOf(user.id)
+        call.respond(buildWindows(days, endDate, includeAccounts = true, keep = { it in mine }))
+    }
+}
+
+/** Parse the shared `days` + `end` (UTC) query params used by every time-series endpoint. */
+private fun io.ktor.server.application.ApplicationCall.rangeParams(): Pair<Int, java.time.LocalDate> {
+    val days = parameters["days"]?.toIntOrNull() ?: 7
+    val endDate = parameters["end"]?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
+        ?: java.time.LocalDate.now(java.time.ZoneOffset.UTC)
+    return days to endDate
 }

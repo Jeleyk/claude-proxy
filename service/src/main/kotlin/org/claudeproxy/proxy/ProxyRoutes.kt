@@ -55,6 +55,8 @@ class ProxyEngine(
         // Admins may use any account; others are scoped to their granted groups
         // (ungrouped accounts are always available).
         val allowedGroups: Set<Int>? = if (Permission.ADMIN in perms) null else UserRepo.allowedGroupsOf(userId)
+        // Routing order preference: try the global pool before personal accounts, or vice versa (default).
+        val personalFirst = !UserRepo.preferGlobalPoolOf(userId)
 
         val bodyBytes = runCatching { call.receive<ByteArray>() }
             .onFailure { log.warn("body read failed for {}: {}", call.request.uri, it.toString()) }
@@ -65,7 +67,7 @@ class ProxyEngine(
         // Requests that don't consume subscription quota (token counting, model listing)
         // should always work if any account exists — no limit checks, ignore rate-limit.
         if (isFreePath(pathAndQuery)) {
-            val account = pool.selectAny(userId, allowedGroups)
+            val account = pool.selectAny(userId, allowedGroups, personalFirst)
             if (account == null) { respondNoAccount(call, userId, allowedGroups); return }
             forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = false, allowedGroups = allowedGroups)
             return
@@ -81,7 +83,7 @@ class ProxyEngine(
         // Try accounts in order; every account except the last may retry to the next one.
         // The last account's real upstream response (incl. 429/5xx + retry-after) is passed
         // straight through to the client, so Claude Code sees the true status and backoff.
-        val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups)
+        val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst)
         if (order.isEmpty()) {
             if (overLimit) {
                 call.response.headers.append("x-claude-proxy-daily-limit-usd", costLimit.toString())

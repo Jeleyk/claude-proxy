@@ -10,6 +10,7 @@ import org.claudeproxy.model.Permission
 import org.claudeproxy.model.UserDto
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
@@ -57,13 +58,13 @@ object UserRepo {
 
     fun list(): List<UserDto> = transaction {
         Users.selectAll().map { row ->
-            toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyCostLimit])
+            toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyCostLimit], row[Users.preferGlobalPool])
         }
     }
 
     fun get(userId: Int): UserDto? = transaction {
         val row = Users.selectAll().where { Users.id eq userId }.firstOrNull() ?: return@transaction null
-        toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyCostLimit])
+        toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyCostLimit], row[Users.preferGlobalPool])
     }
 
     /** Per-day spend limit in USD for a user; null = unlimited. */
@@ -71,7 +72,36 @@ object UserRepo {
         Users.selectAll().where { Users.id eq userId }.firstOrNull()?.get(Users.dailyCostLimit)
     }
 
-    private fun toDto(uid: Int, username: String, enabled: Boolean, dailyCostLimit: Double?): UserDto {
+    /** Routing preference: true = try the global pool before the user's own personal accounts. */
+    fun preferGlobalPoolOf(userId: Int): Boolean = transaction {
+        Users.selectAll().where { Users.id eq userId }.firstOrNull()?.get(Users.preferGlobalPool) ?: false
+    }
+
+    fun setPreferGlobalPool(userId: Int, prefer: Boolean) = transaction {
+        Users.update({ Users.id eq userId }) { it[preferGlobalPool] = prefer }
+    }
+
+    /** Verify a plaintext password against the stored hash (self-service profile edits). */
+    fun verifyPassword(userId: Int, plain: String): Boolean = transaction {
+        val hash = Users.selectAll().where { Users.id eq userId }.firstOrNull()?.get(Users.passwordHash)
+            ?: return@transaction false
+        Passwords.verify(plain, hash)
+    }
+
+    /** True if [username] is already used by a different user (case-sensitive, matches the unique index). */
+    fun usernameTaken(username: String, exceptUserId: Int): Boolean = transaction {
+        Users.selectAll().where { (Users.username eq username) and (Users.id neq exceptUserId) }.any()
+    }
+
+    /** Self-service update of one's own username/password. Nulls leave the field unchanged. */
+    fun updateSelf(userId: Int, username: String?, password: String?) = transaction {
+        Users.update({ Users.id eq userId }) {
+            if (username != null) it[Users.username] = username
+            if (password != null) it[passwordHash] = Passwords.hash(password)
+        }
+    }
+
+    private fun toDto(uid: Int, username: String, enabled: Boolean, dailyCostLimit: Double?, preferGlobalPool: Boolean): UserDto {
         val perms = permissionsOf(uid)
         // "today" here reflects shared-pool spend (what the daily limit governs); personal-account usage is excluded.
         val today = UsageRepo.userTotals(uid, startOfUtcDay(), globalOnly = true)
@@ -84,6 +114,7 @@ object UserRepo {
             allowedGroups = allowedGroupsOf(uid).toList(),
             allGroups = Permission.ADMIN in perms,
             dailyCostLimit = dailyCostLimit,
+            preferGlobalPool = preferGlobalPool,
             todayCost = today.cost,
             todayInputTokens = today.input,
             todayOutputTokens = today.output,

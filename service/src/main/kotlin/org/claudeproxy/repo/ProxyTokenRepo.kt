@@ -1,5 +1,6 @@
 package org.claudeproxy.repo
 
+import org.claudeproxy.cache.RedisCache
 import org.claudeproxy.db.Crypto
 import org.claudeproxy.db.ProxyTokens
 import org.claudeproxy.model.ProxyTokenDto
@@ -14,9 +15,19 @@ import java.time.Instant
 
 object ProxyTokenRepo {
 
-    /** Returns the userId that owns a given raw proxy token, or null. Also bumps last_used_at. */
-    fun resolveUser(rawToken: String): Int? = transaction {
+    /**
+     * Returns the userId that owns a given raw proxy token, or null. Hot path: the token→userId
+     * mapping is cached in Redis (`cp:tok:<hash>`, TTL 60s) with a DB fallback, so a cold/absent
+     * Redis is only ever a miss. `last_used_at` is bumped on cache misses (~once per 60s per
+     * token) rather than every request — this avoids a DB write on the hot path.
+     */
+    fun resolveUser(rawToken: String): Int? {
         val hash = Crypto.sha256Hex(rawToken)
+        val cached = RedisCache.getOrLoad("cp:tok:$hash", 60) { loadUserByHash(hash)?.toString() }
+        return cached?.toIntOrNull()
+    }
+
+    private fun loadUserByHash(hash: String): Int? = transaction {
         val row = ProxyTokens.selectAll().where { ProxyTokens.tokenHash eq hash }.firstOrNull()
             ?: return@transaction null
         ProxyTokens.update({ ProxyTokens.tokenHash eq hash }) { it[lastUsedAt] = Instant.now() }
@@ -48,7 +59,19 @@ object ProxyTokenRepo {
         }
     }
 
-    fun delete(id: Int, userId: Int): Boolean = transaction {
-        ProxyTokens.deleteWhere { (ProxyTokens.id eq id) and (ProxyTokens.userId eq userId) } > 0
+    fun delete(id: Int, userId: Int): Boolean {
+        val (deleted, hash) = transaction {
+            val h = ProxyTokens.selectAll()
+                .where { (ProxyTokens.id eq id) and (ProxyTokens.userId eq userId) }
+                .firstOrNull()?.get(ProxyTokens.tokenHash)
+            val n = ProxyTokens.deleteWhere { (ProxyTokens.id eq id) and (ProxyTokens.userId eq userId) }
+            (n > 0) to h
+        }
+        if (deleted && hash != null) {
+            // A revoked token must stop working immediately, not after the 60s TTL.
+            RedisCache.evict("cp:tok:$hash")
+            RedisCache.publishInvalidate("tok:$hash")
+        }
+        return deleted
     }
 }

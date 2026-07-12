@@ -10,6 +10,8 @@ object Users : Table("users") {
     val enabled = bool("enabled").default(true)
     // optional per-day spend limit in USD. null = unlimited.
     val dailyCostLimit = double("daily_cost_limit").nullable()
+    // routing preference: true = try the global pool before this user's personal accounts.
+    val preferGlobalPool = bool("prefer_global_pool").default(false)
     val createdAt = timestamp("created_at")
     override val primaryKey = PrimaryKey(id)
 }
@@ -83,10 +85,14 @@ object Accounts : Table("accounts") {
     val threshold = double("threshold").default(0.9)
     val coefficient = double("coefficient").default(1.0)
     val enabled = bool("enabled").default(true)
+    // opt-in fallback: when every account is over its threshold, only accounts with this flag
+    // stay usable past their threshold; others drop out of selection until their window resets.
+    val overThreshold = bool("over_threshold").default(false)
     val health = varchar("health", 32).default("OK")
     val rateLimitedUntil = timestamp("rate_limited_until").nullable()
-    // distinct per-account device/client identifier sent upstream
-    val clientId = varchar("client_id", 64).nullable()
+    // distinct per-account device fingerprint (64-hex) substituted into the request body's
+    // metadata.user_id.device_id. DB column keeps its historical name `client_id`.
+    val deviceId = varchar("client_id", 64).nullable()
     // null = global (shared pool); otherwise a personal account owned by this user, tried
     // before the global pool and excluded from global statistics.
     val ownerId = integer("owner_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE).nullable()
@@ -142,6 +148,29 @@ object WindowSnapshots : Table("window_snapshots") {
     init { index(false, accountId, windowKind, ts) }
 }
 
+/**
+ * Session-id rotation state. To stop Anthropic correlating one client session-id across
+ * several accounts, the first account to use a given client (origin) session-id keeps it
+ * unchanged; every other account gets a stable, distinct replacement.
+ */
+object SessionOwners : Table("session_owner") {
+    // the client's original X-Claude-Code-Session-Id
+    val origin = varchar("origin", 64)
+    // the account that first used this origin — it presents the origin id unchanged
+    val accountId = integer("account_id")
+    val createdAt = timestamp("created_at")
+    override val primaryKey = PrimaryKey(origin)
+}
+
+object SessionMap : Table("session_map") {
+    val origin = varchar("origin", 64)
+    val accountId = integer("account_id")
+    // session-id this account presents upstream: == origin for the owner, a fresh uuid otherwise
+    val replaced = varchar("replaced", 64)
+    val createdAt = timestamp("created_at")
+    override val primaryKey = PrimaryKey(origin, accountId)
+}
+
 object OAuthAddSessions : Table("oauth_add_sessions") {
     val id = varchar("id", 64)          // state
     val pkceVerifier = varchar("pkce_verifier", 256)
@@ -154,4 +183,5 @@ val ALL_TABLES = arrayOf(
     Users, Settings, ModelPrices, Roles, RolePermissions, UserRoles, ProxyTokens,
     AccountGroups, UserGroupAccess,
     Accounts, AccountSecrets, AccountLimits, UsageEvents, WindowSnapshots, OAuthAddSessions,
+    SessionOwners, SessionMap,
 )

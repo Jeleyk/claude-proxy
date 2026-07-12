@@ -2,19 +2,15 @@ package org.claudeproxy.accounts
 
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.header
-import org.claudeproxy.envOrProp
 import org.claudeproxy.model.AccountType
 
 /** Applies an account's upstream credentials to a client request. */
 object UpstreamAuth {
-    private val clientIdHeader: String get() = envOrProp("ACCOUNT_CLIENT_ID_HEADER") ?: "x-client-id"
 
-    fun apply(builder: HttpRequestBuilder, type: AccountType, secret: AccountSecret, clientId: String? = null) {
-        // Give each account a distinct device/client identity upstream.
-        clientId?.let {
-            builder.headers.remove(clientIdHeader)
-            builder.header(clientIdHeader, it)
-        }
+    fun apply(builder: HttpRequestBuilder, type: AccountType, secret: AccountSecret) {
+        // Note: no `x-client-id` header — genuine Claude Code never sends one, so adding it
+        // marked our traffic as a proxy. Per-account device identity now lives in the request
+        // body (metadata.user_id.device_id), applied by RequestRewriter.
         when (type) {
             AccountType.API_KEY -> secret.apiKey?.let { builder.header("x-api-key", it) }
             AccountType.OAUTH, AccountType.OAUTH_STATIC -> {

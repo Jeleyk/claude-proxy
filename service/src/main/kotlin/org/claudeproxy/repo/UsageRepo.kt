@@ -109,15 +109,30 @@ object UsageRepo {
         acc.mapValues { (_, rows) -> accumulate(rows) }
     }
 
-    fun userPerModel(userId: Int): List<ModelUsageDto> = transaction {
+    private fun perModelOf(rows: Iterable<ResultRow>): List<ModelUsageDto> {
         val acc = HashMap<String?, DoubleArray>()
-        UsageEvents.selectAll().where { UsageEvents.userId eq userId }.forEach { row ->
+        rows.forEach { row ->
             val a = acc.getOrPut(row[UsageEvents.model]) { DoubleArray(3) }
             a[0] += 1
             a[1] += row[UsageEvents.inputTokens] + row[UsageEvents.outputTokens] + row[UsageEvents.cacheReadTokens] + row[UsageEvents.cacheWriteTokens]
             a[2] += row[UsageEvents.cost]
         }
-        acc.map { (m, a) -> ModelUsageDto(m, a[0].toLong(), a[1].toLong(), a[2]) }.sortedByDescending { it.cost }
+        return acc.map { (m, a) -> ModelUsageDto(m, a[0].toLong(), a[1].toLong(), a[2]) }.sortedByDescending { it.cost }
+    }
+
+    /** Per-model breakdown for a single user; [since] limits to events at/after that instant. */
+    fun userPerModel(userId: Int, since: Instant? = null): List<ModelUsageDto> = transaction {
+        val q = if (since != null)
+            UsageEvents.selectAll().where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
+        else UsageEvents.selectAll().where { UsageEvents.userId eq userId }
+        perModelOf(q)
+    }
+
+    /** Pool-wide per-model breakdown (excludes personal accounts); [since] limits the window. */
+    fun perModel(since: Instant? = null): List<ModelUsageDto> = transaction {
+        val personal = personalAccountIds()
+        val q = if (since != null) UsageEvents.selectAll().where { UsageEvents.ts greaterEq since } else UsageEvents.selectAll()
+        perModelOf(if (personal.isEmpty()) q else q.filter { it[UsageEvents.accountId] !in personal })
     }
 
     fun recentForUser(userId: Int, limit: Int = 100): List<UsageEventDto> = transaction {
@@ -158,6 +173,37 @@ object UsageRepo {
                 a[2] += row[UsageEvents.inputTokens] + row[UsageEvents.outputTokens] + row[UsageEvents.cacheReadTokens] + row[UsageEvents.cacheWriteTokens]
             }
         acc.map { (k, a) -> DailyBucketDto(k.first, k.second, a[0], a[1].toLong(), a[2].toLong()) }
+    }
+
+    /** Daily (account, day) buckets for one user's own usage in [start, end), across ALL accounts (incl. personal). */
+    fun dailyBucketsForUser(userId: Int, start: Instant, end: Instant): List<DailyBucketDto> = transaction {
+        val acc = HashMap<Pair<Int, String>, DoubleArray>() // (accountId, date) -> [cost, requests, tokens]
+        UsageEvents.selectAll()
+            .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
+            .forEach { row ->
+                val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
+                val a = acc.getOrPut(row[UsageEvents.accountId] to date) { DoubleArray(3) }
+                a[0] += row[UsageEvents.cost]
+                a[1] += 1
+                a[2] += row[UsageEvents.inputTokens] + row[UsageEvents.outputTokens] + row[UsageEvents.cacheReadTokens] + row[UsageEvents.cacheWriteTokens]
+            }
+        acc.map { (k, a) -> DailyBucketDto(k.first, k.second, a[0], a[1].toLong(), a[2].toLong()) }
+    }
+
+    /** Daily (account, model, day) token buckets for one user's own usage in [start, end), across ALL accounts (incl. personal). */
+    fun tokenBucketsForUser(userId: Int, start: Instant, end: Instant): List<TokenBucketDto> = transaction {
+        val acc = HashMap<Triple<Int, String?, String>, LongArray>() // (accountId, model, date) -> [in, out, cacheRead, cacheWrite]
+        UsageEvents.selectAll()
+            .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
+            .forEach { row ->
+                val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
+                val a = acc.getOrPut(Triple(row[UsageEvents.accountId], row[UsageEvents.model], date)) { LongArray(4) }
+                a[0] += row[UsageEvents.inputTokens]
+                a[1] += row[UsageEvents.outputTokens]
+                a[2] += row[UsageEvents.cacheReadTokens]
+                a[3] += row[UsageEvents.cacheWriteTokens]
+            }
+        acc.map { (k, a) -> TokenBucketDto(k.first, k.second, k.third, a[0], a[1], a[2], a[3]) }
     }
 
     /** Daily (account, model, day) token buckets in [start, end), bucketed by UTC date, kinds kept apart. Excludes personal accounts. */

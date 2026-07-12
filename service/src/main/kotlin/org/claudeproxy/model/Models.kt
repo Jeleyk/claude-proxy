@@ -9,6 +9,7 @@ enum class Permission {
     STATS_VIEW_OWN,     // may view only their own usage statistics
     STATS_RESET_OWN,    // may reset their own stats (resets daily spend — can bypass a limit)
     ACCOUNTS_OWN_MANAGE,// may manage their own personal accounts (tried before the global pool)
+    ACCOUNTS_ORDER_TOGGLE,// may switch whether their personal accounts or the global pool are tried first
     STATS_VIEW_RECENT,  // may view the list of recent requests (pool-wide)
     STATS_VIEW_ACCOUNTS,// may see which account each request/stat came from
     ACCOUNTS_VIEW,      // may view upstream accounts + their limits
@@ -62,6 +63,8 @@ data class UserDto(
     val allGroups: Boolean = false,
     // per-day spend limit in USD; null = unlimited
     val dailyCostLimit: Double? = null,
+    // routing preference: true = try the global pool before personal accounts (default false = personal first)
+    val preferGlobalPool: Boolean = false,
     // usage since the start of the current UTC day
     val todayCost: Double = 0.0,
     val todayInputTokens: Long = 0,
@@ -98,6 +101,8 @@ data class AccountDto(
     val threshold: Double,
     val coefficient: Double,
     val enabled: Boolean,
+    // opt-in fallback: keep using this account past its threshold when all accounts are saturated
+    val overThreshold: Boolean = false,
     val health: String,
     // live limit state per window (nullable when never observed)
     val fiveHour: WindowLimitDto?,
@@ -113,7 +118,7 @@ data class AccountDto(
     val totalCacheWriteTokens: Long,
     val totalCost: Double,
     val totalRequests: Long,
-    val clientId: String?,
+    val deviceId: String?,
     val createdAt: String,
 )
 

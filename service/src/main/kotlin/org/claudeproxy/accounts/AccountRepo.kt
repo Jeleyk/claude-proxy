@@ -33,18 +33,26 @@ data class AccountRuntime(
     val threshold: Double,
     val coefficient: Double,
     val enabled: Boolean,
+    val overThreshold: Boolean,
     val health: AccountHealth,
-    val clientId: String?,
+    // per-account device fingerprint (64-hex) substituted into the upstream request body
+    val deviceId: String?,
     val secret: AccountSecret,
     val limit: LimitState,
 ) {
     fun toDto(createdAt: String, counts: Totals): AccountDto {
         val usage = limit.usageFraction()
-        val effRemaining = usage?.let { coefficient * (1.0 - it) }
+        // "Capacity left" / effective-remaining reflects the SHORT-TERM (5-hour) budget — the
+        // constraint that governs immediate use. Basing it on the max across windows let the
+        // weekly window dominate, so a fresh-5h account looked saturated. Fall back to the max
+        // when no 5-hour reading exists yet.
+        val shortTermUsage = limit.window(WindowKind.FIVE_HOUR)?.usageFraction() ?: usage
+        val effRemaining = shortTermUsage?.let { coefficient * (1.0 - it) }
             ?: if (type == AccountType.API_KEY) coefficient else null
         return AccountDto(
             id = id, name = name, type = type.name, groupId = groupId, ownerId = ownerId, priority = priority,
             threshold = threshold, coefficient = coefficient, enabled = enabled,
+            overThreshold = overThreshold,
             health = health.name,
             fiveHour = limit.window(WindowKind.FIVE_HOUR)?.toDto(),
             weekly = limit.window(WindowKind.WEEKLY)?.toDto(),
@@ -57,7 +65,7 @@ data class AccountRuntime(
             totalCacheWriteTokens = counts.cacheWrite,
             totalCost = counts.cost,
             totalRequests = counts.requests,
-            clientId = clientId,
+            deviceId = deviceId,
             createdAt = createdAt,
         )
     }
@@ -71,6 +79,20 @@ private fun WindowLimit.toDto() = WindowLimitDto(
     status = status.name.takeIf { status != LimitStatus.UNKNOWN },
     updatedAt = updatedAt?.toString(),
 )
+
+/** A genuine Claude Code device id is a 64-char lowercase hex string. */
+private val HEX64 = Regex("^[0-9a-f]{64}$")
+
+/** Random 64-hex device fingerprint, shaped like the one Claude Code sends. */
+fun generateDeviceId(): String {
+    val bytes = ByteArray(32)
+    java.security.SecureRandom().nextBytes(bytes)
+    return bytes.joinToString("") { "%02x".format(it) }
+}
+
+/** Keep an existing 64-hex device id; otherwise (null or legacy UUID) mint a fresh one. */
+private fun normalizeDeviceId(current: String?): String =
+    current?.takeIf { HEX64.matches(it) } ?: generateDeviceId()
 
 object AccountRepo {
 
@@ -92,6 +114,12 @@ object AccountRepo {
                 )
             }.toMap()
             val limit = LimitState(windows = windows, rateLimitedUntil = row[Accounts.rateLimitedUntil])
+            // Ensure every account has a genuine 64-hex device id; backfill legacy/empty values
+            // once and persist so the id stays stable across reloads.
+            val deviceId = normalizeDeviceId(row[Accounts.deviceId])
+            if (deviceId != row[Accounts.deviceId]) {
+                Accounts.update({ Accounts.id eq id }) { it[Accounts.deviceId] = deviceId }
+            }
             val rt = AccountRuntime(
                 id = id,
                 name = row[Accounts.name],
@@ -102,8 +130,9 @@ object AccountRepo {
                 threshold = row[Accounts.threshold],
                 coefficient = row[Accounts.coefficient],
                 enabled = row[Accounts.enabled],
+                overThreshold = row[Accounts.overThreshold],
                 health = runCatching { AccountHealth.valueOf(row[Accounts.health]) }.getOrDefault(AccountHealth.OK),
-                clientId = row[Accounts.clientId],
+                deviceId = deviceId,
                 secret = secret,
                 limit = limit,
             )
@@ -124,6 +153,11 @@ object AccountRepo {
         Accounts.selectAll().mapNotNull { row -> row[Accounts.id].takeIf { row[Accounts.ownerId] != null } }.toSet()
     }
 
+    /** Ids of the personal accounts owned by [userId] — for the user's own per-account stats. */
+    fun personalIdsOf(userId: Int): Set<Int> = transaction {
+        Accounts.selectAll().where { Accounts.ownerId eq userId }.map { it[Accounts.id] }.toSet()
+    }
+
     /** True if account [id] exists and is owned by [userId] (a personal account of that user). */
     fun isOwnedBy(id: Int, userId: Int): Boolean = transaction {
         Accounts.selectAll().where { (Accounts.id eq id) and (Accounts.ownerId eq userId) }.any()
@@ -137,7 +171,7 @@ object AccountRepo {
     fun create(
         name: String, type: AccountType, groupId: Int?, priority: Int, threshold: Double, coefficient: Double,
         secret: AccountSecret, createdBy: Int?, ownerId: Int? = null,
-        clientId: String? = java.util.UUID.randomUUID().toString(),
+        deviceId: String = generateDeviceId(),
     ): Int = transaction {
         val id = Accounts.insert {
             it[Accounts.name] = name
@@ -150,7 +184,7 @@ object AccountRepo {
             it[Accounts.coefficient] = coefficient
             it[enabled] = true
             it[health] = AccountHealth.OK.name
-            it[Accounts.clientId] = clientId
+            it[Accounts.deviceId] = deviceId
             it[Accounts.createdBy] = createdBy
             it[createdAt] = Instant.now()
         }[Accounts.id]
@@ -159,11 +193,11 @@ object AccountRepo {
             it[cipherBlob] = Secrets.encode(secret)
         }
         id
-    }
+    }.also { org.claudeproxy.cache.RedisCache.publishInvalidate("pool") }
 
     fun updateConfig(
         id: Int, name: String?, groupId: Int?, priority: Int?, threshold: Double?, coefficient: Double?,
-        enabled: Boolean?, clientId: String?, clearGroup: Boolean = false,
+        enabled: Boolean?, deviceId: String?, clearGroup: Boolean = false, overThreshold: Boolean? = null,
     ) = transaction {
         Accounts.update({ Accounts.id eq id }) {
             if (name != null) it[Accounts.name] = name
@@ -172,7 +206,8 @@ object AccountRepo {
             if (threshold != null) it[Accounts.threshold] = threshold
             if (coefficient != null) it[Accounts.coefficient] = coefficient
             if (enabled != null) it[Accounts.enabled] = enabled
-            if (clientId != null) it[Accounts.clientId] = clientId
+            if (overThreshold != null) it[Accounts.overThreshold] = overThreshold
+            if (deviceId != null) it[Accounts.deviceId] = deviceId
         }
     }
 
@@ -191,7 +226,7 @@ object AccountRepo {
         AccountLimits.deleteWhere { accountId eq id }
         AccountSecrets.deleteWhere { accountId eq id }
         Accounts.deleteWhere { Accounts.id eq id } > 0
-    }
+    }.also { if (it) org.claudeproxy.cache.RedisCache.publishInvalidate("pool") }
 
     fun persistLimit(id: Int, limit: LimitState) = transaction {
         limit.windows.forEach { (kind, w) ->

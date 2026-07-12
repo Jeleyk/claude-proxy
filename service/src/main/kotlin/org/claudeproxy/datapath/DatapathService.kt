@@ -6,6 +6,7 @@ import org.claudeproxy.accounts.AccountRuntime
 import org.claudeproxy.accounts.RateLimitHeaders
 import org.claudeproxy.api.CandidateDto
 import org.claudeproxy.api.UsageReport
+import org.claudeproxy.cache.RedisCache
 import org.claudeproxy.model.AccountHealth
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.model.LimitState
@@ -13,8 +14,11 @@ import org.claudeproxy.model.Permission
 import org.claudeproxy.model.WindowKind
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.UsageRepo
+import org.claudeproxy.repo.ModelPriceRepo
 import org.claudeproxy.repo.UserRepo
 import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
 
 /** Why a resolve failed, mapped by the route to 401/403. */
 enum class ResolveError { BAD_TOKEN, NO_PERMISSION }
@@ -64,7 +68,7 @@ class DatapathService(private val pool: AccountPool) {
 
         // Per-user daily USD limit is a shared-pool constraint; personal accounts are exempt.
         val costLimit = UserRepo.dailyLimitOf(userId)
-        val usedCost = if (costLimit != null) UsageRepo.userTotals(userId, UserRepo.startOfUtcDay(), globalOnly = true).cost else 0.0
+        val usedCost = if (costLimit != null) cachedDailySpend(userId) else 0.0
         val overLimit = costLimit != null && usedCost >= costLimit
 
         val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst)
@@ -77,6 +81,15 @@ class DatapathService(private val pool: AccountPool) {
      */
     suspend fun applyOutcome(o: UsageReport) {
         UsageRepo.record(o.accountId, o.userId, o.input, o.cacheRead, o.cacheWrite, o.output, o.status, o.model)
+
+        // Keep the cached daily spend fresh. Only *global* (shared-pool) usage counts toward the
+        // per-user daily limit; personal accounts are the user's own quota (exempt). The increment
+        // is a no-op when the key isn't cached — the next resolve recomputes it from the DB.
+        val ownerId = pool.get(o.accountId)?.ownerId
+        if (o.userId != null && ownerId == null) {
+            val cost = ModelPriceRepo.costOf(o.model, o.input, o.cacheRead, o.cacheWrite, o.output)
+            if (cost > 0.0) RedisCache.incrExistingByFloat(spendKey(o.userId), cost)
+        }
 
         val prev = pool.get(o.accountId)?.limit ?: LimitState()
         val newLimit = RateLimitHeaders.parse(o.ratelimitHeaders, prev)
@@ -124,6 +137,26 @@ class DatapathService(private val pool: AccountPool) {
                 put("anthropic-beta", "oauth-2025-04-20")
             }
         }
+    }
+
+    /**
+     * Cached shared-pool daily spend (USD) for a user. Cached in Redis under
+     * `cp:spend:<user>:<utcDate>` until the next UTC midnight, with a DB recompute on miss.
+     */
+    private fun cachedDailySpend(userId: Int): Double {
+        val ttl = secondsToUtcMidnight()
+        val cached = RedisCache.getOrLoad(spendKey(userId), ttl) {
+            UsageRepo.userTotals(userId, UserRepo.startOfUtcDay(), globalOnly = true).cost.toString()
+        }
+        return cached?.toDoubleOrNull() ?: 0.0
+    }
+
+    private fun spendKey(userId: Int): String =
+        "cp:spend:$userId:${LocalDate.now(ZoneOffset.UTC)}"
+
+    private fun secondsToUtcMidnight(): Long {
+        val nextMidnight = LocalDate.now(ZoneOffset.UTC).plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant()
+        return maxOf(1L, java.time.Duration.between(Instant.now(), nextMidnight).seconds)
     }
 
     private fun resetInstantFrom(headers: Map<String, String>): Instant? {

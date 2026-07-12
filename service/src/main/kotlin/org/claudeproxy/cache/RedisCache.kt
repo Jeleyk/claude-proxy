@@ -70,6 +70,17 @@ object RedisCache {
         return value
     }
 
+    /**
+     * Increment an **existing** numeric key by [delta] (no-op if the key is absent or Redis is
+     * disabled). "Existing only" is deliberate: the daily-spend key is seeded from the DB on a
+     * read; if it isn't cached yet, the next read recomputes from the DB (which already includes
+     * the just-recorded usage), so skipping the increment can never under- or over-count.
+     */
+    fun incrExistingByFloat(key: String, delta: Double) {
+        val cmds = commands ?: return
+        runCatching { if ((cmds.exists(key) ?: 0L) > 0L) cmds.incrbyfloat(key, delta) }
+    }
+
     /** Evict a single key (no-op when disabled). */
     fun evict(key: String) {
         val cmds = commands ?: return

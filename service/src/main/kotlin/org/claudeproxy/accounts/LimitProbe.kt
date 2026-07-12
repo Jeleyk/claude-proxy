@@ -32,8 +32,18 @@ class LimitProbe(
     private val probePath: String get() = envOrProp("LIMIT_PROBE_PATH") ?: "/v1/messages"
     private val probeModel: String get() = envOrProp("LIMIT_PROBE_MODEL") ?: "claude-haiku-4-5-20251001"
     private val systemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
-    private val probeBody: String
-        get() = """{"model":"$probeModel","max_tokens":1,"system":"$systemPrompt","messages":[{"role":"user","content":"."}]}"""
+
+    /** Stable per-account probe session id (probes have no client origin session). */
+    private fun probeSessionId(accountId: Int): String =
+        java.util.UUID.nameUUIDFromBytes("claude-proxy-probe-$accountId".toByteArray()).toString()
+
+    /** Probe body framed like Claude Code, carrying this account's device-id + probe session. */
+    private fun probeBody(account: AccountRuntime): String {
+        val deviceId = account.deviceId ?: generateDeviceId()
+        val inner = """{"device_id":"$deviceId","account_uuid":"","session_id":"${probeSessionId(account.id)}"}"""
+        val userId = kotlinx.serialization.json.Json.encodeToString(kotlinx.serialization.json.JsonPrimitive.serializer(), kotlinx.serialization.json.JsonPrimitive(inner))
+        return """{"model":"$probeModel","max_tokens":1,"system":"$systemPrompt","messages":[{"role":"user","content":"."}],"metadata":{"user_id":$userId}}"""
+    }
 
     /** Probe a single account. Returns true if any rate-limit header was observed. */
     suspend fun probe(accountId: Int): Boolean {
@@ -42,8 +52,9 @@ class LimitProbe(
             val resp: HttpResponse = Http.client.post("$upstreamBaseUrl$probePath") {
                 contentType(ContentType.Application.Json)
                 header("anthropic-version", "2023-06-01")
-                UpstreamAuth.apply(this, account.type, account.secret, account.clientId)
-                setBody(probeBody)
+                header("X-Claude-Code-Session-Id", probeSessionId(account.id))
+                UpstreamAuth.apply(this, account.type, account.secret)
+                setBody(probeBody(account))
             }
             val headerMap = HashMap<String, String>()
             resp.headers.forEach { k, v -> headerMap[k] = v.lastOrNull() ?: "" }

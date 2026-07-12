@@ -47,17 +47,18 @@ class AccountPool {
      * preferred over the shared global pool; within each tier, under-threshold beats
      * over-threshold (fallback). Returns null if nothing is usable.
      */
-    suspend fun select(userId: Int?, allowedGroups: Set<Int>?, now: Instant = Instant.now()): AccountRuntime? = mutex.withLock {
-        orderedCandidates(userId, allowedGroups, now).firstOrNull()?.also { activeAccountId = it.id }
+    suspend fun select(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, now: Instant = Instant.now()): AccountRuntime? = mutex.withLock {
+        orderedCandidates(userId, allowedGroups, personalFirst, now).firstOrNull()?.also { activeAccountId = it.id }
     }
 
     /**
-     * Ordered list of accounts to try for a request: personal first (by priority, under- then
-     * over-threshold), then the global pool (same ordering). Excludes disabled/unhealthy/
+     * Ordered list of accounts to try for a request: one tier first (by priority, under- then
+     * over-threshold), then the other (same ordering). [personalFirst] picks which tier leads —
+     * personal accounts (default) or the global pool. Excludes disabled/unhealthy/
      * hard-limited/out-of-scope accounts.
      */
-    suspend fun selectionOrder(userId: Int?, allowedGroups: Set<Int>?, now: Instant = Instant.now()): List<AccountRuntime> =
-        mutex.withLock { orderedCandidates(userId, allowedGroups, now) }
+    suspend fun selectionOrder(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, now: Instant = Instant.now()): List<AccountRuntime> =
+        mutex.withLock { orderedCandidates(userId, allowedGroups, personalFirst, now) }
 
     /**
      * Personal-accounts-only selection order. Used when the shared-pool daily spend limit is
@@ -76,11 +77,11 @@ class AccountPool {
      * accounts are preferred. Used for requests that don't consume subscription quota
      * (token counting, model list).
      */
-    suspend fun selectAny(userId: Int?, allowedGroups: Set<Int>?): AccountRuntime? = mutex.withLock {
+    suspend fun selectAny(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true): AccountRuntime? = mutex.withLock {
         val usable = accounts.values.filter { it.enabled && it.health == AccountHealth.OK }
         val personal = if (userId == null) emptyList() else usable.filter { it.ownerId == userId }
         val global = usable.filter { it.ownerId == null && canUseGlobal(it, allowedGroups) }
-        (personal.ifEmpty { global })
+        (if (personalFirst) personal.ifEmpty { global } else global.ifEmpty { personal })
             .minWithOrNull(compareBy({ it.priority }, { it.id }))
             ?.also { activeAccountId = it.id }
     }
@@ -98,19 +99,24 @@ class AccountPool {
         )
     }
 
-    /** Ordered candidates for a request: personal tier first, then the global tier. */
-    private fun orderedCandidates(userId: Int?, allowedGroups: Set<Int>?, now: Instant): List<AccountRuntime> {
+    /** Ordered candidates for a request: the preferred tier first, then the other. */
+    private fun orderedCandidates(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean, now: Instant): List<AccountRuntime> {
         val healthy = accounts.values.filter { it.enabled && it.health == AccountHealth.OK && !it.isHardLimited(now) }
         val personal = if (userId == null) emptyList() else healthy.filter { it.ownerId == userId }
         val global = healthy.filter { it.ownerId == null && canUseGlobal(it, allowedGroups) }
-        return tierOrder(personal) + tierOrder(global)
+        return if (personalFirst) tierOrder(personal) + tierOrder(global)
+               else tierOrder(global) + tierOrder(personal)
     }
 
-    /** Within one tier: sorted by priority, under-threshold before over-threshold (fallback). */
-    private fun tierOrder(tier: List<AccountRuntime>): List<AccountRuntime> {
+    /**
+     * Within one tier: sorted by priority, under-threshold first. Accounts that are over their
+     * threshold are only appended as fallback if they opted in via [AccountRuntime.overThreshold];
+     * others drop out entirely until their window resets.
+     */
+    internal fun tierOrder(tier: List<AccountRuntime>): List<AccountRuntime> {
         val sorted = tier.sortedWith(compareBy({ it.priority }, { it.id }))
         val under = sorted.filter { it.usageForSelection() < it.threshold }
-        val over = sorted.filter { it.usageForSelection() >= it.threshold }
+        val over = sorted.filter { it.usageForSelection() >= it.threshold && it.overThreshold }
         return under + over
     }
 

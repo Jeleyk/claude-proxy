@@ -28,7 +28,8 @@ data class UpdateAccountRequest(
     val threshold: Double? = null,
     val coefficient: Double? = null,
     val enabled: Boolean? = null,
-    val clientId: String? = null,
+    val overThreshold: Boolean? = null,
+    val deviceId: String? = null,
 )
 
 @Serializable
@@ -71,6 +72,17 @@ data class UpdateUserRequest(
 )
 
 @Serializable
+data class UpdateProfileRequest(
+    // current password is required to authorize any self-service change
+    val currentPassword: String,
+    val username: String? = null,
+    val password: String? = null,
+)
+
+@Serializable
+data class AccountOrderRequest(val preferGlobalPool: Boolean)
+
+@Serializable
 data class ModelPriceRequest(
     val pattern: String,
     val inputPrice: Double,
@@ -109,8 +121,16 @@ data class MyStatsPayload(
     val totalClean: Long,
     val totalRequests: Long,
     val dailyCostLimit: Double?,
-    val perModel: List<org.claudeproxy.repo.ModelUsageDto>,
+    val perModel: List<org.claudeproxy.repo.ModelUsageDto>,        // all-time, per model
+    val perModelToday: List<org.claudeproxy.repo.ModelUsageDto>,   // since start of the UTC day
     val recent: List<org.claudeproxy.repo.UsageEventDto>,
+)
+
+/** Pool-wide per-model breakdown for the global Statistics page (today vs all-time toggle). */
+@Serializable
+data class ModelBreakdownPayload(
+    val today: List<org.claudeproxy.repo.ModelUsageDto>,
+    val allTime: List<org.claudeproxy.repo.ModelUsageDto>,
 )
 
 @Serializable

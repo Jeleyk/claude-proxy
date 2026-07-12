@@ -59,9 +59,9 @@ object Db {
     private fun seedRoles() {
         val defaults = mapOf(
             "admin" to Permission.entries.toList(),
-            "manager" to listOf(Permission.ACCOUNTS_MANAGE, Permission.ACCOUNTS_VIEW, Permission.ACCOUNTS_OWN_MANAGE, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN, Permission.PROXY_USE),
+            "manager" to listOf(Permission.ACCOUNTS_MANAGE, Permission.ACCOUNTS_VIEW, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN, Permission.PROXY_USE),
             "viewer" to listOf(Permission.ACCOUNTS_VIEW, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN),
-            "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN, Permission.ACCOUNTS_OWN_MANAGE),
+            "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE),
         )
         defaults.forEach { (roleName, perms) ->
             val roleId = Roles.select(Roles.id).where { Roles.name eq roleName }.firstOrNull()?.get(Roles.id)

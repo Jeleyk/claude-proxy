@@ -57,10 +57,13 @@ class UpstreamForwarder(
     private val log = LoggerFactory.getLogger("UpstreamForwarder")
     private val json = Json { ignoreUnknownKeys = true }
 
-    // Hop-by-hop / auth headers we never forward upstream.
+    // Hop-by-hop / auth / identity headers we never forward upstream verbatim.
+    // `x-client-id` is a proxy tell (real Claude Code omits it); the session-id header is
+    // re-emitted with a per-account rotated value below.
     private val stripRequestHeaders = setOf(
         "host", "content-length", "transfer-encoding", "connection",
         "authorization", "x-api-key", "accept-encoding",
+        "x-client-id", "x-claude-code-session-id",
     )
     private val stripResponseHeaders = setOf(
         "content-length", "transfer-encoding", "connection", "content-encoding",
@@ -78,26 +81,38 @@ class UpstreamForwarder(
         val method = call.request.httpMethod
         val url = "$upstreamBaseUrl$pathAndQuery"
 
+        // Per-account identity: rotate the session-id and stamp this account's device-id into
+        // the body's metadata. Cheap (cached) DB lookup; no-op for bodies without metadata.
+        val rewritten = RequestRewriter.rewrite(
+            bodyBytes,
+            headerSessionId = call.request.headers["X-Claude-Code-Session-Id"],
+            deviceId = account.deviceId,
+        ) { origin -> org.claudeproxy.repo.SessionMapRepo.resolve(origin, account.id) }
+        val outBody = rewritten.body
+
         val statement = Http.client.prepareRequest(url) {
             this.method = method
-            // copy through client headers except stripped ones
+            // copy through client headers except stripped + telemetry ones
             call.request.headers.forEach { name, values ->
-                if (name.lowercase() !in stripRequestHeaders) {
+                val ln = name.lowercase()
+                if (ln !in stripRequestHeaders && !RequestRewriter.isTelemetryHeader(ln)) {
                     values.forEach { v -> header(name, v) }
                 }
             }
+            // Re-emit the session-id header with this account's rotated value.
+            rewritten.sessionId?.let { header("X-Claude-Code-Session-Id", it) }
             applyAuth(this, account)
             // Anthropic requires this header; inject a default if the client omitted it.
             if (call.request.headers["anthropic-version"] == null) {
                 header("anthropic-version", "2023-06-01")
             }
-            if (bodyBytes.isNotEmpty()) {
+            if (outBody.isNotEmpty()) {
                 setBody(object : OutgoingContent.ByteArrayContent() {
                     override val contentType: ContentType? =
                         call.request.headers["Content-Type"]?.let { ContentType.parse(it) }
                             ?: ContentType.Application.Json
-                    override val contentLength: Long = bodyBytes.size.toLong()
-                    override fun bytes(): ByteArray = bodyBytes
+                    override val contentLength: Long = outBody.size.toLong()
+                    override fun bytes(): ByteArray = outBody
                 })
             }
         }
@@ -291,7 +306,7 @@ class UpstreamForwarder(
     }
 
     private fun applyAuth(builder: io.ktor.client.request.HttpRequestBuilder, account: AccountRuntime) {
-        org.claudeproxy.accounts.UpstreamAuth.apply(builder, account.type, account.secret, account.clientId)
+        org.claudeproxy.accounts.UpstreamAuth.apply(builder, account.type, account.secret)
     }
 
     private fun resetInstantFrom(headers: Map<String, String>): Instant? {
