@@ -9,18 +9,42 @@ architecture or deploy steps change.
 API. It stores several Anthropic accounts (OAuth subscriptions and/or API keys), routes each
 request to the highest-priority account that still has headroom, falls back when all are
 saturated, tracks USD cost and rolling-window limits, and ships a React admin UI with
-role-based access control. Production: nginx + Cloudflare in front of the container at
-`https://proxy.example.com`.
+role-based access control. Production: host nginx + Cloudflare in front of an in-compose nginx
+router at `https://proxy.example.com`.
+
+## Components & URL routing
+
+The app is split into self-contained components fronted by one nginx router (in `docker-compose`,
+listening on `127.0.0.1:8080`). Host nginx + Cloudflare terminate TLS and proxy to `:8080`.
+
+| Public path   | Component            | Notes                                                    |
+|---------------|----------------------|----------------------------------------------------------|
+| `/`           | **frontend** (SPA)   | React admin UI, static, served by nginx (React Router)   |
+| `/api/…`      | **service** (Kotlin) | Management REST API                                      |
+| `/gateway/…`  | **gateway** (Go)     | Anthropic datapath (`/gateway/v1/…`), served by the Go **gateway** (Spec B). It resolves each request against the service's private `/internal/*` control API, forwards to Anthropic, relays SSE, and reports usage back. The Kotlin datapath (`service:8787`) stays running as an instant rollback (revert the two nginx `proxy_pass` targets). |
+
+Top-level dirs: `frontend/` (React) · `service/` (Kotlin business logic + control API + Kotlin
+datapath/rollback) · `gateway/` (Go datapath — Spec B) · `deploy/` (nginx config + Dockerfiles).
+Containers: `claude-proxy-{nginx,front,service,gateway,redis,db}`.
+`docker-compose.yml`, `.env.example`, `.dockerignore` stay at the repo root (compose sits next
+to server runtime state). See `docs/superpowers/specs/2026-07-12-repo-restructure-nginx-routing-design.md`.
 
 ## Stack
 
 - **Backend:** Kotlin 2.2, Ktor 3.2 (Netty engine), Exposed 0.58 ORM, HikariCP, JVM target 21.
+- **Gateway:** Go 1.23 (stdlib `net/http` only, no framework) — the datapath in Spec B.
 - **DB:** PostgreSQL 16 in production; SQLite fallback when `DATABASE_URL` is unset.
-- **Frontend:** React 18 + Vite + TypeScript, hand-rolled SVG charts, no UI framework. Built
-  into `src/main/resources/static/` and served by Ktor (same origin as the API).
-- **Packaging:** one self-contained fat jar (UI baked in) or Docker (multi-stage build).
+- **Cache:** Redis 7 (`redis:7-alpine`), **service-internal only** — a cache + pub/sub
+  accelerator, never a source of truth. Empty/restarted Redis is only ever a cold cache
+  (transparent DB fallback). Disabled when `REDIS_URL` is unset. The **gateway never touches
+  Redis or Postgres** — only the service does.
+- **Frontend:** React 18 + Vite + TypeScript, **react-router-dom** for section URLs, hand-rolled
+  SVG charts, no UI framework. Builds to `frontend/dist`; the nginx router serves it (same origin
+  as the API — no CORS in prod).
+- **Packaging:** `docker-compose` stack — `nginx` (SPA + router) + `service` (Kotlin fat jar,
+  UI **not** baked in) + `postgres`.
 
-## Repository layout (`src/main/kotlin/org/claudeproxy/`)
+## Repository layout (`service/src/main/kotlin/org/claudeproxy/`)
 
 | Path | Responsibility |
 |------|----------------|
@@ -28,29 +52,40 @@ role-based access control. Production: nginx + Cloudflare in front of the contai
 | `Config.kt` | Config from env vars / `.env` (loaded into system properties). |
 | `proxy/` | **Datapath.** `ProxyRoutes` (inbound auth → account select → forward, `/v1/{...}`), `UpstreamForwarder` (forwards to Anthropic, relays SSE, records usage), `Http` (upstream CIO client), `SseUsageScanner` (token counting from the stream). |
 | `accounts/` | `AccountPool` (selection/rotation/fallback), `AccountRepo`, `RateLimitHeaders` (parse `anthropic-ratelimit-*`), `TokenRefresher` (background OAuth refresh), `LimitProbe`/`LimitScheduler`, `UpstreamAuth`, `Secrets`. |
-| `api/` | `AdminRoutes` (REST API for the UI), `Dtos`. |
+| `api/` | `AdminRoutes` (REST API for the UI), `Dtos`; `InternalRoutes` + `InternalDtos` (the private `/internal/resolve` + `/internal/usage` control API for the Go gateway, gated by `X-Internal-Token`). |
+| `datapath/` | `DatapathService` — the reusable resolve-a-request-into-an-ordered-plan + apply-an-outcome logic, shared by the Kotlin datapath and the control API (selection/crypto/limit bookkeeping stays here). |
+| `cache/` | `RedisCache` — Lettuce wrapper: cache-with-DB-fallback + pub/sub invalidation; no-op/passthrough when `REDIS_URL` is unset. |
 | `auth/` | `Security` (session cookies), `Passwords` (bcrypt). |
 | `db/` | `Database` (init + seed), `Tables` (Exposed schema), `Crypto` (AES-256-GCM for account secrets at rest). |
 | `model/Models.kt` | `Permission`/`AccountType`/`WindowKind`/health enums + serializable DTOs. |
 | `repo/` | Data access: Users, Roles, Groups, ProxyTokens, Usage, ModelPrices, WindowSnapshots, Settings, OAuthAdd. |
 | `oauth/ClaudeOAuth.kt` | PKCE "Login with Claude" flow to add accounts. |
 
-Frontend lives in `frontend/src/` (`App.tsx`, `api.ts`, `Chart.tsx`, `ui.tsx`, `pages/*`).
+Frontend lives in `frontend/src/` (`App.tsx` = router shell, `api.ts`, `Chart.tsx`, `ui.tsx`,
+`pages/*`). Section URLs: `/dashboard`, `/my/accounts`, `/my/stats`, `/stats`, `/tokens`,
+`/pricing`, `/users` (react-router; nginx `try_files` falls unknown paths back to `index.html`).
 
 ## Build / run / test
 
 ```bash
-./gradlew run                 # backend only, reads .env, serves BIND_HOST:PORT (default 127.0.0.1:8787)
-cd frontend && pnpm dev       # Vite HMR on :5173, proxies /api and /v1 to the backend
-./gradlew bundle              # build the UI + a self-contained fat jar -> build/libs/claude-proxy-<v>-all.jar
-./gradlew test                # JUnit
-docker-compose up -d --build  # postgres + app together
+cd service && ./gradlew run    # service only, reads .env, serves BIND_HOST:PORT (default 127.0.0.1:8787)
+cd frontend && pnpm dev        # Vite HMR on :5173, proxies /api /gateway /v1 /healthz to the service
+cd service && ./gradlew fatJar # service fat jar (UI NOT baked in) -> service/build/libs/claude-proxy-<v>-all.jar
+cd service && ./gradlew test   # JUnit
+cd gateway && go test ./...    # Go gateway unit tests (go vet ./... too)
+cd gateway && go run .         # gateway on :9000 (needs SERVICE_URL + INTERNAL_TOKEN)
+docker-compose up -d --build   # nginx (:8080) + front + service + gateway + redis + postgres
 ```
+
+The Gradle project now lives under `service/` — run `./gradlew` from there (or `service/gradlew
+-p service …`). The frontend build is fully decoupled (nginx owns it); there is no `bundle` task.
 
 ## Deployment — read `docs/DEPLOY.md` before deploying
 
-Server `root@YOUR_SERVER`, dir `/opt/claude-proxy`, behind nginx
-(`/etc/nginx/sites/proxy.example.com.conf`) + Cloudflare.
+Server `root@YOUR_SERVER`, dir `/opt/claude-proxy`, behind host nginx
+(`/etc/nginx/sites/proxy.example.com.conf`) + Cloudflare. Host nginx terminates TLS and now
+proxies to the **in-compose nginx router** on `127.0.0.1:8080` (was the service directly on
+`:8787`); the compose nginx fans out to `service` and (Spec B) `gateway`.
 
 > ⚠️ **NEVER `rsync --delete` into `/opt/claude-proxy/`.** That directory holds runtime state
 > that is NOT in the repo: `pgdata/` (the entire Postgres DB, bind-mounted) and `.env` (server
@@ -62,12 +97,14 @@ Server `root@YOUR_SERVER`, dir `/opt/claude-proxy`, behind nginx
 
 Effective config = Docker image `ENV` < compose `env_file: .env` < compose `environment:`.
 Because `.env` ships `BIND_HOST=127.0.0.1` (a local default), `docker-compose.yml` pins two
-overrides in the `environment:` block — **do not remove them**:
+overrides in the `service` `environment:` block — **do not remove them**:
 
-- `BIND_HOST: "0.0.0.0"` — the app must bind all interfaces inside the container, or Docker's
-  published `127.0.0.1:8787` can't reach it (→ nginx 502, `healthz` unreachable).
-- `PUBLIC_DOMAIN: "proxy.example.com"` — enables the CORS `allowHost` for the SPA's origin, or
-  Ktor CORS answers every `/api/*` with an empty **403**.
+- `BIND_HOST: "0.0.0.0"` — the service must bind all interfaces inside the container, or the
+  compose **nginx** (reaching it as `service:8787` over the compose network) can't connect
+  (→ nginx 502, healthcheck fails).
+- `PUBLIC_DOMAIN: "proxy.example.com"` — sets the token base URL and the CORS `allowHost`.
+  In prod the SPA is same-origin (served by nginx), so CORS is moot there; the setting still
+  matters for the Vite dev origin and the displayed base URL.
 
 ## Domain concepts (see `docs/ARCHITECTURE.md` for depth)
 
@@ -82,9 +119,15 @@ overrides in the `environment:` block — **do not remove them**:
   accounts. Managed at `/api/my/accounts/*` (self, `ACCOUNTS_OWN_MANAGE`) and
   `/api/users/{id}/accounts/*` (admin oversight, `USERS_MANAGE`).
 - **Rotation:** strictly by `priority`; move to the next account once the active one's window
-  usage crosses its `threshold`; when *all* are over threshold, enter **fallback** (ignore
-  threshold until a real limit). `coefficient` (×1/×5/×20) weights pool capacity. Personal
-  accounts form a preferred tier ordered ahead of the global tier.
+  usage crosses its `threshold`. When *all* are over threshold, only accounts with the opt-in
+  **`over_threshold`** flag stay usable past their threshold (appended as **fallback**, ordered
+  by priority); accounts without the flag drop out of selection until their window resets. The
+  flag is off by default, so with no opted-in account the pool can return nothing once everyone
+  is saturated. `coefficient` (×1/×5/×20) weights pool capacity. Personal accounts form a
+  preferred tier ordered ahead of the global tier — unless the user flips
+  `users.prefer_global_pool` (self-service toggle on "My Accounts", gated by
+  `ACCOUNTS_ORDER_TOGGLE`), which routes through the global pool first and falls back to
+  personal accounts.
 - **Windows:** `FIVE_HOUR` ("5h") + `WEEKLY` ("7d"), read from
   `anthropic-ratelimit-unified-{5h,7d}-utilization` (0..1) response headers. Subscriptions
   report **utilization**, not remaining/limit.
@@ -94,8 +137,9 @@ overrides in the `environment:` block — **do not remove them**:
   or `x-api-key`.
 - **Permissions** (`model/Models.kt`, ordered least→most): `PROXY_USE`, `STATS_VIEW_OWN`,
   `STATS_RESET_OWN`, `ACCOUNTS_OWN_MANAGE` (manage own personal accounts + "My Accounts" page),
-  `STATS_VIEW_RECENT`, `STATS_VIEW_ACCOUNTS`, `ACCOUNTS_VIEW`, `STATS_VIEW`, `ACCOUNTS_MANAGE`,
-  `USERS_MANAGE`, `ADMIN`. Default roles `user`/`manager` include `ACCOUNTS_OWN_MANAGE`.
+  `ACCOUNTS_ORDER_TOGGLE` (switch personal-vs-global routing order), `STATS_VIEW_RECENT`,
+  `STATS_VIEW_ACCOUNTS`, `ACCOUNTS_VIEW`, `STATS_VIEW`, `ACCOUNTS_MANAGE`, `USERS_MANAGE`,
+  `ADMIN`. Default roles `user`/`manager` include `ACCOUNTS_OWN_MANAGE` + `ACCOUNTS_ORDER_TOGGLE`.
 
 ## Anthropic upstream specifics (calibrated against live traffic)
 
