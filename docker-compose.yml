@@ -17,27 +17,115 @@ services:
       timeout: 3s
       retries: 15
 
-  claude-proxy:
-    build: .
+  # Redis: service-side cache + pub/sub only (never a source of truth). Cache-only, no
+  # persistence — a restart just yields a cold cache that transparently rebuilds from Postgres.
+  redis:
+    image: redis:7-alpine
+    container_name: claude-proxy-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Kotlin service: management API + datapath + control API. Reachable only on the compose
+  # network (nginx fronts it); no host port. DNS alias on the network is the service key: `service`.
+  service:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.service
     image: claude-proxy:latest
-    container_name: claude-proxy
+    # Renamed from `claude-proxy` so the new container can run alongside the old one during a
+    # zero-downtime cutover (old `claude-proxy` keeps serving :8787 until host-nginx flips).
+    container_name: claude-proxy-service
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
-    # Bind to localhost only; nginx fronts it with the domain + TLS.
-    ports:
-      - "127.0.0.1:8787:8787"
+      redis:
+        condition: service_healthy
+    expose:
+      - "8787"
     env_file: .env
     environment:
-      # Bind to all interfaces INSIDE the container so Docker's published port
-      # (127.0.0.1:8787 on the host) can reach it. Overrides BIND_HOST from .env.
+      # Bind to all interfaces INSIDE the container so nginx can reach it over the network.
       BIND_HOST: "0.0.0.0"
-      # Public domain — required so CORS allows the SPA's Origin (https://<domain>);
-      # otherwise Ktor CORS answers /api/* with an empty 403. Also sets publicBaseUrl.
+      # Public domain — sets publicBaseUrl (token base URL) and the CORS allowHost for the
+      # Vite dev origin. The SPA is same-origin in prod (served by nginx), so CORS is moot there.
       PUBLIC_DOMAIN: "proxy.example.com"
       DATABASE_URL: jdbc:postgresql://postgres:5432/claudeproxy
       DATABASE_USER: claudeproxy
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-claudeproxy}
+      # Shared secret gating the private /internal/* control API (also set on the gateway).
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      # Redis cache + pub/sub (service-internal accelerator; DB stays source of truth).
+      REDIS_URL: "redis://redis:6379"
     volumes:
       - ./data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8787/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # Gateway: the Go datapath (Spec B). Thin data plane — resolves each request against the
+  # service's /internal/* control API, forwards to Anthropic, relays SSE, reports usage back.
+  # Never touches Postgres or Redis directly. nginx flips /gateway,/v1 here in Task D3.
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.gateway
+    image: claude-proxy-gateway:latest
+    container_name: claude-proxy-gateway
+    restart: unless-stopped
+    depends_on:
+      service:
+        condition: service_healthy
+    expose:
+      - "9000"
+    environment:
+      PORT: "9000"
+      SERVICE_URL: "http://service:8787"
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      UPSTREAM_BASE_URL: "https://api.anthropic.com"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # Front: serves the React SPA static build (nginx). Internal only — the edge router forwards
+  # `/` here. No API/datapath knowledge; rebuilt whenever the UI changes.
+  front:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.front
+    image: claude-proxy-front:latest
+    container_name: claude-proxy-front
+    restart: unless-stopped
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # Edge router: fans one origin out to front (SPA), service (/api), and the datapath
+  # (/gateway,/v1). Published on localhost:8080 — host nginx + Cloudflare proxy here (TLS at host).
+  nginx:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.nginx
+    image: claude-proxy-nginx:latest
+    container_name: claude-proxy-nginx
+    restart: unless-stopped
+    depends_on:
+      service:
+        condition: service_healthy
+      front:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
