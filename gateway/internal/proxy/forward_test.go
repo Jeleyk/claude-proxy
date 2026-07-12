@@ -70,6 +70,56 @@ func TestForwardNonSSECopiesStatusBodyAndParsesUsage(t *testing.T) {
 	}
 }
 
+func TestForwardMergesClientAnthropicBetaAndPreservesBody(t *testing.T) {
+	var gotBeta string
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBeta = r.Header.Get("anthropic-beta")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, `{"model":"m","usage":{"input_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	h := testHandler(upstream.URL)
+	// Client sends context-management beta + a context_management body field (like Claude Code).
+	body := `{"model":"claude-opus-4-8","context_management":{"edits":[]}}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("anthropic-beta", "context-management-2025-06-27,fine-grained-tool-streaming-2025-05-14")
+	rec := httptest.NewRecorder()
+
+	// Account provides the oauth beta — it must be APPENDED, not replace the client's.
+	cand := control.Candidate{AccountID: 1, Type: "OAUTH", AuthHeaders: map[string]string{
+		"Authorization": "Bearer sk-oat", "anthropic-beta": "oauth-2025-04-20",
+	}}
+	h.forward(context.Background(), rec, req, cand, []control.Candidate{cand}, 0, nil, []byte(body), false)
+
+	// Client betas preserved AND the account's oauth beta appended.
+	for _, want := range []string{"context-management-2025-06-27", "fine-grained-tool-streaming-2025-05-14", "oauth-2025-04-20"} {
+		if !strings.Contains(gotBeta, want) {
+			t.Errorf("upstream anthropic-beta %q missing %q", gotBeta, want)
+		}
+	}
+	// The client's context_management body field must reach the upstream unchanged.
+	if !strings.Contains(gotBody, `"context_management"`) {
+		t.Errorf("context_management body field lost: %s", gotBody)
+	}
+}
+
+func TestMergeBeta(t *testing.T) {
+	if got := mergeBeta(nil, "oauth-2025-04-20"); got != "oauth-2025-04-20" {
+		t.Errorf("empty client -> %q", got)
+	}
+	if got := mergeBeta([]string{"oauth-2025-04-20"}, "oauth-2025-04-20"); got != "oauth-2025-04-20" {
+		t.Errorf("already present should dedupe -> %q", got)
+	}
+	if got := mergeBeta([]string{"ctx-2025,fgts-2025"}, "oauth-2025-04-20"); got != "ctx-2025,fgts-2025,oauth-2025-04-20" {
+		t.Errorf("merge -> %q", got)
+	}
+}
+
 func TestForwardRetryableStatusRetriesWhenAllowed(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(529)

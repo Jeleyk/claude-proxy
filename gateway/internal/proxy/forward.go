@@ -57,9 +57,16 @@ func (h *Handler) forward(
 	if sessionID != "" {
 		req.Header.Set("X-Claude-Code-Session-Id", sessionID)
 	}
-	// Per-account upstream credentials (already decrypted by the service).
+	// Per-account upstream credentials (already decrypted by the service). Swap credential
+	// headers (Authorization / x-api-key) outright, but MERGE anthropic-beta into whatever the
+	// client sent — overwriting it would drop client betas (e.g. context-management-*), which
+	// then makes the matching body field a "400 extra inputs" error. Mirrors UpstreamAuth.apply.
 	for k, v := range cand.AuthHeaders {
-		req.Header.Set(k, v)
+		if strings.EqualFold(k, "anthropic-beta") {
+			req.Header.Set("anthropic-beta", mergeBeta(req.Header.Values("anthropic-beta"), v))
+		} else {
+			req.Header.Set(k, v)
+		}
 	}
 	// Anthropic requires this header; inject a default if the client omitted it.
 	if r.Header.Get("anthropic-version") == "" {
@@ -113,6 +120,29 @@ func (h *Handler) forward(
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(buf)
 	return forwardResult{retry: false, report: report}
+}
+
+// mergeBeta merges the account's anthropic-beta token(s) into the client's existing
+// anthropic-beta values, preserving the client's betas (e.g. context-management-*) and
+// de-duplicating. Order: client betas first, then any account betas not already present.
+func mergeBeta(clientVals []string, accountBeta string) string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(csv string) {
+		for _, tok := range strings.Split(csv, ",") {
+			t := strings.TrimSpace(tok)
+			if t == "" || seen[t] {
+				continue
+			}
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	for _, v := range clientVals {
+		add(v)
+	}
+	add(accountBeta)
+	return strings.Join(out, ",")
 }
 
 // copyResponseHeaders copies safe upstream headers to the client, dropping framing headers the
