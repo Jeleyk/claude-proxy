@@ -49,6 +49,7 @@ object Db {
         transaction(database) {
             SchemaUtils.createMissingTablesAndColumns(*ALL_TABLES)
             seedRoles()
+            migrateGlobalPoolPermission()
             seedAdmin(config)
         }
         org.claudeproxy.repo.ModelPriceRepo.seedDefaults()
@@ -59,9 +60,9 @@ object Db {
     private fun seedRoles() {
         val defaults = mapOf(
             "admin" to Permission.entries.toList(),
-            "manager" to listOf(Permission.ACCOUNTS_MANAGE, Permission.ACCOUNTS_VIEW, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN, Permission.PROXY_USE),
+            "manager" to listOf(Permission.ACCOUNTS_MANAGE, Permission.ACCOUNTS_VIEW, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN, Permission.PROXY_USE),
             "viewer" to listOf(Permission.ACCOUNTS_VIEW, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN),
-            "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE),
+            "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE),
         )
         defaults.forEach { (roleName, perms) ->
             val roleId = Roles.select(Roles.id).where { Roles.name eq roleName }.firstOrNull()?.get(Roles.id)
@@ -71,6 +72,24 @@ object Db {
                     it[RolePermissions.roleId] = roleId
                     it[permission] = p.name
                 }
+            }
+        }
+    }
+
+    /**
+     * One-time backfill for the new POOL_GLOBAL_USE permission: any role that could already
+     * reach the shared pool (i.e. has PROXY_USE) keeps that ability explicitly. seedRoles()
+     * covers the built-in roles; this also covers admin-made custom roles. Idempotent.
+     */
+    private fun migrateGlobalPoolPermission() {
+        val roleIds = RolePermissions
+            .select(RolePermissions.roleId)
+            .where { RolePermissions.permission eq Permission.PROXY_USE.name }
+            .map { it[RolePermissions.roleId] }
+        roleIds.forEach { rid ->
+            RolePermissions.insertIgnore {
+                it[roleId] = rid
+                it[permission] = Permission.POOL_GLOBAL_USE.name
             }
         }
     }

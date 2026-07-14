@@ -119,12 +119,24 @@ private fun assembleStats(
     val accounts = runtimes.map { rt ->
         rt.toDto(createdAt[rt.id]?.toString() ?: Instant.now().toString(), perAcc[rt.id] ?: Totals())
     }
+    // Weekly headroom mirrors the 5-hour `effectiveRemaining` logic: coefficient-weighted
+    // remaining over the accounts that actually report a weekly reading (API keys count as
+    // full capacity, since they have no subscription window). Accounts with no weekly reading
+    // are excluded from both sums so the resulting % stays meaningful.
+    val weeklyContribs = runtimes.mapNotNull { rt ->
+        val wu = rt.limit.window(WindowKind.WEEKLY)?.usageFraction()
+        val rem = wu?.let { rt.coefficient * (1.0 - it) }
+            ?: if (rt.type == org.claudeproxy.model.AccountType.API_KEY) rt.coefficient else null
+        rem?.let { it to rt.coefficient }
+    }
     return PoolStatsDto(
         totalAccounts = runtimes.size,
         healthyAccounts = runtimes.count { it.enabled && it.health == org.claudeproxy.model.AccountHealth.OK },
         activeAccountId = activeAccountId,
         totalEffectiveRemaining = accounts.sumOf { it.effectiveRemaining ?: 0.0 },
         totalEffectiveCapacity = runtimes.sumOf { it.coefficient },
+        totalWeeklyRemaining = weeklyContribs.sumOf { it.first },
+        totalWeeklyCapacity = weeklyContribs.sumOf { it.second },
         totalRequests = poolWide.requests,
         totalInputTokens = poolWide.input,
         totalOutputTokens = poolWide.output,
@@ -284,6 +296,12 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
     get("/my/accounts") {
         val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
         call.respond(buildOwnedStats(pool, user.id))
+    }
+    // Shared-pool headroom shown on "My Accounts": same global stats as the Dashboard, but
+    // available to anyone allowed to route through the global pool (not just ACCOUNTS_VIEW).
+    get("/my/global-pool") {
+        call.requirePermission(Permission.POOL_GLOBAL_USE)
+        call.respond(buildPoolStats(pool))
     }
     post("/my/accounts") {
         val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
@@ -623,7 +641,10 @@ private fun buildWindows(
     val startDate = endDate.minusDays((n - 1).toLong())
     val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
     val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
-    val buckets = (n * 24).coerceAtMost(168)  // ~hourly, capped
+    // 30-min bins: the limit probe samples each account every ~30 min, so half-hour
+    // buckets are the finest resolution the data actually supports. Capped at 336
+    // (= 7 days of 30-min bins); longer ranges coarsen to keep the payload sane.
+    val buckets = (n * 48).coerceAtMost(336)
     val widthMs = (end.toEpochMilli() - start.toEpochMilli()).toDouble() / buckets
     val labels = (0 until buckets).map {
         java.time.Instant.ofEpochMilli(start.toEpochMilli() + (it * widthMs).toLong())

@@ -57,6 +57,8 @@ class ProxyEngine(
         val allowedGroups: Set<Int>? = if (Permission.ADMIN in perms) null else UserRepo.allowedGroupsOf(userId)
         // Routing order preference: try the global pool before personal accounts, or vice versa (default).
         val personalFirst = !UserRepo.preferGlobalPoolOf(userId)
+        // Routing through the shared pool requires POOL_GLOBAL_USE (admins always allowed).
+        val allowGlobal = Permission.ADMIN in perms || Permission.POOL_GLOBAL_USE in perms
 
         val bodyBytes = runCatching { call.receive<ByteArray>() }
             .onFailure { log.warn("body read failed for {}: {}", call.request.uri, it.toString()) }
@@ -67,7 +69,7 @@ class ProxyEngine(
         // Requests that don't consume subscription quota (token counting, model listing)
         // should always work if any account exists — no limit checks, ignore rate-limit.
         if (isFreePath(pathAndQuery)) {
-            val account = pool.selectAny(userId, allowedGroups, personalFirst)
+            val account = pool.selectAny(userId, allowedGroups, personalFirst, allowGlobal)
             if (account == null) { respondNoAccount(call, userId, allowedGroups); return }
             forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = false, allowedGroups = allowedGroups)
             return
@@ -83,7 +85,7 @@ class ProxyEngine(
         // Try accounts in order; every account except the last may retry to the next one.
         // The last account's real upstream response (incl. 429/5xx + retry-after) is passed
         // straight through to the client, so Claude Code sees the true status and backoff.
-        val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst)
+        val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst, allowGlobal)
         if (order.isEmpty()) {
             if (overLimit) {
                 call.response.headers.append("x-claude-proxy-daily-limit-usd", costLimit.toString())

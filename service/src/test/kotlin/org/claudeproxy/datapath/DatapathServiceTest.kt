@@ -82,4 +82,51 @@ class DatapathServiceTest {
         val r = DatapathService(pool).resolve(seededToken, "POST", "/v1/messages/count_tokens")
         assertTrue(r.candidates.isNotEmpty())
     }
+
+    /**
+     * Create a fresh user + token, with a role holding exactly [perms], and one personal
+     * OAUTH account they own. The global "acc1" from setup stays in the pool. Returns the
+     * user's token and personal account id.
+     */
+    private fun seedUser(name: String, perms: List<org.claudeproxy.model.Permission>): Pair<String, Int> {
+        val roleId = org.claudeproxy.repo.RoleRepo.create(name, perms.map { it.name })
+        // create() takes role NAMES; the role we just made is addressable by its name.
+        val uid = org.claudeproxy.repo.UserRepo.create(name, "pw", listOf(name), emptyList(), null)
+        val token = ProxyTokenRepo.create(uid, "$name-tok").token!!
+        val accId = AccountRepo.create(
+            name = "$name-personal", type = AccountType.OAUTH, groupId = null, priority = 5,
+            threshold = 0.8, coefficient = 1.0,
+            secret = AccountSecret(accessToken = "sk-ant-oat-PERSONAL", refreshToken = "r"),
+            createdBy = uid, ownerId = uid,
+        )
+        runBlocking { pool.reload() }
+        return token to accId
+    }
+
+    @Test
+    fun `without POOL_GLOBAL_USE only personal accounts are candidates`() = runBlocking {
+        val (token, personalId) = seedUser(
+            "nogp",
+            listOf(org.claudeproxy.model.Permission.PROXY_USE, org.claudeproxy.model.Permission.ACCOUNTS_OWN_MANAGE),
+        )
+        val r = DatapathService(pool).resolve(token, "POST", "/v1/messages")
+        val ids = r.candidates.map { it.accountId }
+        assertEquals(listOf(personalId), ids) // global "acc1" is excluded
+    }
+
+    @Test
+    fun `with POOL_GLOBAL_USE the global pool is included`() = runBlocking {
+        val (token, personalId) = seedUser(
+            "withgp",
+            listOf(
+                org.claudeproxy.model.Permission.PROXY_USE,
+                org.claudeproxy.model.Permission.ACCOUNTS_OWN_MANAGE,
+                org.claudeproxy.model.Permission.POOL_GLOBAL_USE,
+            ),
+        )
+        val r = DatapathService(pool).resolve(token, "POST", "/v1/messages")
+        val ids = r.candidates.map { it.accountId }
+        assertTrue(personalId in ids)
+        assertTrue(ids.size > 1) // personal + the global "acc1"
+    }
 }

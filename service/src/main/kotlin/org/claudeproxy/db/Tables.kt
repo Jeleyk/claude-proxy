@@ -10,6 +10,8 @@ object Users : Table("users") {
     val enabled = bool("enabled").default(true)
     // optional per-day spend limit in USD. null = unlimited.
     val dailyCostLimit = double("daily_cost_limit").nullable()
+    // optional per-day spend limit in USD for the OpenAI/Anthropic routing gateways. null = unlimited.
+    val dailyRoutingCostLimit = double("daily_routing_cost_limit").nullable()
     // routing preference: true = try the global pool before this user's personal accounts.
     val preferGlobalPool = bool("prefer_global_pool").default(false)
     val createdAt = timestamp("created_at")
@@ -52,6 +54,21 @@ object UserRoles : Table("user_roles") {
 }
 
 object ProxyTokens : Table("proxy_tokens") {
+    val id = integer("id").autoIncrement()
+    val userId = integer("user_id").references(Users.id)
+    val tokenHash = varchar("token_hash", 128).uniqueIndex()
+    val name = varchar("name", 128)
+    val createdAt = timestamp("created_at")
+    val lastUsedAt = timestamp("last_used_at").nullable()
+    override val primaryKey = PrimaryKey(id)
+}
+
+/**
+ * Tokens for the OpenAI/Anthropic API routing gateways (`cxr_...`). Same shape as
+ * [ProxyTokens] but a distinct namespace: routing spend is metered against a separate
+ * per-user daily limit and gated by the `ROUTING_USE` permission.
+ */
+object RoutingTokens : Table("routing_tokens") {
     val id = integer("id").autoIncrement()
     val userId = integer("user_id").references(Users.id)
     val tokenHash = varchar("token_hash", 128).uniqueIndex()
@@ -134,6 +151,9 @@ object UsageEvents : Table("usage_events") {
     val cost = double("cost").default(0.0)
     val httpStatus = integer("http_status").default(0)
     val model = varchar("model", 128).nullable()
+    // datapath that produced this event: "proxy" (Claude Code) or "routing" (OpenAI/Anthropic
+    // API gateways). Metered against separate per-user daily limits; stats show both together.
+    val sourceCol = varchar("source", 16).default("proxy")
     override val primaryKey = PrimaryKey(id)
 }
 
@@ -180,7 +200,7 @@ object OAuthAddSessions : Table("oauth_add_sessions") {
 }
 
 val ALL_TABLES = arrayOf(
-    Users, Settings, ModelPrices, Roles, RolePermissions, UserRoles, ProxyTokens,
+    Users, Settings, ModelPrices, Roles, RolePermissions, UserRoles, ProxyTokens, RoutingTokens,
     AccountGroups, UserGroupAccess,
     Accounts, AccountSecrets, AccountLimits, UsageEvents, WindowSnapshots, OAuthAddSessions,
     SessionOwners, SessionMap,

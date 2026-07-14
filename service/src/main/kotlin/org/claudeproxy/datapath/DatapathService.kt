@@ -59,10 +59,13 @@ class DatapathService(private val pool: AccountPool) {
         // Admins may use any account; others are scoped to their granted groups.
         val allowedGroups: Set<Int>? = if (Permission.ADMIN in perms) null else UserRepo.allowedGroupsOf(userId)
         val personalFirst = !UserRepo.preferGlobalPoolOf(userId)
+        // Routing through the shared pool requires POOL_GLOBAL_USE (admins always allowed).
+        // Without it a user reaches only their own personal accounts.
+        val allowGlobal = Permission.ADMIN in perms || Permission.POOL_GLOBAL_USE in perms
 
         // Free paths (token counting, model listing) never consume quota: any account, no limits.
         if (isFreePath(path)) {
-            val account = pool.selectAny(userId, allowedGroups, personalFirst)
+            val account = pool.selectAny(userId, allowedGroups, personalFirst, allowGlobal)
             return ResolveResult(userId, null, false, null, null, listOfNotNull(account).map { it.toCandidate() })
         }
 
@@ -71,7 +74,7 @@ class DatapathService(private val pool: AccountPool) {
         val usedCost = if (costLimit != null) cachedDailySpend(userId) else 0.0
         val overLimit = costLimit != null && usedCost >= costLimit
 
-        val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst)
+        val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst, allowGlobal)
         return ResolveResult(userId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() })
     }
 

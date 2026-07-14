@@ -10,6 +10,8 @@ enum class Permission {
     STATS_RESET_OWN,    // may reset their own stats (resets daily spend — can bypass a limit)
     ACCOUNTS_OWN_MANAGE,// may manage their own personal accounts (tried before the global pool)
     ACCOUNTS_ORDER_TOGGLE,// may switch whether their personal accounts or the global pool are tried first
+    POOL_GLOBAL_USE,    // may route requests through the shared (global) account pool
+    ROUTING_USE,        // may use the OpenAI/Anthropic API routing gateways + manage routing tokens
     STATS_VIEW_RECENT,  // may view the list of recent requests (pool-wide)
     STATS_VIEW_ACCOUNTS,// may see which account each request/stat came from
     ACCOUNTS_VIEW,      // may view upstream accounts + their limits
@@ -63,10 +65,15 @@ data class UserDto(
     val allGroups: Boolean = false,
     // per-day spend limit in USD; null = unlimited
     val dailyCostLimit: Double? = null,
+    // per-day spend limit in USD for the OpenAI/Anthropic routing gateways; null = unlimited.
+    // Tracked separately from dailyCostLimit — routing spend is metered against this one.
+    val dailyRoutingCostLimit: Double? = null,
     // routing preference: true = try the global pool before personal accounts (default false = personal first)
     val preferGlobalPool: Boolean = false,
     // usage since the start of the current UTC day
     val todayCost: Double = 0.0,
+    // routing spend (source=routing) since the start of the current UTC day
+    val todayRoutingCost: Double = 0.0,
     val todayInputTokens: Long = 0,
     val todayOutputTokens: Long = 0,
 )
@@ -138,8 +145,11 @@ data class PoolStatsDto(
     val totalAccounts: Int,
     val healthyAccounts: Int,
     val activeAccountId: Int?,
-    val totalEffectiveRemaining: Double,   // Σ coefficient-weighted remaining
+    val totalEffectiveRemaining: Double,   // Σ coefficient-weighted remaining (5-hour)
     val totalEffectiveCapacity: Double,    // Σ coefficient
+    // same, for the weekly window — drives the "Pool headroom" card subtitle
+    val totalWeeklyRemaining: Double,
+    val totalWeeklyCapacity: Double,
     // pool-wide counters (all-time)
     val totalInputTokens: Long,
     val totalOutputTokens: Long,

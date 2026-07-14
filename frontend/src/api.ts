@@ -65,6 +65,8 @@ export interface PoolStats {
   activeAccountId: number | null;
   totalEffectiveRemaining: number;
   totalEffectiveCapacity: number;
+  totalWeeklyRemaining: number;
+  totalWeeklyCapacity: number;
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCacheReadTokens: number;
@@ -135,6 +137,7 @@ export const api = {
 
   // personal (per-user) accounts — tried before the global pool, excluded from global stats
   myAccounts: () => req<PoolStats>('GET', '/api/my/accounts'),
+  globalPool: () => req<PoolStats>('GET', '/api/my/global-pool'),
   createMyAccount: (b: unknown) => req<PoolStats>('POST', '/api/my/accounts', b),
   updateMyAccount: (id: number, b: unknown) => req<PoolStats>('PATCH', `/api/my/accounts/${id}`, b),
   deleteMyAccount: (id: number) => req<unknown>('DELETE', `/api/my/accounts/${id}`),

@@ -16,3 +16,6 @@ pgdata/
 
 # Superpowers (local agent scratch: skills, specs, plans)
 docs/superpowers/
+
+# graphify skill output (generated)
+graphify-out/

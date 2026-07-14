@@ -5,17 +5,29 @@ import { Segmented } from '../ui';
 
 export function MyAccounts({ user, onUserChange }: { user: UserDto; onUserChange: (u: UserDto) => void }) {
   const [stats, setStats] = useState<PoolStats | null>(null);
+  const [globalStats, setGlobalStats] = useState<PoolStats | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<AccountDto | null>(null);
   const [adding, setAdding] = useState(false);
 
   const canToggleOrder = has(user, 'ACCOUNTS_ORDER_TOGGLE');
+  const canUseGlobal = has(user, 'POOL_GLOBAL_USE');
 
   async function load() {
     try { setStats(await api.myAccounts()); } catch (e: any) { setErr(e.message); }
   }
   useEffect(() => { load(); }, []);
+
+  // Live view of the shared pool a user routes through (headroom + nearest reset), same as
+  // the Dashboard. Only fetched for users allowed to use it; polled for a ticking reset.
+  useEffect(() => {
+    if (!canUseGlobal) return;
+    const tick = () => api.globalPool().then(setGlobalStats).catch(() => {});
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => clearInterval(t);
+  }, [canUseGlobal]);
 
   async function refreshAll() {
     setRefreshing(true);
@@ -55,7 +67,7 @@ export function MyAccounts({ user, onUserChange }: { user: UserDto; onUserChange
 
       {!stats ? (<div className="hint">Loading…</div>) : (
         <>
-          <PoolCards stats={stats} scope="personal" />
+          <PoolCards stats={stats} scope="personal" shared={canUseGlobal ? globalStats : null} />
           <h2>Accounts by priority</h2>
           <AccountsTable stats={stats} groups={[]} showGroup={false} canManage
             onEdit={setEditing} onToggle={toggle} onDelete={del} onRefreshOne={refreshOne} />
