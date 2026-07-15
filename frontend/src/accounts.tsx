@@ -1,7 +1,7 @@
 // Shared account UI: the rich pool table, summary cards, add/edit modals and group
 // management. Used by the Dashboard (global pool), My Accounts (personal) and the
 // admin oversight view on the Users page.
-import { useState } from 'react';
+import { ReactNode, useState } from 'react';
 import { AccountDto, api, fmtReset, fmtTokens, fmtUsd, GroupDto, PoolStats, WindowLimitDto } from './api';
 import { Modal, NumberInput, Segmented, Switch } from './ui';
 
@@ -56,23 +56,33 @@ function healthBadge(a: AccountDto) {
 
 /* ---------------------------------------------------------------- summary cards */
 
+// Weighted-capacity headroom: Σ coefficient × session-remaining across accounts (an
+// absolute count of "×1-equivalent full sessions" left), NOT a 0..100% of-total figure —
+// so a ×20 account contributes 20 units, making the coefficient visible in the number.
+const fmtCap = (n: number) => (Math.round(n * 10) / 10).toString();
+
+/** Headroom card: absolute weighted units up front, the old %-of-capacity on hover. */
+function HeadroomCard({ label, s }: { label: ReactNode; s: PoolStats }) {
+  const capPct = s.totalEffectiveCapacity > 0 ? s.totalEffectiveRemaining / s.totalEffectiveCapacity : 0;
+  const wkPct = s.totalWeeklyCapacity > 0 ? s.totalWeeklyRemaining / s.totalWeeklyCapacity : 0;
+  const title = `5h: ${Math.round(capPct * 100)}% left\n`
+    + (s.totalWeeklyCapacity > 0 ? `weekly: ${Math.round(wkPct * 100)}% left` : 'weekly: n/a');
+  return (
+    <div className="card" title={title}>
+      <div className="label">{label}</div>
+      <div className="value">{fmtCap(s.totalEffectiveRemaining)} <small className="hint" style={{ fontSize: 13 }}>/ {fmtCap(s.totalEffectiveCapacity)} (5h)</small></div>
+      <div className="hint">{s.totalWeeklyCapacity > 0 ? `weekly: ${fmtCap(s.totalWeeklyRemaining)} / ${fmtCap(s.totalWeeklyCapacity)} left` : 'weekly: n/a'}</div>
+    </div>
+  );
+}
+
 export function PoolCards({ stats, scope, shared }: { stats: PoolStats; scope: Scope; shared?: PoolStats | null }) {
-  const capPct = stats.totalEffectiveCapacity > 0 ? stats.totalEffectiveRemaining / stats.totalEffectiveCapacity : 0;
-  const wkPct = stats.totalWeeklyCapacity > 0 ? stats.totalWeeklyRemaining / stats.totalWeeklyCapacity : 0;
   const activeName = stats.activeAccountId ? stats.accounts.find((a) => a.id === stats.activeAccountId)?.name ?? `#${stats.activeAccountId}` : '—';
-  // Shared-pool headroom + resets, folded into the same row on "My Accounts" so the global
-  // pool a user falls back to reads as part of their overview, not a detached block.
-  const sCapPct = shared && shared.totalEffectiveCapacity > 0 ? shared.totalEffectiveRemaining / shared.totalEffectiveCapacity : 0;
-  const sWkPct = shared && shared.totalWeeklyCapacity > 0 ? shared.totalWeeklyRemaining / shared.totalWeeklyCapacity : 0;
   return (
     <div className="cards" style={{ marginTop: 18 }}>
       <div className="card"><div className="label">{scope === 'personal' ? 'My accounts healthy' : 'Accounts healthy'}</div><div className="value">{stats.healthyAccounts}/{stats.totalAccounts}</div></div>
       <div className="card"><div className="label">Active now</div><div className="value" style={{ fontSize: 20 }}>{activeName}</div></div>
-      <div className="card">
-        <div className="label">Pool headroom</div>
-        <div className="value">{Math.round(capPct * 100)}% <small className="hint" style={{ fontSize: 13 }}>(5h)</small></div>
-        <div className="hint">{stats.totalWeeklyCapacity > 0 ? `weekly: ${Math.round(wkPct * 100)}% left` : 'weekly: n/a'}</div>
-      </div>
+      <HeadroomCard label="Pool headroom" s={stats} />
       <div className="card"><div className="label">Total requests</div><div className="value">{stats.totalRequests.toLocaleString()}</div></div>
       <div className="card">
         <div className="label">Total cost</div>
@@ -87,11 +97,7 @@ export function PoolCards({ stats, scope, shared }: { stats: PoolStats; scope: S
       </div>
       {shared && (
         <>
-          <div className="card">
-            <div className="label">Shared pool <span className="badge muted">global</span></div>
-            <div className="value">{Math.round(sCapPct * 100)}% <small className="hint" style={{ fontSize: 13 }}>(5h)</small></div>
-            <div className="hint">{shared.totalWeeklyCapacity > 0 ? `weekly: ${Math.round(sWkPct * 100)}% left` : 'weekly: n/a'}</div>
-          </div>
+          <HeadroomCard label={<>Shared pool <span className="badge muted">global</span></>} s={shared} />
           <div className="card">
             <div className="label">Shared reset <span className="badge muted">global</span></div>
             <div className="value" style={{ fontSize: 18 }}>5h: {fmtReset(shared.nextFiveHourReset)}</div>
