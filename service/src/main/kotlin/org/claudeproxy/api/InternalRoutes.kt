@@ -25,7 +25,7 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
         post("/resolve") {
             if (!call.authorized()) return@post call.respond(HttpStatusCode.Unauthorized)
             val req = call.receive<ResolveRequest>()
-            val r = datapath.resolve(req.token, req.method, req.path)
+            val r = datapath.resolve(req.token, req.method, req.path, req.source)
             when (r.error) {
                 ResolveError.BAD_TOKEN -> call.respond(HttpStatusCode.Unauthorized)
                 ResolveError.NO_PERMISSION -> call.respond(HttpStatusCode.Forbidden)

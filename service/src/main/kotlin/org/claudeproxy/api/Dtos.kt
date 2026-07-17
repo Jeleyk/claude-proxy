@@ -59,6 +59,7 @@ data class CreateUserRequest(
     val roles: List<String> = emptyList(),
     val allowedGroups: List<Int> = emptyList(),
     val dailyCostLimit: Double? = null,
+    val dailyRoutingCostLimit: Double? = null,
 )
 
 @Serializable
@@ -69,6 +70,8 @@ data class UpdateUserRequest(
     val allowedGroups: List<Int>? = null,
     val dailyCostLimit: Double? = null,
     val clearDailyLimit: Boolean = false,
+    val dailyRoutingCostLimit: Double? = null,
+    val clearRoutingLimit: Boolean = false,
 )
 
 @Serializable
@@ -191,16 +194,20 @@ data class TokenStatsPayload(
 data class WindowSeriesDto(
     val accountId: Int,
     val accountName: String?,
-    val fiveHour: List<Double?>,   // 0..1 utilization per bucket (null = no data)
+    val fiveHour: List<Double?>,          // 0..1 utilization per bucket (null = no data)
     val weekly: List<Double?>,
+    val fiveHourWeighted: List<Double?>,  // coefficient × utilization (may exceed 1)
+    val weeklyWeighted: List<Double?>,
 )
 
 @Serializable
 data class WindowStatsPayload(
-    val buckets: List<String>,             // time labels, oldest→newest
-    val totalFiveHour: List<Double?>,      // average 5h utilization across accounts
+    val buckets: List<String>,                 // time labels, oldest→newest
+    val totalFiveHour: List<Double?>,          // Σ raw 5h utilization across accounts (may exceed 1)
     val totalWeekly: List<Double?>,
-    val perAccount: List<WindowSeriesDto>, // empty if the viewer can't see accounts
+    val totalFiveHourWeighted: List<Double?>,  // Σ coefficient × 5h utilization across accounts
+    val totalWeeklyWeighted: List<Double?>,
+    val perAccount: List<WindowSeriesDto>,     // empty if the viewer can't see accounts
     val canViewAccounts: Boolean,
 )
 

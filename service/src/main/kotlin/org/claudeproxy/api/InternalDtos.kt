@@ -13,6 +13,8 @@ data class ResolveRequest(
     val token: String,
     val method: String,
     val path: String,
+    // datapath: "proxy" (Claude Code, default) or "routing" (OpenAI/Anthropic gateways).
+    val source: String = "proxy",
 )
 
 /**
@@ -54,4 +56,6 @@ data class UsageReport(
     val status: Int,
     val model: String? = null,
     val ratelimitHeaders: Map<String, String> = emptyMap(),
+    // datapath that produced this attempt: "proxy" (default) or "routing".
+    val source: String = "proxy",
 )

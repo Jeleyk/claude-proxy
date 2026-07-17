@@ -12,7 +12,9 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
-data class WindowSample(val accountId: Int, val kind: String, val ts: Instant, val util: Double)
+// `coef` is the coefficient frozen at record time (defaults to 1.0 for any legacy row the
+// startup backfill somehow missed), used by the ×coef-weighted chart aggregation.
+data class WindowSample(val accountId: Int, val kind: String, val ts: Instant, val util: Double, val coef: Double)
 
 /**
  * Time series of observed window utilization. Writes are throttled to one point per
@@ -22,7 +24,7 @@ object WindowSnapshotRepo {
     private val throttleMs = 60_000L
     private val lastTs = ConcurrentHashMap<String, Long>()
 
-    fun record(accountId: Int, kind: WindowKind, utilization: Double, now: Instant = Instant.now()) {
+    fun record(accountId: Int, kind: WindowKind, utilization: Double, coefficient: Double, now: Instant = Instant.now()) {
         val key = "$accountId:${kind.code}"
         val last = lastTs[key]
         val nowMs = now.toEpochMilli()
@@ -34,6 +36,7 @@ object WindowSnapshotRepo {
                     it[WindowSnapshots.accountId] = accountId
                     it[windowKind] = kind.code
                     it[WindowSnapshots.utilization] = utilization
+                    it[WindowSnapshots.coefficient] = coefficient
                     it[ts] = now
                 }
             }
@@ -43,7 +46,7 @@ object WindowSnapshotRepo {
     fun fetch(start: Instant, end: Instant): List<WindowSample> = transaction {
         WindowSnapshots.selectAll()
             .where { (WindowSnapshots.ts greaterEq start) and (WindowSnapshots.ts less end) }
-            .map { WindowSample(it[WindowSnapshots.accountId], it[WindowSnapshots.windowKind], it[WindowSnapshots.ts], it[WindowSnapshots.utilization]) }
+            .map { WindowSample(it[WindowSnapshots.accountId], it[WindowSnapshots.windowKind], it[WindowSnapshots.ts], it[WindowSnapshots.utilization], it[WindowSnapshots.coefficient] ?: 1.0) }
     }
 
     fun pruneOlderThan(cutoff: Instant): Int = transaction {

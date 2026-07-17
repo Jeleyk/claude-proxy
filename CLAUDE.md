@@ -22,10 +22,21 @@ listening on `127.0.0.1:8080`). Host nginx + Cloudflare terminate TLS and proxy 
 | `/`           | **frontend** (SPA)   | React admin UI, static, served by nginx (React Router)   |
 | `/api/…`      | **service** (Kotlin) | Management REST API                                      |
 | `/gateway/…`  | **gateway** (Go)     | Anthropic datapath (`/gateway/v1/…`), served by the Go **gateway** (Spec B). It resolves each request against the service's private `/internal/*` control API, forwards to Anthropic, relays SSE, and reports usage back. The Kotlin datapath (`service:8787`) stays running as an instant rollback (revert the two nginx `proxy_pass` targets). |
+| `/routing/openai/…`    | **gateway-openai** (Go)    | OpenAI Chat Completions API emulated over Claude Code subscriptions. Translates OpenAI↔Anthropic (streaming + tool calls), resolves via the control API with `source="routing"`. base_url = `<origin>/routing/openai/v1`. |
+| `/routing/anthropic/…` | **gateway-anthropic** (Go) | Native Anthropic Messages API served from Claude Code subscriptions (injects the Claude Code system prompt), `source="routing"`. base_url = `<origin>/routing/anthropic`. |
+
+The routing gateways expose standard OpenAI/Anthropic API contracts to arbitrary clients but serve
+them through the same account pool as the Claude Code proxy. They authenticate with **routing
+tokens** (`cxr_…`, gated by `ROUTING_USE`), meter spend against a **separate per-user daily USD
+limit** (`users.daily_routing_cost_limit`), and tag usage rows `source="routing"` (proxy rows are
+`source="proxy"`) so the two datapaths share stats but keep independent limits. All three gateways
+are one Go module (`gateway/`, binaries under `cmd/`); they never touch Postgres/Redis.
 
 Top-level dirs: `frontend/` (React) · `service/` (Kotlin business logic + control API + Kotlin
-datapath/rollback) · `gateway/` (Go datapath — Spec B) · `deploy/` (nginx config + Dockerfiles).
-Containers: `claude-proxy-{nginx,front,service,gateway,redis,db}`.
+datapath/rollback) · `gateway/` (Go — one module: the Claude Code datapath at `gateway/main.go`
+plus `cmd/openai` + `cmd/anthropic` routing gateways, shared `internal/`) · `deploy/` (nginx config
++ Dockerfiles).
+Containers: `claude-proxy-{nginx,front,service,gateway,gateway-openai,gateway-anthropic,redis,db}`.
 `docker-compose.yml`, `.env.example`, `.dockerignore` stay at the repo root (compose sits next
 to server runtime state). See `docs/superpowers/specs/2026-07-12-repo-restructure-nginx-routing-design.md`.
 
@@ -73,8 +84,10 @@ cd frontend && pnpm dev        # Vite HMR on :5173, proxies /api /gateway /v1 /h
 cd service && ./gradlew fatJar # service fat jar (UI NOT baked in) -> service/build/libs/claude-proxy-<v>-all.jar
 cd service && ./gradlew test   # JUnit
 cd gateway && go test ./...    # Go gateway unit tests (go vet ./... too)
-cd gateway && go run .         # gateway on :9000 (needs SERVICE_URL + INTERNAL_TOKEN)
-docker-compose up -d --build   # nginx (:8080) + front + service + gateway + redis + postgres
+cd gateway && go run .            # Claude Code datapath gateway on :9000 (needs SERVICE_URL + INTERNAL_TOKEN)
+cd gateway && go run ./cmd/openai    # OpenAI routing gateway on :9100 (SERVICE_URL + INTERNAL_TOKEN; DEFAULT_MODEL opt.)
+cd gateway && go run ./cmd/anthropic # Anthropic routing gateway on :9200
+docker-compose up -d --build   # nginx (:8080) + front + service + gateway(+openai/anthropic) + redis + postgres
 ```
 
 The Gradle project now lives under `service/` — run `./gradlew` from there (or `service/gradlew
@@ -133,13 +146,16 @@ overrides in the `service` `environment:` block — **do not remove them**:
   report **utilization**, not remaining/limit.
 - **Cost model:** per-model USD pricing (input / output / cache_read / cache_write) in
   `ModelPrices`; per-request cost from the response usage; optional per-user daily USD limit.
-- **Proxy tokens:** `cxp_...`, stored as SHA-256; presented inbound via `Authorization: Bearer`
-  or `x-api-key`.
-- **Permissions** (`model/Models.kt`, ordered least→most): `PROXY_USE`, `STATS_VIEW_OWN`,
-  `STATS_RESET_OWN`, `ACCOUNTS_OWN_MANAGE` (manage own personal accounts + "My Accounts" page),
-  `ACCOUNTS_ORDER_TOGGLE` (switch personal-vs-global routing order), `STATS_VIEW_RECENT`,
-  `STATS_VIEW_ACCOUNTS`, `ACCOUNTS_VIEW`, `STATS_VIEW`, `ACCOUNTS_MANAGE`, `USERS_MANAGE`,
-  `ADMIN`. Default roles `user`/`manager` include `ACCOUNTS_OWN_MANAGE` + `ACCOUNTS_ORDER_TOGGLE`.
+- **Proxy tokens:** `cxp_...` (Claude Code datapath); **routing tokens:** `cxr_...` (OpenAI/Anthropic
+  gateways) — distinct namespaces (a `cxp_` never authenticates routing and vice versa), both stored
+  as SHA-256 and presented inbound via `Authorization: Bearer` or `x-api-key`.
+- **Permissions** (`model/Models.kt`, ordered least→most): `PROXY_USE`, `ROUTING_USE` (use the
+  OpenAI/Anthropic routing gateways + manage `cxr_` tokens), `STATS_VIEW_OWN`, `STATS_RESET_OWN`,
+  `ACCOUNTS_OWN_MANAGE` (manage own personal accounts + "My Accounts" page), `ACCOUNTS_ORDER_TOGGLE`
+  (switch personal-vs-global routing order), `POOL_GLOBAL_USE` (route through the shared pool),
+  `STATS_VIEW_RECENT`, `STATS_VIEW_ACCOUNTS`, `ACCOUNTS_VIEW`, `STATS_VIEW`, `ACCOUNTS_MANAGE`,
+  `USERS_MANAGE`, `ADMIN`. Default roles `user`/`manager` include `ACCOUNTS_OWN_MANAGE` +
+  `ACCOUNTS_ORDER_TOGGLE` + `POOL_GLOBAL_USE` + `ROUTING_USE`.
 
 ## Anthropic upstream specifics (calibrated against live traffic)
 

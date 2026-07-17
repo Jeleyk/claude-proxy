@@ -9,8 +9,10 @@ export interface UserDto {
   allowedGroups: number[];
   allGroups: boolean;
   dailyCostLimit: number | null;
+  dailyRoutingCostLimit: number | null;
   preferGlobalPool: boolean;
   todayCost: number;
+  todayRoutingCost: number;
   todayInputTokens: number;
   todayOutputTokens: number;
 }
@@ -170,6 +172,11 @@ export const api = {
   createToken: (name: string) => req<ProxyTokenDto>('POST', '/api/proxy-tokens', { name }),
   deleteToken: (id: number) => req<unknown>('DELETE', `/api/proxy-tokens/${id}`),
 
+  // Routing tokens (cxr_...) for the OpenAI/Anthropic API gateways. Same shape as proxy tokens.
+  routingTokens: () => req<ProxyTokenDto[]>('GET', '/api/routing-tokens'),
+  createRoutingToken: (name: string) => req<ProxyTokenDto>('POST', '/api/routing-tokens', { name }),
+  deleteRoutingToken: (id: number) => req<unknown>('DELETE', `/api/routing-tokens/${id}`),
+
   statsSummary: () => req<UsageSummary[]>('GET', '/api/stats/summary'),
   statsRecent: () => req<UsageEvent[]>('GET', '/api/stats/recent'),
   statsModels: () => req<ModelBreakdown>('GET', '/api/stats/models'),
@@ -204,11 +211,18 @@ export interface DailyStats {
   perAccount: AccountSeries[];
   canViewAccounts: boolean;
 }
-export interface WindowSeries { accountId: number; accountName: string | null; fiveHour: (number | null)[]; weekly: (number | null)[]; }
+export interface WindowSeries {
+  accountId: number; accountName: string | null;
+  fiveHour: (number | null)[]; weekly: (number | null)[];
+  // coefficient × utilization (may exceed 1) — the ×coef toggle switches to these
+  fiveHourWeighted: (number | null)[]; weeklyWeighted: (number | null)[];
+}
 export interface WindowStats {
   buckets: string[];
-  totalFiveHour: (number | null)[];
+  totalFiveHour: (number | null)[];          // Σ raw utilization across accounts (may exceed 1)
   totalWeekly: (number | null)[];
+  totalFiveHourWeighted: (number | null)[];  // Σ coefficient × utilization across accounts
+  totalWeeklyWeighted: (number | null)[];
   perAccount: WindowSeries[];
   canViewAccounts: boolean;
 }

@@ -1,4 +1,5 @@
 import { ReactNode, useEffect, useState } from 'react';
+import { ChartMode } from './Chart';
 
 /* ---------------------------------------------------------------- icons
    Small inline SVG set (Lucide-style, currentColor). No icon dependency. */
@@ -8,6 +9,7 @@ const ICON_PATHS: Record<string, ReactNode> = {
   mystats: (<><circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 4-6 8-6s8 2 8 6" /></>),
   stats: (<><path d="M4 20V10" /><path d="M10 20V4" /><path d="M16 20v-7" /><path d="M3 20h18" /></>),
   tokens: (<><circle cx="8" cy="15" r="4" /><path d="M10.8 12.2 20 3" /><path d="m17 6 2 2" /><path d="m14.5 8.5 2 2" /></>),
+  routing: (<><circle cx="6" cy="6" r="2.4" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="12" r="2.4" /><path d="M6 8.4v7.2" /><path d="M8.4 6H12a3 3 0 0 1 3 3v1" /><path d="M8.4 18H12a3 3 0 0 0 3-3v-1" /></>),
   pricing: (<><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0l-7-7A2 2 0 0 1 3 12V4a1 1 0 0 1 1-1h8a2 2 0 0 1 1.4.6l7.2 7.2a2 2 0 0 1 0 2.6z" /><path d="M7.5 7.5h.01" /></>),
   users: (<><circle cx="9" cy="8" r="3.5" /><path d="M2.5 20c0-3.6 3-5.2 6.5-5.2s6.5 1.6 6.5 5.2" /><path d="M16 5.2a3.5 3.5 0 0 1 0 6.6" /><path d="M17.5 15c2.4.5 4 2 4 5" /></>),
   menu: (<><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></>),
@@ -20,6 +22,8 @@ const ICON_PATHS: Record<string, ReactNode> = {
   logout: (<><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" /><path d="M10 17l5-5-5-5" /><path d="M15 12H3" /></>),
   settings: (<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>),
   sparkle: (<path d="M12 3l1.9 5.6a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z" />),
+  bars: (<><rect x="4" y="12" width="4" height="8" rx="1" /><rect x="10" y="7" width="4" height="13" rx="1" /><rect x="16" y="14" width="4" height="6" rx="1" /></>),
+  area: (<><path d="M3 16c3 0 3-6 6-6s4 4 6 4 3-5 6-5" /><path d="M3 20h18" /></>),
 };
 
 export function Icon({ name, size = 18 }: { name: string; size?: number }) {
@@ -133,6 +137,20 @@ export function ThemeToggle() {
       { value: 'dark', label: <><Icon name="moon" size={15} /><span>Dark</span></> },
     ]} />
   );
+}
+
+/* ---------------------------------------------------------------- chart mode
+   Bars vs smooth stacked area for the Spend/Tokens charts — a display preference, so it
+   sticks across reloads like the theme choice. */
+const CHART_MODE_KEY = 'cp-chart-mode';
+export function getStoredChartMode(): ChartMode {
+  try { const v = localStorage.getItem(CHART_MODE_KEY); if (v === 'bars' || v === 'area') return v; } catch { /* ignore */ }
+  return 'bars';
+}
+export function useChartMode(): [ChartMode, (m: ChartMode) => void] {
+  const [mode, setMode] = useState<ChartMode>(getStoredChartMode);
+  const set = (m: ChartMode) => { setMode(m); try { localStorage.setItem(CHART_MODE_KEY, m); } catch { /* ignore */ } };
+  return [mode, set];
 }
 
 /* ---------------------------------------------------------------- existing primitives */

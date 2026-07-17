@@ -30,6 +30,7 @@ import org.claudeproxy.repo.GroupRepo
 import org.claudeproxy.repo.ModelPriceRepo
 import org.claudeproxy.repo.OAuthAddRepo
 import org.claudeproxy.repo.ProxyTokenRepo
+import org.claudeproxy.repo.RoutingTokenRepo
 import org.claudeproxy.repo.RoleRepo
 import org.claudeproxy.repo.SettingsRepo
 import org.claudeproxy.repo.UsageRepo
@@ -69,6 +70,7 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
         userAccountRoutes(pool, probe)
         roleRoutes()
         proxyTokenRoutes()
+        routingTokenRoutes()
         statsRoutes()
     }
 }
@@ -463,7 +465,7 @@ private fun Route.userRoutes() {
     post("/users") {
         call.requirePermission(Permission.USERS_MANAGE)
         val req = call.receive<CreateUserRequest>()
-        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyCostLimit)
+        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyCostLimit, req.dailyRoutingCostLimit)
         call.respond(UserRepo.get(id) ?: MessageResponse("created"))
     }
     patch("/users/{id}") {
@@ -471,7 +473,7 @@ private fun Route.userRoutes() {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateUserRequest>()
-        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyCostLimit, req.clearDailyLimit)
+        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyCostLimit, req.clearDailyLimit, req.dailyRoutingCostLimit, req.clearRoutingLimit)
         call.respond(UserRepo.get(id) ?: MessageResponse("updated"))
     }
     delete("/users/{id}") {
@@ -531,6 +533,27 @@ private fun Route.proxyTokenRoutes() {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@delete call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val ok = ProxyTokenRepo.delete(id, user.id)
+        call.respond(if (ok) OkResponse() else MessageResponse("not found"))
+    }
+}
+
+// ---- routing tokens (per-user, requires routing.use) — OpenAI/Anthropic API gateways ----
+
+private fun Route.routingTokenRoutes() {
+    get("/routing-tokens") {
+        val user = call.requireUser()
+        call.respond(RoutingTokenRepo.listForUser(user.id))
+    }
+    post("/routing-tokens") {
+        val user = call.requirePermission(Permission.ROUTING_USE)
+        val req = call.receive<CreateProxyTokenRequest>()
+        call.respond(RoutingTokenRepo.create(user.id, req.name))
+    }
+    delete("/routing-tokens/{id}") {
+        val user = call.requireUser()
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@delete call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val ok = RoutingTokenRepo.delete(id, user.id)
         call.respond(if (ok) OkResponse() else MessageResponse("not found"))
     }
 }
@@ -650,40 +673,74 @@ private fun buildWindows(
         java.time.Instant.ofEpochMilli(start.toEpochMilli() + (it * widthMs).toLong())
             .atZone(java.time.ZoneOffset.UTC).toLocalDateTime().toString().substring(5, 16)
     }
-
-    // (accountId, kind) -> per-bucket [sum, count]. Default keep: exclude personal accounts (pool-wide).
+    // Default keep: exclude personal accounts (pool-wide view).
     val includeAccount = keep ?: AccountRepo.personalIds().let { personal -> { id: Int -> id !in personal } }
+    val samples = org.claudeproxy.repo.WindowSnapshotRepo.fetch(start, end).filter { includeAccount(it.accountId) }
+    return aggregateWindows(samples, start.toEpochMilli(), widthMs, buckets, labels, includeAccounts, AccountRepo.namesMap())
+}
+
+/**
+ * Pure bucketing/aggregation for the window-utilization charts — split out of [buildWindows] so
+ * the sum + carry-forward + coefficient-weighting math is unit-testable without a DB. [samples]
+ * are already filtered to the accounts that should contribute.
+ *
+ * Each (account, window) is binned to per-bucket averages (raw utilization and coefficient×util,
+ * using the coefficient frozen on each sample), then carried forward across gaps. Pool totals are
+ * the **sum** across accounts of those carried series (so a multi-account pool can exceed 100%),
+ * for both the raw and the ×coef-weighted variants.
+ */
+internal fun aggregateWindows(
+    samples: List<org.claudeproxy.repo.WindowSample>,
+    startMs: Long, widthMs: Double, buckets: Int,
+    labels: List<String>, includeAccounts: Boolean, names: Map<Int, String>,
+): WindowStatsPayload {
+    // (accountId, kind) -> per-bucket [Σutil, Σ(coef·util), count]
     val agg = HashMap<Pair<Int, String>, Array<DoubleArray>>()
-    org.claudeproxy.repo.WindowSnapshotRepo.fetch(start, end).forEach { s ->
-        if (!includeAccount(s.accountId)) return@forEach
-        val i = ((s.ts.toEpochMilli() - start.toEpochMilli()) / widthMs).toInt().coerceIn(0, buckets - 1)
-        val arr = agg.getOrPut(s.accountId to s.kind) { arrayOf(DoubleArray(buckets), DoubleArray(buckets)) }
-        arr[0][i] += s.util; arr[1][i] += 1.0
+    samples.forEach { s ->
+        val i = ((s.ts.toEpochMilli() - startMs) / widthMs).toInt().coerceIn(0, buckets - 1)
+        val arr = agg.getOrPut(s.accountId to s.kind) {
+            arrayOf(DoubleArray(buckets), DoubleArray(buckets), DoubleArray(buckets))
+        }
+        arr[0][i] += s.util
+        arr[1][i] += s.util * s.coef
+        arr[2][i] += 1.0
     }
-    // average per bucket then carry the last known value forward across gaps
-    fun series(accountId: Int, kind: String): List<Double?> {
-        val arr = agg[accountId to kind] ?: return List(buckets) { null }
+    // per-bucket average of one accumulator lane (0 = util, 1 = coef·util), carried forward across gaps
+    fun series(key: Pair<Int, String>, lane: Int): List<Double?> {
+        val arr = agg[key] ?: return List(buckets) { null }
         val out = arrayOfNulls<Double>(buckets)
         var last: Double? = null
         for (i in 0 until buckets) {
-            if (arr[1][i] > 0) last = arr[0][i] / arr[1][i]
+            if (arr[2][i] > 0) last = arr[lane][i] / arr[2][i]
             out[i] = last
         }
         return out.toList()
     }
 
-    val accountIds = agg.keys.map { it.first }.distinct()
-    val names = AccountRepo.namesMap()
-    val perAccount = if (includeAccounts)
-        accountIds.sorted().map { WindowSeriesDto(it, names[it], series(it, "5h"), series(it, "7d")) }
-    else emptyList()
+    val accountIds = agg.keys.map { it.first }.distinct().sorted()
+    val perAccount = if (includeAccounts) accountIds.map { aid ->
+        WindowSeriesDto(
+            aid, names[aid],
+            series(aid to "5h", 0), series(aid to "7d", 0),
+            series(aid to "5h", 1), series(aid to "7d", 1),
+        )
+    } else emptyList()
 
-    fun total(kind: String): List<Double?> = (0 until buckets).map { i ->
-        val vals = accountIds.mapNotNull { series(it, kind)[i] }
-        if (vals.isEmpty()) null else vals.average()
+    // pool total = SUM across accounts of each account's carried series (raw or ×coef-weighted)
+    fun total(kind: String, lane: Int): List<Double?> {
+        val all = accountIds.map { series(it to kind, lane) }
+        return (0 until buckets).map { i ->
+            val vals = all.mapNotNull { it[i] }
+            if (vals.isEmpty()) null else vals.sum()
+        }
     }
 
-    return WindowStatsPayload(labels, total("5h"), total("7d"), perAccount, includeAccounts)
+    return WindowStatsPayload(
+        labels,
+        total("5h", 0), total("7d", 0),
+        total("5h", 1), total("7d", 1),
+        perAccount, includeAccounts,
+    )
 }
 
 private fun Route.statsRoutes() {
@@ -752,8 +809,9 @@ private fun Route.statsRoutes() {
     get("/stats/mine") {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
-        // "today" mirrors the daily-limit basis (shared-pool spend only); all-time/history stay complete.
-        val today = UsageRepo.userTotals(user.id, UserRepo.startOfUtcDay(), globalOnly = true)
+        // "today" mirrors the daily-limit basis (shared-pool PROXY spend, paired with dailyCostLimit
+        // below); routing spend has its own limit + page. All-time/history/charts stay complete.
+        val today = UsageRepo.userTotals(user.id, UserRepo.startOfUtcDay(), globalOnly = true, source = "proxy")
         val total = UsageRepo.userTotals(user.id)
         val recent = UsageRepo.recentForUser(user.id, 20)
         call.respond(

@@ -43,18 +43,21 @@ type UsageReport struct {
 	Status           int               `json:"status"`
 	Model            *string           `json:"model"`
 	RatelimitHeaders map[string]string `json:"ratelimitHeaders"`
+	Source           string            `json:"source,omitempty"`
 }
 
 type resolveReq struct {
 	Token  string `json:"token"`
 	Method string `json:"method"`
 	Path   string `json:"path"`
+	Source string `json:"source,omitempty"`
 }
 
 // Client talks to the service control API.
 type Client struct {
 	serviceURL    string
 	internalToken string
+	source        string
 	http          *http.Client
 }
 
@@ -68,10 +71,18 @@ func New(serviceURL, internalToken string) *Client {
 	}
 }
 
+// WithSource tags every resolve/usage call with a datapath source ("routing" for the
+// OpenAI/Anthropic API gateways). The default (empty) is treated as "proxy" by the service,
+// so the existing Claude Code gateway keeps its behavior unchanged.
+func (c *Client) WithSource(source string) *Client {
+	c.source = source
+	return c
+}
+
 // Resolve turns a proxy token + request line into an ordered candidate list. The returned int
 // is the HTTP status so the caller can map 401/403 straight to the client.
 func (c *Client) Resolve(ctx context.Context, token, method, path string) (*ResolveResp, int, error) {
-	body, _ := json.Marshal(resolveReq{Token: token, Method: method, Path: path})
+	body, _ := json.Marshal(resolveReq{Token: token, Method: method, Path: path, Source: c.source})
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.serviceURL+"/internal/resolve", bytes.NewReader(body))
@@ -100,6 +111,9 @@ func (c *Client) Resolve(ctx context.Context, token, method, path string) (*Reso
 // ReportUsage posts an attempt outcome fire-and-forget: it runs in a goroutine with a couple of
 // retries, then logs and drops. Usage accounting must never block or fail the datapath.
 func (c *Client) ReportUsage(ctx context.Context, r UsageReport) {
+	if r.Source == "" {
+		r.Source = c.source
+	}
 	body, _ := json.Marshal(r)
 	go func() {
 		for attempt := 0; attempt < 3; attempt++ {

@@ -359,6 +359,8 @@ select:hover { border-color: var(--accent); }
 /* control bar over all charts */
 .controlbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 6px 0 18px; }
 .controlbar .daterange { display: inline-flex; align-items: center; gap: 8px; }
+.controlbar .custom-days { display: inline-flex; align-items: center; gap: 7px; }
+.controlbar .custom-days .num-input { width: 70px; padding: 7px 9px; text-align: center; }
 .order-toggle { display: inline-flex; align-items: center; gap: 8px; margin-right: 4px; }
 
 /* ---- login ---- */

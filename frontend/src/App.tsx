@@ -7,6 +7,7 @@ import { Dashboard } from './pages/Dashboard';
 import { MyAccounts } from './pages/MyAccounts';
 import { Users } from './pages/Users';
 import { Tokens } from './pages/Tokens';
+import { RoutingTokens } from './pages/RoutingTokens';
 import { ModelPricing } from './pages/ModelPricing';
 import { Stats } from './pages/Stats';
 import { MyStats } from './pages/MyStats';
@@ -25,6 +26,7 @@ const NAV: NavDef[] = [
   { path: '/my/stats', label: 'My Stats', icon: 'mystats', perm: 'STATS_VIEW_OWN' },
   { path: '/stats', label: 'Statistics', icon: 'stats', anyPerm: ['STATS_VIEW', 'STATS_VIEW_RECENT', 'STATS_VIEW_ACCOUNTS'] },
   { path: '/tokens', label: 'Proxy Tokens', icon: 'tokens', perm: 'PROXY_USE' },
+  { path: '/routing', label: 'API Routing', icon: 'routing', perm: 'ROUTING_USE' },
   { path: '/pricing', label: 'Model Pricing', icon: 'pricing', perm: 'ADMIN' },
   { path: '/users', label: 'Users & Roles', icon: 'users', perm: 'USERS_MANAGE' },
 ];
@@ -146,6 +148,7 @@ function Shell({ user, setUser }: { user: UserDto; setUser: (u: UserDto | null) 
             <Route path="/my/stats" element={<RequirePerm user={user} perm="STATS_VIEW_OWN"><MyStats canReset={has(user, 'STATS_RESET_OWN')} /></RequirePerm>} />
             <Route path="/stats" element={<RequirePerm user={user} anyPerm={['STATS_VIEW', 'STATS_VIEW_RECENT', 'STATS_VIEW_ACCOUNTS']}><Stats user={user} /></RequirePerm>} />
             <Route path="/tokens" element={<RequirePerm user={user} perm="PROXY_USE"><Tokens /></RequirePerm>} />
+            <Route path="/routing" element={<RequirePerm user={user} perm="ROUTING_USE"><RoutingTokens /></RequirePerm>} />
             <Route path="/pricing" element={<RequirePerm user={user} perm="ADMIN"><ModelPricing /></RequirePerm>} />
             <Route path="/users" element={<RequirePerm user={user} perm="USERS_MANAGE"><Users isAdmin={has(user, 'ADMIN')} /></RequirePerm>} />
             <Route path="*" element={<Navigate to={landing} replace />} />

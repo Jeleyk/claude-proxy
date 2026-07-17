@@ -138,6 +138,8 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
   const [selGroups, setSelGroups] = useState<number[]>(user?.allowedGroups ?? []);
   const [limitOn, setLimitOn] = useState(user?.dailyCostLimit != null);
   const [limitVal, setLimitVal] = useState<number>(user?.dailyCostLimit ?? 5);
+  const [rLimitOn, setRLimitOn] = useState(user?.dailyRoutingCostLimit != null);
+  const [rLimitVal, setRLimitVal] = useState<number>(user?.dailyRoutingCostLimit ?? 5);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -150,11 +152,16 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
     try {
       const common = { roles: selRoles, allowedGroups: selGroups };
       if (isNew) {
-        await api.createUser({ ...common, username, password, dailyCostLimit: limitOn ? limitVal : null });
+        await api.createUser({
+          ...common, username, password,
+          dailyCostLimit: limitOn ? limitVal : null,
+          dailyRoutingCostLimit: rLimitOn ? rLimitVal : null,
+        });
       } else {
         const body: any = { ...common };
         if (password) body.password = password;
         if (limitOn) body.dailyCostLimit = limitVal; else body.clearDailyLimit = true;
+        if (rLimitOn) body.dailyRoutingCostLimit = rLimitVal; else body.clearRoutingLimit = true;
         await api.updateUser(user!.id, body);
       }
       onSaved();
@@ -183,7 +190,7 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
 
       <div className="field">
         <div className="row" style={{ justifyContent: 'space-between' }}>
-          <span style={{ margin: 0 }}>Daily spend limit</span>
+          <span style={{ margin: 0 }}>Daily spend limit <span className="hint">· proxy (Claude Code)</span></span>
           <Switch checked={limitOn} onChange={setLimitOn} />
         </div>
         {limitOn && (
@@ -191,6 +198,22 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
             <div className="row">
               <span className="hint">$</span>
               <NumberInput value={limitVal} onChange={setLimitVal} min={0} step={0.5} />
+              <span className="hint">per day (UTC)</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="field">
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <span style={{ margin: 0 }}>Daily routing limit <span className="hint">· OpenAI/Anthropic API</span></span>
+          <Switch checked={rLimitOn} onChange={setRLimitOn} />
+        </div>
+        {rLimitOn && (
+          <div style={{ marginTop: 10 }}>
+            <div className="row">
+              <span className="hint">$</span>
+              <NumberInput value={rLimitVal} onChange={setRLimitVal} min={0} step={0.5} />
               <span className="hint">per day (UTC)</span>
             </div>
           </div>

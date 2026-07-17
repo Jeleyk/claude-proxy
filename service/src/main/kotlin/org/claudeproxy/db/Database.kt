@@ -50,6 +50,7 @@ object Db {
             SchemaUtils.createMissingTablesAndColumns(*ALL_TABLES)
             seedRoles()
             migrateGlobalPoolPermission()
+            migrateWindowSnapshotCoefficient()
             seedAdmin(config)
         }
         org.claudeproxy.repo.ModelPriceRepo.seedDefaults()
@@ -60,9 +61,9 @@ object Db {
     private fun seedRoles() {
         val defaults = mapOf(
             "admin" to Permission.entries.toList(),
-            "manager" to listOf(Permission.ACCOUNTS_MANAGE, Permission.ACCOUNTS_VIEW, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN, Permission.PROXY_USE),
+            "manager" to listOf(Permission.ACCOUNTS_MANAGE, Permission.ACCOUNTS_VIEW, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE, Permission.ROUTING_USE, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN, Permission.PROXY_USE),
             "viewer" to listOf(Permission.ACCOUNTS_VIEW, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN),
-            "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE),
+            "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE, Permission.ROUTING_USE),
         )
         defaults.forEach { (roleName, perms) ->
             val roleId = Roles.select(Roles.id).where { Roles.name eq roleName }.firstOrNull()?.get(Roles.id)
@@ -92,6 +93,22 @@ object Db {
                 it[permission] = Permission.POOL_GLOBAL_USE.name
             }
         }
+    }
+
+    /**
+     * One-time backfill of window_snapshots.coefficient (added for the coefficient-weighted
+     * charts). Pre-existing rows carry no recorded coefficient; set each to its account's
+     * *current* coefficient so the historical ×coef view is populated. New rows always write
+     * the live coefficient, and this touches only NULL rows — so changing an account's
+     * coefficient never rewrites old points. Idempotent (no NULLs remain after the first run).
+     * The correlated subquery form runs on both PostgreSQL and SQLite.
+     */
+    private fun migrateWindowSnapshotCoefficient() {
+        org.jetbrains.exposed.sql.transactions.TransactionManager.current().exec(
+            "UPDATE window_snapshots SET coefficient = " +
+                "(SELECT coefficient FROM accounts WHERE accounts.id = window_snapshots.account_id) " +
+                "WHERE coefficient IS NULL",
+        )
     }
 
     /** Create the bootstrap admin user from config if no users exist yet. */

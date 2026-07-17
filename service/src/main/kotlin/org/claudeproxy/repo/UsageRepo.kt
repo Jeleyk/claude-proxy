@@ -54,7 +54,7 @@ object UsageRepo {
 
     fun record(
         accountId: Int, userId: Int?, input: Long, cacheRead: Long, cacheWrite: Long, output: Long,
-        status: Int, model: String?,
+        status: Int, model: String?, source: String = "proxy",
     ) {
         val cost = ModelPriceRepo.costOf(model, input, cacheRead, cacheWrite, output)
         runCatching {
@@ -70,6 +70,7 @@ object UsageRepo {
                     it[UsageEvents.cost] = cost
                     it[httpStatus] = status
                     it[UsageEvents.model] = model
+                    it[UsageEvents.sourceCol] = source
                 }
             }
         }
@@ -91,13 +92,20 @@ object UsageRepo {
     /**
      * Totals for one user. [globalOnly] excludes usage that went through the user's own
      * personal accounts — used for the daily-limit check, which governs only shared-pool spend.
+     * [source], when set ("proxy" | "routing"), restricts to events from that datapath — the
+     * per-datapath daily limits meter their own spend independently.
      */
-    fun userTotals(userId: Int, since: Instant? = null, globalOnly: Boolean = false): Totals = transaction {
+    fun userTotals(userId: Int, since: Instant? = null, globalOnly: Boolean = false, source: String? = null): Totals = transaction {
         val personal = if (globalOnly) personalAccountIds() else emptySet()
         val q = if (since != null)
             UsageEvents.selectAll().where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
         else UsageEvents.selectAll().where { UsageEvents.userId eq userId }
-        accumulate(if (personal.isEmpty()) q else q.filter { it[UsageEvents.accountId] !in personal })
+        accumulate(
+            q.asSequence().filter { row ->
+                (personal.isEmpty() || row[UsageEvents.accountId] !in personal) &&
+                    (source == null || row[UsageEvents.sourceCol] == source)
+            }.asIterable(),
+        )
     }
 
     /** Per-account totals for a specific set of accounts (used by the personal "My Accounts" view). */

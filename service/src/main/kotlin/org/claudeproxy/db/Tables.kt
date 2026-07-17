@@ -163,6 +163,12 @@ object WindowSnapshots : Table("window_snapshots") {
     val accountId = integer("account_id").references(Accounts.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
     val windowKind = varchar("window_kind", 8)   // "5h" | "7d"
     val utilization = double("utilization")
+    // coefficient in effect when this point was recorded, FROZEN at write time so the
+    // ×coef-weighted charts keep their historical weighting even after an account's coefficient
+    // later changes. Nullable only for pre-migration rows; backfilled once from the account's
+    // current coefficient at startup (see Db.migrateWindowSnapshotCoefficient), and always
+    // written for new rows.
+    val coefficient = double("coefficient").nullable()
     val ts = timestamp("ts")
     override val primaryKey = PrimaryKey(id)
     init { index(false, accountId, windowKind, ts) }

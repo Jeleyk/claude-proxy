@@ -79,7 +79,8 @@ class ProxyEngine(
         // and does not count toward this shared-pool limit. When the shared limit is reached
         // the user may still route through their own personal accounts (their own quota).
         val costLimit = UserRepo.dailyLimitOf(userId)
-        val usedCost = if (costLimit != null) UsageRepo.userTotals(userId, UserRepo.startOfUtcDay(), globalOnly = true).cost else 0.0
+        // Only proxy-datapath spend counts toward the proxy daily limit; routing has its own limit.
+        val usedCost = if (costLimit != null) UsageRepo.userTotals(userId, UserRepo.startOfUtcDay(), globalOnly = true, source = "proxy").cost else 0.0
         val overLimit = costLimit != null && usedCost >= costLimit
 
         // Try accounts in order; every account except the last may retry to the next one.

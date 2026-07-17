@@ -161,9 +161,11 @@ class AccountPool {
         } ?: return
         runCatching { AccountRepo.persistLimit(id, updated.limit) }
             .onFailure { log.warn("persist limit failed for {}: {}", id, it.message) }
-        // Append utilization history points for the trend graphs (throttled internally).
+        // Append utilization history points for the trend graphs (throttled internally). The
+        // account's current coefficient is frozen into each point so historical ×coef charts are
+        // unaffected when the coefficient later changes.
         updated.limit.windows.forEach { (kind, w) ->
-            w.utilization?.let { org.claudeproxy.repo.WindowSnapshotRepo.record(id, kind, it) }
+            w.utilization?.let { org.claudeproxy.repo.WindowSnapshotRepo.record(id, kind, it, updated.coefficient) }
         }
     }
 

@@ -13,6 +13,7 @@ import org.claudeproxy.model.LimitState
 import org.claudeproxy.model.Permission
 import org.claudeproxy.model.WindowKind
 import org.claudeproxy.repo.ProxyTokenRepo
+import org.claudeproxy.repo.RoutingTokenRepo
 import org.claudeproxy.repo.UsageRepo
 import org.claudeproxy.repo.ModelPriceRepo
 import org.claudeproxy.repo.UserRepo
@@ -47,12 +48,20 @@ data class ResolveResult(
  */
 class DatapathService(private val pool: AccountPool) {
 
-    /** Resolve a request into an ordered, ready-to-forward candidate list. */
-    suspend fun resolve(token: String, method: String, path: String): ResolveResult {
-        val userId = ProxyTokenRepo.resolveUser(token)
+    /**
+     * Resolve a request into an ordered, ready-to-forward candidate list. [source] selects the
+     * datapath: `"proxy"` (Claude Code, the default) or `"routing"` (the OpenAI/Anthropic API
+     * gateways). Routing resolves the token in the routing-token namespace, requires
+     * `ROUTING_USE`, and meters spend against the separate per-user routing daily limit. Account
+     * selection (personal-first, group scope, global-pool gating) is identical for both.
+     */
+    suspend fun resolve(token: String, method: String, path: String, source: String = "proxy"): ResolveResult {
+        val routing = source == "routing"
+        val userId = (if (routing) RoutingTokenRepo.resolveUser(token) else ProxyTokenRepo.resolveUser(token))
             ?: return ResolveResult(null, ResolveError.BAD_TOKEN, false, null, null, emptyList())
         val perms = UserRepo.permissionsOf(userId)
-        if (Permission.PROXY_USE !in perms) {
+        val required = if (routing) Permission.ROUTING_USE else Permission.PROXY_USE
+        if (required !in perms) {
             return ResolveResult(userId, ResolveError.NO_PERMISSION, false, null, null, emptyList())
         }
 
@@ -70,8 +79,8 @@ class DatapathService(private val pool: AccountPool) {
         }
 
         // Per-user daily USD limit is a shared-pool constraint; personal accounts are exempt.
-        val costLimit = UserRepo.dailyLimitOf(userId)
-        val usedCost = if (costLimit != null) cachedDailySpend(userId) else 0.0
+        val costLimit = if (routing) UserRepo.dailyRoutingLimitOf(userId) else UserRepo.dailyLimitOf(userId)
+        val usedCost = if (costLimit != null) cachedDailySpend(userId, routing) else 0.0
         val overLimit = costLimit != null && usedCost >= costLimit
 
         val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst, allowGlobal)
@@ -83,15 +92,18 @@ class DatapathService(private val pool: AccountPool) {
      * and run the per-status account bookkeeping that `UpstreamForwarder` did inline.
      */
     suspend fun applyOutcome(o: UsageReport) {
-        UsageRepo.record(o.accountId, o.userId, o.input, o.cacheRead, o.cacheWrite, o.output, o.status, o.model)
+        val routing = o.source == "routing"
+        val source = if (routing) "routing" else "proxy"
+        UsageRepo.record(o.accountId, o.userId, o.input, o.cacheRead, o.cacheWrite, o.output, o.status, o.model, source)
 
         // Keep the cached daily spend fresh. Only *global* (shared-pool) usage counts toward the
-        // per-user daily limit; personal accounts are the user's own quota (exempt). The increment
-        // is a no-op when the key isn't cached — the next resolve recomputes it from the DB.
+        // per-user daily limit; personal accounts are the user's own quota (exempt). Proxy and
+        // routing spend accumulate under separate keys so each limit meters only its own datapath.
+        // The increment is a no-op when the key isn't cached — the next resolve recomputes from DB.
         val ownerId = pool.get(o.accountId)?.ownerId
         if (o.userId != null && ownerId == null) {
             val cost = ModelPriceRepo.costOf(o.model, o.input, o.cacheRead, o.cacheWrite, o.output)
-            if (cost > 0.0) RedisCache.incrExistingByFloat(spendKey(o.userId), cost)
+            if (cost > 0.0) RedisCache.incrExistingByFloat(spendKey(o.userId, routing), cost)
         }
 
         val prev = pool.get(o.accountId)?.limit ?: LimitState()
@@ -143,19 +155,20 @@ class DatapathService(private val pool: AccountPool) {
     }
 
     /**
-     * Cached shared-pool daily spend (USD) for a user. Cached in Redis under
-     * `cp:spend:<user>:<utcDate>` until the next UTC midnight, with a DB recompute on miss.
+     * Cached shared-pool daily spend (USD) for a user on the given datapath. Cached in Redis
+     * under `cp:spend:<user>:<utcDate>` (proxy) / `cp:rspend:<user>:<utcDate>` (routing) until
+     * the next UTC midnight, with a DB recompute on miss.
      */
-    private fun cachedDailySpend(userId: Int): Double {
+    private fun cachedDailySpend(userId: Int, routing: Boolean): Double {
         val ttl = secondsToUtcMidnight()
-        val cached = RedisCache.getOrLoad(spendKey(userId), ttl) {
-            UsageRepo.userTotals(userId, UserRepo.startOfUtcDay(), globalOnly = true).cost.toString()
+        val cached = RedisCache.getOrLoad(spendKey(userId, routing), ttl) {
+            UsageRepo.userTotals(userId, UserRepo.startOfUtcDay(), globalOnly = true, source = if (routing) "routing" else "proxy").cost.toString()
         }
         return cached?.toDoubleOrNull() ?: 0.0
     }
 
-    private fun spendKey(userId: Int): String =
-        "cp:spend:$userId:${LocalDate.now(ZoneOffset.UTC)}"
+    private fun spendKey(userId: Int, routing: Boolean): String =
+        "cp:${if (routing) "rspend" else "spend"}:$userId:${LocalDate.now(ZoneOffset.UTC)}"
 
     private fun secondsToUtcMidnight(): Long {
         val nextMidnight = LocalDate.now(ZoneOffset.UTC).plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant()

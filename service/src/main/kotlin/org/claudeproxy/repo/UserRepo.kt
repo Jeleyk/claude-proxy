@@ -58,18 +58,23 @@ object UserRepo {
 
     fun list(): List<UserDto> = transaction {
         Users.selectAll().map { row ->
-            toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyCostLimit], row[Users.preferGlobalPool])
+            toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyCostLimit], row[Users.dailyRoutingCostLimit], row[Users.preferGlobalPool])
         }
     }
 
     fun get(userId: Int): UserDto? = transaction {
         val row = Users.selectAll().where { Users.id eq userId }.firstOrNull() ?: return@transaction null
-        toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyCostLimit], row[Users.preferGlobalPool])
+        toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyCostLimit], row[Users.dailyRoutingCostLimit], row[Users.preferGlobalPool])
     }
 
     /** Per-day spend limit in USD for a user; null = unlimited. */
     fun dailyLimitOf(userId: Int): Double? = transaction {
         Users.selectAll().where { Users.id eq userId }.firstOrNull()?.get(Users.dailyCostLimit)
+    }
+
+    /** Per-day routing (OpenAI/Anthropic gateway) spend limit in USD for a user; null = unlimited. */
+    fun dailyRoutingLimitOf(userId: Int): Double? = transaction {
+        Users.selectAll().where { Users.id eq userId }.firstOrNull()?.get(Users.dailyRoutingCostLimit)
     }
 
     /** Routing preference: true = try the global pool before the user's own personal accounts. */
@@ -101,10 +106,12 @@ object UserRepo {
         }
     }
 
-    private fun toDto(uid: Int, username: String, enabled: Boolean, dailyCostLimit: Double?, preferGlobalPool: Boolean): UserDto {
+    private fun toDto(uid: Int, username: String, enabled: Boolean, dailyCostLimit: Double?, dailyRoutingCostLimit: Double?, preferGlobalPool: Boolean): UserDto {
         val perms = permissionsOf(uid)
         // "today" here reflects shared-pool spend (what the daily limit governs); personal-account usage is excluded.
-        val today = UsageRepo.userTotals(uid, startOfUtcDay(), globalOnly = true)
+        // Split by datapath so proxy and routing spend are metered against their own daily limits.
+        val today = UsageRepo.userTotals(uid, startOfUtcDay(), globalOnly = true, source = "proxy")
+        val todayRouting = UsageRepo.userTotals(uid, startOfUtcDay(), globalOnly = true, source = "routing")
         return UserDto(
             id = uid,
             username = username,
@@ -114,8 +121,10 @@ object UserRepo {
             allowedGroups = allowedGroupsOf(uid).toList(),
             allGroups = Permission.ADMIN in perms,
             dailyCostLimit = dailyCostLimit,
+            dailyRoutingCostLimit = dailyRoutingCostLimit,
             preferGlobalPool = preferGlobalPool,
             todayCost = today.cost,
+            todayRoutingCost = todayRouting.cost,
             todayInputTokens = today.input,
             todayOutputTokens = today.output,
         )
@@ -139,12 +148,16 @@ object UserRepo {
         }
     }
 
-    fun create(username: String, password: String, roleNames: List<String>, groupIds: List<Int>, dailyCostLimit: Double?): Int = transaction {
+    fun create(
+        username: String, password: String, roleNames: List<String>, groupIds: List<Int>,
+        dailyCostLimit: Double?, dailyRoutingCostLimit: Double? = null,
+    ): Int = transaction {
         val uid = Users.insert {
             it[Users.username] = username
             it[passwordHash] = Passwords.hash(password)
             it[enabled] = true
             it[Users.dailyCostLimit] = dailyCostLimit
+            it[Users.dailyRoutingCostLimit] = dailyRoutingCostLimit
             it[createdAt] = Instant.now()
         }[Users.id]
         setRoles(uid, roleNames)
@@ -155,11 +168,13 @@ object UserRepo {
     fun update(
         userId: Int, password: String?, enabled: Boolean?, roleNames: List<String>?, groupIds: List<Int>?,
         dailyCostLimit: Double?, clearDailyLimit: Boolean,
+        dailyRoutingCostLimit: Double? = null, clearRoutingLimit: Boolean = false,
     ) = transaction {
         Users.update({ Users.id eq userId }) {
             if (password != null) it[passwordHash] = Passwords.hash(password)
             if (enabled != null) it[Users.enabled] = enabled
             if (clearDailyLimit) it[Users.dailyCostLimit] = null else if (dailyCostLimit != null) it[Users.dailyCostLimit] = dailyCostLimit
+            if (clearRoutingLimit) it[Users.dailyRoutingCostLimit] = null else if (dailyRoutingCostLimit != null) it[Users.dailyRoutingCostLimit] = dailyRoutingCostLimit
         }
         if (roleNames != null) setRoles(userId, roleNames)
         if (groupIds != null) setAllowedGroups(userId, groupIds)
@@ -168,6 +183,7 @@ object UserRepo {
     fun delete(userId: Int) = transaction {
         // clear rows that reference the user (Postgres enforces these FKs)
         org.claudeproxy.db.ProxyTokens.deleteWhere { org.claudeproxy.db.ProxyTokens.userId eq userId }
+        org.claudeproxy.db.RoutingTokens.deleteWhere { org.claudeproxy.db.RoutingTokens.userId eq userId }
         org.claudeproxy.db.UsageEvents.update({ org.claudeproxy.db.UsageEvents.userId eq userId }) {
             it[org.claudeproxy.db.UsageEvents.userId] = null
         }

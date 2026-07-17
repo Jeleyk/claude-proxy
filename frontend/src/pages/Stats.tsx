@@ -3,9 +3,9 @@ import {
   api, DailyStats, fmtTokens, fmtUsd, has, ModelBreakdown, TokenKindSeries, TokenStats,
   UsageEvent, UsageSummary, UserDto, WindowStats,
 } from '../api';
-import { LineChart, Series, SERIES_COLORS, StackedBarChart } from '../Chart';
-import { Legend, sumKinds, shiftDate, todayUtc, tokenSeries, TOKEN_KINDS, W5H, WWK } from './statsShared';
-import { Segmented, Select } from '../ui';
+import { LineChart, Series, SERIES_COLORS, StackedChart } from '../Chart';
+import { Legend, RangeControls, sumKinds, todayUtc, tokenSeries, TOKEN_KINDS, W5H, WWK } from './statsShared';
+import { Segmented, Select, useChartMode } from '../ui';
 
 export function Stats({ user }: { user: UserDto }) {
   const canStats = has(user, 'STATS_VIEW');
@@ -21,6 +21,9 @@ export function Stats({ user }: { user: UserDto }) {
   const [modelPeriod, setModelPeriod] = useState<'today' | 'all'>('all');
   const [endDate, setEndDate] = useState(todayUtc());
   const [days, setDays] = useState(7);
+  const [mode, setMode] = useChartMode();
+  // window-utilization display: raw API utilization vs coefficient-weighted (both summed across accounts)
+  const [winMode, setWinMode] = useState<'api' | 'coef'>('api');
   const [err, setErr] = useState<string | null>(null);
 
   const [modelFilter, setModelFilter] = useState('');
@@ -60,8 +63,6 @@ export function Stats({ user }: { user: UserDto }) {
 
   if (err && !daily) return <div className="main-inner"><div className="err">{err}</div></div>;
 
-  const atToday = endDate >= todayUtc();
-  const rangeStart = daily?.days[0] ?? shiftDate(endDate, -(days - 1));
   const dayLabels = daily?.days ?? [];
   const zerosD = dayLabels.map(() => 0);
   const emptyKinds: TokenKindSeries = { input: zerosD, output: zerosD, cacheRead: zerosD, cacheWrite: zerosD };
@@ -106,22 +107,13 @@ export function Stats({ user }: { user: UserDto }) {
       {canStats && daily && (
         <>
           {/* control bar — drives every chart at once */}
-          <div className="controlbar">
-            <Segmented<number> value={days} onChange={setDays} options={[
-              { value: 7, label: '7d' }, { value: 30, label: '30d' }, { value: 90, label: '90d' },
-            ]} />
-            <div className="daterange">
-              <button className="ghost sm" onClick={() => setEndDate(shiftDate(endDate, -days))}>← prev</button>
-              <span className="hint mono">{rangeStart} … {endDate}</span>
-              <button className="ghost sm" disabled={atToday} onClick={() => setEndDate(shiftDate(endDate, days))}>next →</button>
-            </div>
-          </div>
+          <RangeControls days={days} onDays={setDays} endDate={endDate} onEndDate={setEndDate} mode={mode} onMode={setMode} />
 
           {/* row 1 — three chart types side by side */}
           <div className="chart-row">
             <div className="panel">
               <div className="chart-card-head"><span className="t">Spend per day</span><span className="v">{fmtUsd(weekTotal)}</span></div>
-              <StackedBarChart days={daily.days} series={spendSeries} height={190} fmt={fmtUsd} />
+              <StackedChart days={daily.days} series={spendSeries} height={190} fmt={fmtUsd} mode={mode} />
               {spendLegend.length > 1 && <Legend items={spendLegend} />}
             </div>
 
@@ -130,17 +122,25 @@ export function Stats({ user }: { user: UserDto }) {
                 <span className="t">Tokens per day</span>
                 <Select ariaLabel="Filter by model" value={modelFilter} onChange={setModelFilter} options={modelOptions} minWidth={120} />
               </div>
-              <StackedBarChart days={daily.days} series={tokenSeries(tokenTopSrc, hiddenKinds)} height={190} fmt={fmtTokens} />
+              <StackedChart days={daily.days} series={tokenSeries(tokenTopSrc, hiddenKinds)} height={190} fmt={fmtTokens} mode={mode} />
               <Legend items={TOKEN_KINDS.map((k) => ({ key: k.key, label: k.label, color: k.color }))} hidden={hiddenKinds} onToggle={toggleKind} />
               <div className="hint" style={{ marginTop: 6 }}>Total tokens: <b style={{ color: 'var(--text)' }}>{fmtTokens(tokenTotal)}</b></div>
             </div>
 
             {windows && (
               <div className="panel">
-                <div className="chart-card-head"><span className="t">Window utilization</span></div>
+                <div className="chart-card-head">
+                  <span className="t">Window utilization</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {days > 30 && <span className="hint">30d max</span>}
+                    <Segmented<'api' | 'coef'> value={winMode} onChange={setWinMode} options={[
+                      { value: 'api', label: 'API' }, { value: 'coef', label: '×coef' },
+                    ]} />
+                  </span>
+                </div>
                 <LineChart labels={windows.buckets} height={190} lines={[
-                  { name: '5-hour', color: W5H, values: windows.totalFiveHour },
-                  { name: 'weekly', color: WWK, values: windows.totalWeekly },
+                  { name: '5-hour', color: W5H, values: winMode === 'coef' ? windows.totalFiveHourWeighted : windows.totalFiveHour },
+                  { name: 'weekly', color: WWK, values: winMode === 'coef' ? windows.totalWeeklyWeighted : windows.totalWeekly },
                 ]} />
                 <Legend items={[{ key: '5h', label: '5-hour', color: W5H }, { key: 'wk', label: 'Weekly', color: WWK }]} />
               </div>
@@ -159,20 +159,28 @@ export function Stats({ user }: { user: UserDto }) {
               <div className="chart-row">
                 <div className="panel">
                   <div className="chart-card-head"><span className="t">Spend per day</span><span className="v">{fmtUsd(acctCost.reduce((s, v) => s + v, 0))}</span></div>
-                  <StackedBarChart days={daily.days} height={175} fmt={fmtUsd}
+                  <StackedChart days={daily.days} height={175} fmt={fmtUsd} mode={mode}
                     series={[{ name: acct?.name ?? '', color: SERIES_COLORS[0], values: acctCost }]} />
                 </div>
                 <div className="panel">
                   <div className="chart-card-head"><span className="t">Tokens per day</span><span className="v">{fmtTokens(sumKinds(acctTok))}</span></div>
-                  <StackedBarChart days={daily.days} height={175} fmt={fmtTokens}
+                  <StackedChart days={daily.days} height={175} fmt={fmtTokens} mode={mode}
                     series={tokenSeries(acctTok, hiddenKinds)} />
                   <Legend items={TOKEN_KINDS.map((k) => ({ key: k.key, label: k.label, color: k.color }))} hidden={hiddenKinds} onToggle={toggleKind} />
                 </div>
                 <div className="panel">
-                  <div className="chart-card-head"><span className="t">Window utilization</span></div>
+                  <div className="chart-card-head">
+                    <span className="t">Window utilization</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {days > 30 && <span className="hint">30d max</span>}
+                      <Segmented<'api' | 'coef'> value={winMode} onChange={setWinMode} options={[
+                        { value: 'api', label: 'API' }, { value: 'coef', label: '×coef' },
+                      ]} />
+                    </span>
+                  </div>
                   <LineChart labels={wBuckets} height={175} lines={[
-                    { name: '5-hour', color: W5H, values: acctWin?.fiveHour ?? wNulls },
-                    { name: 'weekly', color: WWK, values: acctWin?.weekly ?? wNulls },
+                    { name: '5-hour', color: W5H, values: (winMode === 'coef' ? acctWin?.fiveHourWeighted : acctWin?.fiveHour) ?? wNulls },
+                    { name: 'weekly', color: WWK, values: (winMode === 'coef' ? acctWin?.weeklyWeighted : acctWin?.weekly) ?? wNulls },
                   ]} />
                   <Legend items={[{ key: '5h', label: '5-hour', color: W5H }, { key: 'wk', label: 'Weekly', color: WWK }]} />
                 </div>

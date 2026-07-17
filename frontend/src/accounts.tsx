@@ -56,22 +56,23 @@ function healthBadge(a: AccountDto) {
 
 /* ---------------------------------------------------------------- summary cards */
 
-// Weighted-capacity headroom: Σ coefficient × session-remaining across accounts (an
-// absolute count of "×1-equivalent full sessions" left), NOT a 0..100% of-total figure —
-// so a ×20 account contributes 20 units, making the coefficient visible in the number.
-const fmtCap = (n: number) => (Math.round(n * 10) / 10).toString();
+// Coefficient-weighted pool headroom, shown as a percent: each account's remaining fraction is
+// multiplied by its coefficient and summed (Σ coefficient × (1 − usage)), so a ×20 account
+// contributes up to 2000%. The figure can exceed 100% and is shown out of the pool's Σ coefficient
+// capacity. The normalized "% of capacity left" (always 0..100%) stays on hover.
+const fmtPct = (n: number) => `${Math.round(n * 100)}%`;
 
-/** Headroom card: absolute weighted units up front, the old %-of-capacity on hover. */
+/** Headroom card: coefficient-weighted remaining as a percent, out of Σ-coefficient capacity. */
 function HeadroomCard({ label, s }: { label: ReactNode; s: PoolStats }) {
   const capPct = s.totalEffectiveCapacity > 0 ? s.totalEffectiveRemaining / s.totalEffectiveCapacity : 0;
   const wkPct = s.totalWeeklyCapacity > 0 ? s.totalWeeklyRemaining / s.totalWeeklyCapacity : 0;
-  const title = `5h: ${Math.round(capPct * 100)}% left\n`
-    + (s.totalWeeklyCapacity > 0 ? `weekly: ${Math.round(wkPct * 100)}% left` : 'weekly: n/a');
+  const title = `5h: ${Math.round(capPct * 100)}% of capacity left\n`
+    + (s.totalWeeklyCapacity > 0 ? `weekly: ${Math.round(wkPct * 100)}% of capacity left` : 'weekly: n/a');
   return (
     <div className="card" title={title}>
       <div className="label">{label}</div>
-      <div className="value">{fmtCap(s.totalEffectiveRemaining)} <small className="hint" style={{ fontSize: 13 }}>/ {fmtCap(s.totalEffectiveCapacity)} (5h)</small></div>
-      <div className="hint">{s.totalWeeklyCapacity > 0 ? `weekly: ${fmtCap(s.totalWeeklyRemaining)} / ${fmtCap(s.totalWeeklyCapacity)} left` : 'weekly: n/a'}</div>
+      <div className="value">{fmtPct(s.totalEffectiveRemaining)} <small className="hint" style={{ fontSize: 13 }}>/ {fmtPct(s.totalEffectiveCapacity)} (5h)</small></div>
+      <div className="hint">{s.totalWeeklyCapacity > 0 ? `weekly: ${fmtPct(s.totalWeeklyRemaining)} / ${fmtPct(s.totalWeeklyCapacity)} left` : 'weekly: n/a'}</div>
     </div>
   );
 }
