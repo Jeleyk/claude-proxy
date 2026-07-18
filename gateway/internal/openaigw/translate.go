@@ -156,7 +156,39 @@ func translateRequest(req *chatRequest, model string) ([]byte, error) {
 	}
 	out.ToolChoice = translateToolChoice(req.ToolChoice)
 
+	// Prompt-cache breakpoints. This datapath builds the Anthropic body from scratch, so unless we
+	// set cache_control here no breakpoint ever reaches Anthropic and routed traffic can never hit
+	// the cache. Render order is tools → system → messages, so one marker on the last system block
+	// caches the whole stable prefix (tools + Claude Code identity + client system) — that prefix
+	// repeats across every request from a client, giving cross-request reads. A second marker on
+	// the tail of the conversation gives multi-turn clients incremental history reads. Writes are
+	// billed at the ephemeral (5-minute TTL) rate; a prefix below the model's minimum cacheable
+	// size is silently not cached (no error).
+	if n := len(out.System); n > 0 {
+		out.System[n-1] = withCacheControl(out.System[n-1])
+	}
+	if n := len(out.Messages); n > 0 {
+		if c := len(out.Messages[n-1].Content); c > 0 {
+			out.Messages[n-1].Content[c-1] = withCacheControl(out.Messages[n-1].Content[c-1])
+		}
+	}
+
 	return json.Marshal(out)
+}
+
+// withCacheControl adds an ephemeral cache_control marker to an Anthropic content block, turning it
+// into a prompt-cache breakpoint. Returns the block unchanged if it isn't a JSON object.
+func withCacheControl(block json.RawMessage) json.RawMessage {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(block, &m); err != nil {
+		return block
+	}
+	m["cache_control"] = json.RawMessage(`{"type":"ephemeral"}`)
+	b, err := json.Marshal(m)
+	if err != nil {
+		return block
+	}
+	return b
 }
 
 // clampTemperature maps OpenAI's [0,2] temperature domain into Anthropic's accepted [0,1] so a

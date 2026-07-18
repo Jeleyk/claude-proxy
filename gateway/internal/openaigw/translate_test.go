@@ -275,3 +275,54 @@ func TestModelMapping(t *testing.T) {
 		}
 	}
 }
+
+func hasEphemeralCache(t *testing.T, raw json.RawMessage) bool {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("block: %v", err)
+	}
+	cc, ok := m["cache_control"]
+	if !ok {
+		return false
+	}
+	var got map[string]any
+	_ = json.Unmarshal(cc, &got)
+	return got["type"] == "ephemeral"
+}
+
+func TestTranslateCacheControl(t *testing.T) {
+	// Two consecutive user turns merge into one message with two blocks (see the merge test).
+	ar := mustTranslate(t, `{
+		"model":"gpt-4o",
+		"messages":[
+			{"role":"system","content":"Be nice."},
+			{"role":"user","content":"one"},
+			{"role":"user","content":"two"}
+		]
+	}`, "claude-opus-4-8")
+
+	// The stable prefix breakpoint sits on the LAST system block; the Claude Code identity block
+	// before it must stay clean (one breakpoint caches the whole tools+system prefix).
+	if len(ar.System) != 2 {
+		t.Fatalf("want 2 system blocks, got %d", len(ar.System))
+	}
+	if hasEphemeralCache(t, ar.System[0]) {
+		t.Fatalf("Claude Code identity block must not carry cache_control")
+	}
+	if !hasEphemeralCache(t, ar.System[1]) {
+		t.Fatalf("last system block must be a cache breakpoint")
+	}
+
+	// The conversation breakpoint sits on the tail block only.
+	last := ar.Messages[len(ar.Messages)-1]
+	if n := len(last.Content); n != 2 {
+		t.Fatalf("want merged 2-block tail message, got %d", n)
+	}
+	if hasEphemeralCache(t, last.Content[0]) {
+		t.Fatalf("only the tail block should carry cache_control")
+	}
+	if !hasEphemeralCache(t, last.Content[1]) {
+		t.Fatalf("tail message block must be a cache breakpoint")
+	}
+}

@@ -13,10 +13,15 @@ type Model struct {
 // the exact strings the subscription accounts actually serve (verified against live proxy traffic);
 // any other valid claude-* id also works, since the gateway forwards the model verbatim.
 var Claude = []Model{
-	{ID: "claude-opus-4-8", DisplayName: "Claude Opus 4.8"},
-	{ID: "claude-sonnet-5", DisplayName: "Claude Sonnet 5"},
-	{ID: "claude-haiku-4-5-20251001", DisplayName: "Claude Haiku 4.5"},
 	{ID: "claude-fable-5", DisplayName: "Claude Fable 5"},
+	{ID: "claude-opus-4-8", DisplayName: "Claude Opus 4.8"},
+	{ID: "claude-opus-4-7", DisplayName: "Claude Opus 4.7"},
+	{ID: "claude-opus-4-6", DisplayName: "Claude Opus 4.6"},
+	{ID: "claude-opus-4-5", DisplayName: "Claude Opus 4.5"},
+	{ID: "claude-sonnet-5", DisplayName: "Claude Sonnet 5"},
+	{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6"},
+	{ID: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5"},
+	{ID: "claude-haiku-4-5-20251001", DisplayName: "Claude Haiku 4.5"},
 }
 
 // Created is a fixed epoch-seconds "created" timestamp for the OpenAI model list (clients only
