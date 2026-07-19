@@ -32,7 +32,7 @@ var retryableStatuses = map[int]bool{429: true, 401: true, 500: true, 502: true,
 // (SSE or buffered JSON) to the client and returns {retry:false}.
 func (h *Handler) forward(
 	ctx context.Context, w http.ResponseWriter, r *http.Request,
-	cand control.Candidate, cands []control.Candidate, idx int, userID *int,
+	cand control.Candidate, cands []control.Candidate, idx int, userID, tokenID *int,
 	body []byte, canRetry bool,
 ) forwardResult {
 	outBody, sessionID := rewriteBody(body, cand.DeviceID, r.Header.Get("X-Claude-Code-Session-Id"))
@@ -40,7 +40,7 @@ func (h *Handler) forward(
 	url := h.cfg.UpstreamBaseURL + r.URL.RequestURI()
 	req, err := http.NewRequestWithContext(ctx, r.Method, url, strings.NewReader(string(outBody)))
 	if err != nil {
-		return forwardResult{retry: canRetry, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, Status: 0}}
+		return forwardResult{retry: canRetry, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Status: 0}}
 	}
 
 	// Copy client headers except the strip-set and telemetry headers.
@@ -82,15 +82,15 @@ func (h *Handler) forward(
 	resp, err := h.upstream.Do(req)
 	if err != nil {
 		if canRetry {
-			return forwardResult{retry: true, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, Status: 0}}
+			return forwardResult{retry: true, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Status: 0}}
 		}
 		writeProxyError(w, http.StatusBadGateway, "api_error", "upstream request failed")
-		return forwardResult{retry: false, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, Status: http.StatusBadGateway}}
+		return forwardResult{retry: false, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Status: http.StatusBadGateway}}
 	}
 	defer resp.Body.Close()
 
 	rlHeaders := extractRateLimitHeaders(resp.Header)
-	report := control.UsageReport{AccountID: cand.AccountID, UserID: userID, Status: resp.StatusCode, RatelimitHeaders: rlHeaders}
+	report := control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Status: resp.StatusCode, RatelimitHeaders: rlHeaders}
 
 	// Retryable status on a non-last attempt: drain and let the caller try the next account.
 	if retryableStatuses[resp.StatusCode] && canRetry {

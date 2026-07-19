@@ -161,7 +161,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	for i, cand := range resp.Candidates {
 		canRetry := i < len(resp.Candidates)-1
-		res := h.forward(r.Context(), w, cand, resp.UserID, prep, canRetry)
+		res := h.forward(r.Context(), w, cand, resp.UserID, resp.TokenID, prep, canRetry)
 		h.ctrl.ReportUsage(context.Background(), res.report)
 		if !res.retry {
 			return
@@ -175,10 +175,10 @@ type forwardResult struct {
 }
 
 func (h *Handler) forward(
-	ctx context.Context, w http.ResponseWriter, cand control.Candidate, userID *int, prep Prepared, canRetry bool,
+	ctx context.Context, w http.ResponseWriter, cand control.Candidate, userID, tokenID *int, prep Prepared, canRetry bool,
 ) forwardResult {
 	model := prep.RequestedModel
-	report := control.UsageReport{AccountID: cand.AccountID, UserID: userID, Source: "routing"}
+	report := control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Source: "routing"}
 
 	url := h.cfg.UpstreamBaseURL + prep.UpstreamPath
 	var reqBody io.Reader

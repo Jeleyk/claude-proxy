@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, fmtTokens, fmtUsd, ProxyTokenDto, UserDto } from '../api';
 import { ConnectScripts, Copy } from '../ui';
+import { TokenUsageSection } from './tokenUsage';
 
 export function Tokens() {
   const [tokens, setTokens] = useState<ProxyTokenDto[]>([]);
@@ -82,23 +83,7 @@ export function Tokens() {
         )}
       </div>
 
-      <h2>Your tokens</h2>
-      <div className="tablewrap">
-        <table>
-          <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
-          <tbody>
-            {tokens.map((t) => (
-              <tr key={t.id}>
-                <td>{t.name}</td>
-                <td className="hint">{new Date(t.createdAt).toLocaleString()}</td>
-                <td className="hint">{t.lastUsedAt ? new Date(t.lastUsedAt).toLocaleString() : 'never'}</td>
-                <td><button className="sm danger" onClick={() => del(t.id)}>Delete</button></td>
-              </tr>
-            ))}
-            {tokens.length === 0 && <tr><td colSpan={4} className="hint">No tokens yet.</td></tr>}
-          </tbody>
-        </table>
-      </div>
+      <TokenUsageSection source="proxy" tokens={tokens} onDelete={del} emptyHint="No tokens yet." />
     </div>
   );
 }

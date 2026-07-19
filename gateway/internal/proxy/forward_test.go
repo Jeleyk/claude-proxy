@@ -37,7 +37,7 @@ func TestForwardNonSSECopiesStatusBodyAndParsesUsage(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	cand := control.Candidate{AccountID: 7, Type: "OAUTH", AuthHeaders: map[string]string{"Authorization": "Bearer sk-oat", "anthropic-beta": "oauth-2025-04-20"}}
-	res := h.forward(context.Background(), rec, req, cand, []control.Candidate{cand}, 0, nil, []byte(`{"model":"claude-opus-4-8"}`), false)
+	res := h.forward(context.Background(), rec, req, cand, []control.Candidate{cand}, 0, nil, nil, []byte(`{"model":"claude-opus-4-8"}`), false)
 
 	if res.retry {
 		t.Fatal("should not retry on 200")
@@ -94,7 +94,7 @@ func TestForwardMergesClientAnthropicBetaAndPreservesBody(t *testing.T) {
 	cand := control.Candidate{AccountID: 1, Type: "OAUTH", AuthHeaders: map[string]string{
 		"Authorization": "Bearer sk-oat", "anthropic-beta": "oauth-2025-04-20",
 	}}
-	h.forward(context.Background(), rec, req, cand, []control.Candidate{cand}, 0, nil, []byte(body), false)
+	h.forward(context.Background(), rec, req, cand, []control.Candidate{cand}, 0, nil, nil, []byte(body), false)
 
 	// Client betas preserved AND the account's oauth beta appended.
 	for _, want := range []string{"context-management-2025-06-27", "fine-grained-tool-streaming-2025-05-14", "oauth-2025-04-20"} {
@@ -131,7 +131,7 @@ func TestForwardRetryableStatusRetriesWhenAllowed(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
 	cand := control.Candidate{AccountID: 1, Type: "OAUTH"}
-	res := h.forward(context.Background(), rec, req, cand, []control.Candidate{cand, cand}, 0, nil, []byte(`{}`), true)
+	res := h.forward(context.Background(), rec, req, cand, []control.Candidate{cand, cand}, 0, nil, nil, []byte(`{}`), true)
 
 	if !res.retry {
 		t.Fatal("529 with canRetry should retry")
@@ -152,7 +152,7 @@ func TestForwardRetryableStatusPassesThroughOnLastAttempt(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
 	cand := control.Candidate{AccountID: 1, Type: "OAUTH"}
-	res := h.forward(context.Background(), rec, req, cand, []control.Candidate{cand}, 0, nil, []byte(`{}`), false)
+	res := h.forward(context.Background(), rec, req, cand, []control.Candidate{cand}, 0, nil, nil, []byte(`{}`), false)
 
 	if res.retry {
 		t.Fatal("last attempt must pass through, not retry")

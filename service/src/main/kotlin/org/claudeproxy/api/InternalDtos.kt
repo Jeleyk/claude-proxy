@@ -35,6 +35,9 @@ data class CandidateDto(
 @Serializable
 data class ResolveResponse(
     val userId: Int?,
+    // id of the inbound token (namespace by datapath: proxy_tokens / routing_tokens);
+    // the gateway echoes it back in each UsageReport so usage rows attribute per token.
+    val tokenId: Int? = null,
     val overLimit: Boolean,
     val dailyLimitUsd: Double? = null,
     val usedUsd: Double? = null,
@@ -49,6 +52,8 @@ data class ResolveResponse(
 data class UsageReport(
     val accountId: Int,
     val userId: Int? = null,
+    // inbound token that authenticated the request, from the resolve response.
+    val tokenId: Int? = null,
     val input: Long = 0,
     val output: Long = 0,
     val cacheRead: Long = 0,

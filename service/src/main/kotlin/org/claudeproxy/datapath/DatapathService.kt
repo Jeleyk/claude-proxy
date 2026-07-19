@@ -32,6 +32,7 @@ enum class ResolveError { BAD_TOKEN, NO_PERMISSION }
  */
 data class ResolveResult(
     val userId: Int?,
+    val tokenId: Int?,
     val error: ResolveError?,
     val overLimit: Boolean,
     val dailyLimitUsd: Double?,
@@ -57,12 +58,14 @@ class DatapathService(private val pool: AccountPool) {
      */
     suspend fun resolve(token: String, method: String, path: String, source: String = "proxy"): ResolveResult {
         val routing = source == "routing"
-        val userId = (if (routing) RoutingTokenRepo.resolveUser(token) else ProxyTokenRepo.resolveUser(token))
-            ?: return ResolveResult(null, ResolveError.BAD_TOKEN, false, null, null, emptyList())
+        val auth = (if (routing) RoutingTokenRepo.resolveAuth(token) else ProxyTokenRepo.resolveAuth(token))
+            ?: return ResolveResult(null, null, ResolveError.BAD_TOKEN, false, null, null, emptyList())
+        val userId = auth.userId
+        val tokenId = auth.tokenId
         val perms = UserRepo.permissionsOf(userId)
         val required = if (routing) Permission.ROUTING_USE else Permission.PROXY_USE
         if (required !in perms) {
-            return ResolveResult(userId, ResolveError.NO_PERMISSION, false, null, null, emptyList())
+            return ResolveResult(userId, tokenId, ResolveError.NO_PERMISSION, false, null, null, emptyList())
         }
 
         // Admins may use any account; others are scoped to their granted groups.
@@ -75,7 +78,7 @@ class DatapathService(private val pool: AccountPool) {
         // Free paths (token counting, model listing) never consume quota: any account, no limits.
         if (isFreePath(path)) {
             val account = pool.selectAny(userId, allowedGroups, personalFirst, allowGlobal)
-            return ResolveResult(userId, null, false, null, null, listOfNotNull(account).map { it.toCandidate() })
+            return ResolveResult(userId, tokenId, null, false, null, null, listOfNotNull(account).map { it.toCandidate() })
         }
 
         // Per-user daily USD limit is a shared-pool constraint; personal accounts are exempt.
@@ -84,7 +87,7 @@ class DatapathService(private val pool: AccountPool) {
         val overLimit = costLimit != null && usedCost >= costLimit
 
         val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst, allowGlobal)
-        return ResolveResult(userId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() })
+        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() })
     }
 
     /**
@@ -94,7 +97,7 @@ class DatapathService(private val pool: AccountPool) {
     suspend fun applyOutcome(o: UsageReport) {
         val routing = o.source == "routing"
         val source = if (routing) "routing" else "proxy"
-        UsageRepo.record(o.accountId, o.userId, o.input, o.cacheRead, o.cacheWrite, o.output, o.status, o.model, source)
+        UsageRepo.record(o.accountId, o.userId, o.input, o.cacheRead, o.cacheWrite, o.output, o.status, o.model, source, o.tokenId)
 
         // Keep the cached daily spend fresh. Only *global* (shared-pool) usage counts toward the
         // per-user daily limit; personal accounts are the user's own quota (exempt). Proxy and

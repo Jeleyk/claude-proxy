@@ -13,25 +13,43 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import java.time.Instant
 
+/** Owner + token identity a raw inbound token resolves to (tokenId attributes usage rows). */
+data class TokenAuth(val userId: Int, val tokenId: Int?)
+
+/**
+ * Parse a cached resolve value: `"<userId>:<tokenId>"`, or the legacy plain `"<userId>"`
+ * (pre-tokenId cache entries during a rolling deploy) which yields tokenId=null.
+ */
+internal fun parseTokenAuth(cached: String?): TokenAuth? {
+    if (cached == null) return null
+    val userId = cached.substringBefore(':').toIntOrNull() ?: return null
+    return TokenAuth(userId, cached.substringAfter(':', "").toIntOrNull())
+}
+
 object ProxyTokenRepo {
 
     /**
-     * Returns the userId that owns a given raw proxy token, or null. Hot path: the token→userId
-     * mapping is cached in Redis (`cp:tok:<hash>`, TTL 60s) with a DB fallback, so a cold/absent
+     * Resolves a raw proxy token to its owner + token id, or null. Hot path: the mapping is
+     * cached in Redis (`cp:tok:<hash>`, TTL 60s) with a DB fallback, so a cold/absent
      * Redis is only ever a miss. `last_used_at` is bumped on cache misses (~once per 60s per
      * token) rather than every request — this avoids a DB write on the hot path.
      */
-    fun resolveUser(rawToken: String): Int? {
+    fun resolveAuth(rawToken: String): TokenAuth? {
         val hash = Crypto.sha256Hex(rawToken)
-        val cached = RedisCache.getOrLoad("cp:tok:$hash", 60) { loadUserByHash(hash)?.toString() }
-        return cached?.toIntOrNull()
+        return parseTokenAuth(RedisCache.getOrLoad("cp:tok:$hash", 60) { loadByHash(hash) })
     }
 
-    private fun loadUserByHash(hash: String): Int? = transaction {
+    private fun loadByHash(hash: String): String? = transaction {
         val row = ProxyTokens.selectAll().where { ProxyTokens.tokenHash eq hash }.firstOrNull()
             ?: return@transaction null
         ProxyTokens.update({ ProxyTokens.tokenHash eq hash }) { it[lastUsedAt] = Instant.now() }
-        row[ProxyTokens.userId]
+        "${row[ProxyTokens.userId]}:${row[ProxyTokens.id]}"
+    }
+
+    /** Names of this user's tokens by id, for labeling per-token stats. */
+    fun namesForUser(userId: Int): Map<Int, String> = transaction {
+        ProxyTokens.selectAll().where { ProxyTokens.userId eq userId }
+            .associate { it[ProxyTokens.id] to it[ProxyTokens.name] }
     }
 
     fun create(userId: Int, name: String): ProxyTokenDto = transaction {

@@ -187,6 +187,9 @@ export const api = {
   myStatsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/mine/daily?days=${days}${end ? `&end=${end}` : ''}`),
   myStatsWindows: (days: number, end?: string) => req<WindowStats>('GET', `/api/stats/mine/windows?days=${days}${end ? `&end=${end}` : ''}`),
   myStatsTokens: (days: number, end?: string) => req<TokenStats>('GET', `/api/stats/mine/tokens?days=${days}${end ? `&end=${end}` : ''}`),
+  // Per-inbound-token usage (Tokens / API Routing pages): all-time totals + daily series.
+  tokenUsage: (source: 'proxy' | 'routing', days: number, end?: string) =>
+    req<TokenUsage>('GET', `/api/stats/mine/token-usage?source=${source}&days=${days}${end ? `&end=${end}` : ''}`),
   setAccountOrder: (preferGlobalPool: boolean) => req<UserDto>('PATCH', '/api/my/account-order', { preferGlobalPool }),
   resetAllStats: () => req<{ message: string }>('POST', '/api/stats/reset'),
   resetUserStats: (id: number) => req<{ message: string }>('POST', `/api/users/${id}/stats/reset`),
@@ -238,6 +241,18 @@ export interface TokenStats {
   models: string[];
   canViewAccounts: boolean;
 }
+
+export interface TokenUsageSeries {
+  tokenId: number | null;      // null = unattributed (pre-migration) rows
+  name: string | null;         // null for deleted tokens
+  cost: number[];              // per-day USD, aligned with `days`
+  tokens: number[];            // per-day total tokens (all four kinds)
+  requests: number[];
+  totalCost: number;           // all-time totals (not range-scoped)
+  totalTokens: number;
+  totalRequests: number;
+}
+export interface TokenUsage { days: string[]; perToken: TokenUsageSeries[]; }
 
 export function has(user: UserDto | null, perm: string): boolean {
   return !!user && user.permissions.includes(perm);

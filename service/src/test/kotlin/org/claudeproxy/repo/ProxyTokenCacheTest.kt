@@ -38,18 +38,26 @@ class ProxyTokenCacheTest {
     fun teardown() = dbFile.delete().let {}
 
     @Test
-    fun `resolveUser returns the owner with Redis disabled`() {
+    fun `resolveAuth returns the owner and token id with Redis disabled`() {
         val adminId = transaction { Users.selectAll().first()[Users.id] }
-        val token = ProxyTokenRepo.create(adminId, "t").token!!
-        assertEquals(adminId, ProxyTokenRepo.resolveUser(token))
+        val dto = ProxyTokenRepo.create(adminId, "t")
+        assertEquals(TokenAuth(adminId, dto.id), ProxyTokenRepo.resolveAuth(dto.token!!))
     }
 
     @Test
     fun `deleted token no longer resolves`() {
         val adminId = transaction { Users.selectAll().first()[Users.id] }
         val dto = ProxyTokenRepo.create(adminId, "t2")
-        assertEquals(adminId, ProxyTokenRepo.resolveUser(dto.token!!))
+        assertEquals(TokenAuth(adminId, dto.id), ProxyTokenRepo.resolveAuth(dto.token!!))
         ProxyTokenRepo.delete(dto.id, adminId)
-        assertNull(ProxyTokenRepo.resolveUser(dto.token!!))
+        assertNull(ProxyTokenRepo.resolveAuth(dto.token!!))
+    }
+
+    @Test
+    fun `legacy cached value without token id parses gracefully`() {
+        assertEquals(TokenAuth(5, null), parseTokenAuth("5"))
+        assertEquals(TokenAuth(5, 12), parseTokenAuth("5:12"))
+        assertNull(parseTokenAuth(null))
+        assertNull(parseTokenAuth("garbage"))
     }
 }

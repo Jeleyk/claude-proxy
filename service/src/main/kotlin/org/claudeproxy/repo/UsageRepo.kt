@@ -42,6 +42,10 @@ data class TokenBucketDto(
     val input: Long, val output: Long, val cacheRead: Long, val cacheWrite: Long,
 )
 
+/** One (inbound token, day) bucket of one user's usage on one datapath. tokenId null = unattributed. */
+@Serializable
+data class TokenIdDailyBucketDto(val tokenId: Int?, val date: String, val cost: Double, val requests: Long, val tokens: Long)
+
 /** Token counters + USD cost bundle. */
 class Totals(
     val requests: Long = 0, val input: Long = 0, val output: Long = 0,
@@ -54,7 +58,7 @@ object UsageRepo {
 
     fun record(
         accountId: Int, userId: Int?, input: Long, cacheRead: Long, cacheWrite: Long, output: Long,
-        status: Int, model: String?, source: String = "proxy",
+        status: Int, model: String?, source: String = "proxy", tokenId: Int? = null,
     ) {
         val cost = ModelPriceRepo.costOf(model, input, cacheRead, cacheWrite, output)
         runCatching {
@@ -62,6 +66,7 @@ object UsageRepo {
                 UsageEvents.insert {
                     it[UsageEvents.accountId] = accountId
                     it[UsageEvents.userId] = userId
+                    it[UsageEvents.tokenId] = tokenId
                     it[ts] = Instant.now()
                     it[inputTokens] = input
                     it[outputTokens] = output
@@ -212,6 +217,36 @@ object UsageRepo {
                 a[3] += row[UsageEvents.cacheWriteTokens]
             }
         acc.map { (k, a) -> TokenBucketDto(k.first, k.second, k.third, a[0], a[1], a[2], a[3]) }
+    }
+
+    /**
+     * Daily (inbound token, day) buckets of one user's usage on one datapath ("proxy" | "routing")
+     * in [start, end), bucketed by UTC date. All accounts count (incl. personal) — this feeds the
+     * user's own per-token view. tokenId null groups pre-migration/unattributed rows.
+     */
+    fun tokenDailyBucketsForUser(userId: Int, source: String, start: Instant, end: Instant): List<TokenIdDailyBucketDto> = transaction {
+        val acc = HashMap<Pair<Int?, String>, DoubleArray>() // (tokenId, date) -> [cost, requests, tokens]
+        UsageEvents.selectAll()
+            .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
+            .forEach { row ->
+                if (row[UsageEvents.sourceCol] != source) return@forEach
+                val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
+                val a = acc.getOrPut(row[UsageEvents.tokenId] to date) { DoubleArray(3) }
+                a[0] += row[UsageEvents.cost]
+                a[1] += 1
+                a[2] += row[UsageEvents.inputTokens] + row[UsageEvents.outputTokens] + row[UsageEvents.cacheReadTokens] + row[UsageEvents.cacheWriteTokens]
+            }
+        acc.map { (k, a) -> TokenIdDailyBucketDto(k.first, k.second, a[0], a[1].toLong(), a[2].toLong()) }
+    }
+
+    /** All-time totals per inbound token for one user's usage on one datapath ("proxy" | "routing"). */
+    fun totalsPerTokenForUser(userId: Int, source: String): Map<Int?, Totals> = transaction {
+        val acc = HashMap<Int?, MutableList<ResultRow>>()
+        UsageEvents.selectAll().where { UsageEvents.userId eq userId }.forEach {
+            if (it[UsageEvents.sourceCol] != source) return@forEach
+            acc.getOrPut(it[UsageEvents.tokenId]) { mutableListOf() }.add(it)
+        }
+        acc.mapValues { (_, rows) -> accumulate(rows) }
     }
 
     /** Daily (account, model, day) token buckets in [start, end), bucketed by UTC date, kinds kept apart. Excludes personal accounts. */

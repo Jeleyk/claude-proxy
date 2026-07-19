@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, fmtUsd, ProxyTokenDto, UserDto } from '../api';
 import { CodeBlock, Copy, Segmented } from '../ui';
+import { TokenUsageSection } from './tokenUsage';
 
 // The routing gateways are fronted by nginx: OpenAI at /routing/openai (SDK appends /v1/...),
 // Anthropic at /routing/anthropic (SDK appends /v1/messages).
@@ -145,23 +146,7 @@ export function RoutingTokens() {
         )}
       </div>
 
-      <h2>Your routing tokens</h2>
-      <div className="tablewrap">
-        <table>
-          <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
-          <tbody>
-            {tokens.map((t) => (
-              <tr key={t.id}>
-                <td>{t.name}</td>
-                <td className="hint">{new Date(t.createdAt).toLocaleString()}</td>
-                <td className="hint">{t.lastUsedAt ? new Date(t.lastUsedAt).toLocaleString() : 'never'}</td>
-                <td><button className="sm danger" onClick={() => del(t.id)}>Delete</button></td>
-              </tr>
-            ))}
-            {tokens.length === 0 && <tr><td colSpan={4} className="hint">No routing tokens yet.</td></tr>}
-          </tbody>
-        </table>
-      </div>
+      <TokenUsageSection source="routing" tokens={tokens} onDelete={del} emptyHint="No routing tokens yet." />
     </div>
   );
 }

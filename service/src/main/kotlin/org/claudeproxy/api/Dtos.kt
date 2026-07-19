@@ -191,6 +191,25 @@ data class TokenStatsPayload(
 )
 
 @Serializable
+data class TokenUsageSeriesDto(
+    val tokenId: Int?,                     // null = unattributed (pre-migration rows)
+    val name: String?,                     // null for deleted tokens (usage history kept)
+    val cost: List<Double>,                // per-day USD, range-aligned with `days`
+    val tokens: List<Long>,                // per-day total tokens (all four kinds)
+    val requests: List<Long>,
+    val totalCost: Double,                 // ALL-TIME totals (not range-scoped)
+    val totalTokens: Long,
+    val totalRequests: Long,
+)
+
+/** Per-inbound-token usage for the caller, one datapath at a time (Tokens / API Routing pages). */
+@Serializable
+data class TokenUsagePayload(
+    val days: List<String>,                // date labels (UTC), oldest→newest
+    val perToken: List<TokenUsageSeriesDto>, // sorted by all-time cost desc
+)
+
+@Serializable
 data class WindowSeriesDto(
     val accountId: Int,
     val accountName: String?,

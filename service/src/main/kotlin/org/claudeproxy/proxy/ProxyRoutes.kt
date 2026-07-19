@@ -41,11 +41,13 @@ class ProxyEngine(
             call.respond(HttpStatusCode.Unauthorized, ProxyError(ProxyErrorBody("authentication_error", "Missing proxy token")))
             return
         }
-        val userId = ProxyTokenRepo.resolveUser(token)
-        if (userId == null) {
+        val auth = ProxyTokenRepo.resolveAuth(token)
+        if (auth == null) {
             call.respond(HttpStatusCode.Unauthorized, ProxyError(ProxyErrorBody("authentication_error", "Invalid proxy token")))
             return
         }
+        val userId = auth.userId
+        val tokenId = auth.tokenId
         val perms = UserRepo.permissionsOf(userId)
         if (Permission.PROXY_USE !in perms) {
             call.respond(HttpStatusCode.Forbidden, ProxyError(ProxyErrorBody("permission_error", "Token lacks proxy.use")))
@@ -71,7 +73,7 @@ class ProxyEngine(
         if (isFreePath(pathAndQuery)) {
             val account = pool.selectAny(userId, allowedGroups, personalFirst, allowGlobal)
             if (account == null) { respondNoAccount(call, userId, allowedGroups); return }
-            forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = false, allowedGroups = allowedGroups)
+            forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, tokenId, canRetry = false, allowedGroups = allowedGroups)
             return
         }
 
@@ -103,7 +105,7 @@ class ProxyEngine(
         for ((i, account) in order.withIndex()) {
             pool.markActive(account.id)
             val isLast = i == order.lastIndex
-            when (forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, canRetry = !isLast, allowedGroups = allowedGroups)) {
+            when (forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, tokenId, canRetry = !isLast, allowedGroups = allowedGroups)) {
                 is ForwardResult.Served -> return
                 is ForwardResult.Retry -> log.info("Account {} unavailable, trying next", account.id)
             }

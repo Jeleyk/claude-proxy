@@ -26,6 +26,7 @@ type Candidate struct {
 // ResolveResp is the /internal/resolve response.
 type ResolveResp struct {
 	UserID        *int        `json:"userId"`
+	TokenID       *int        `json:"tokenId"`
 	OverLimit     bool        `json:"overLimit"`
 	DailyLimitUSD *float64    `json:"dailyLimitUsd"`
 	UsedUSD       *float64    `json:"usedUsd"`
@@ -36,6 +37,7 @@ type ResolveResp struct {
 type UsageReport struct {
 	AccountID        int               `json:"accountId"`
 	UserID           *int              `json:"userId"`
+	TokenID          *int              `json:"tokenId,omitempty"`
 	Input            int64             `json:"input"`
 	Output           int64             `json:"output"`
 	CacheRead        int64             `json:"cacheRead"`

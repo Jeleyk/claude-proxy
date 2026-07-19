@@ -32,6 +32,7 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
                 null -> call.respond(
                     ResolveResponse(
                         userId = r.userId,
+                        tokenId = r.tokenId,
                         overLimit = r.overLimit,
                         dailyLimitUsd = r.dailyLimitUsd,
                         usedUsd = r.usedUsd,

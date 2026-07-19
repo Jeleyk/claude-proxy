@@ -21,18 +21,23 @@ import java.time.Instant
  */
 object RoutingTokenRepo {
 
-    /** Returns the userId that owns a given raw routing token, or null (cached, DB fallback). */
-    fun resolveUser(rawToken: String): Int? {
+    /** Resolves a raw routing token to its owner + token id, or null (cached, DB fallback). */
+    fun resolveAuth(rawToken: String): TokenAuth? {
         val hash = Crypto.sha256Hex(rawToken)
-        val cached = RedisCache.getOrLoad("cp:rtok:$hash", 60) { loadUserByHash(hash)?.toString() }
-        return cached?.toIntOrNull()
+        return parseTokenAuth(RedisCache.getOrLoad("cp:rtok:$hash", 60) { loadByHash(hash) })
     }
 
-    private fun loadUserByHash(hash: String): Int? = transaction {
+    private fun loadByHash(hash: String): String? = transaction {
         val row = RoutingTokens.selectAll().where { RoutingTokens.tokenHash eq hash }.firstOrNull()
             ?: return@transaction null
         RoutingTokens.update({ RoutingTokens.tokenHash eq hash }) { it[lastUsedAt] = Instant.now() }
-        row[RoutingTokens.userId]
+        "${row[RoutingTokens.userId]}:${row[RoutingTokens.id]}"
+    }
+
+    /** Names of this user's routing tokens by id, for labeling per-token stats. */
+    fun namesForUser(userId: Int): Map<Int, String> = transaction {
+        RoutingTokens.selectAll().where { RoutingTokens.userId eq userId }
+            .associate { it[RoutingTokens.id] to it[RoutingTokens.name] }
     }
 
     fun create(userId: Int, name: String): ProxyTokenDto = transaction {

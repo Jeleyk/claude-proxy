@@ -75,6 +75,7 @@ class UpstreamForwarder(
         pathAndQuery: String,
         bodyBytes: ByteArray,
         userId: Int?,
+        tokenId: Int? = null,
         canRetry: Boolean = false,
         allowedGroups: Set<Int>? = null,
     ): ForwardResult {
@@ -145,7 +146,7 @@ class UpstreamForwarder(
                 pool.markRateLimited(account.id, until)
                 if (canRetry) {
                     runCatching { response.readRawBytes() }
-                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
+                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null, tokenId = tokenId)
                     return@execute ForwardResult.Retry(RetryKind.RATE_LIMITED, until)
                 }
             } else if (status.value == 401) {
@@ -153,13 +154,13 @@ class UpstreamForwarder(
                 runCatching { AccountRepo.updateHealth(account.id, org.claudeproxy.model.AccountHealth.REFRESH_FAILED) }
                 if (canRetry) {
                     runCatching { response.readRawBytes() }
-                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
+                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null, tokenId = tokenId)
                     return@execute ForwardResult.Retry(RetryKind.LOST_ACCESS, null)
                 }
             } else if (status.value in intArrayOf(500, 502, 503, 529)) {
                 if (canRetry) {
                     runCatching { response.readRawBytes() }
-                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null)
+                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null, tokenId = tokenId)
                     return@execute ForwardResult.Retry(RetryKind.UPSTREAM_ERROR, null)
                 }
             }
@@ -246,11 +247,11 @@ class UpstreamForwarder(
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     log.warn("relay acct#{} write failed after {} bytes / {} chunks: {}", account.id, relayed, chunks, e.toString())
                 }
-                UsageRepo.record(account.id, userId, scanner.input, scanner.cacheRead, scanner.cacheCreation, scanner.output, streamErrorStatus ?: status.value, model)
+                UsageRepo.record(account.id, userId, scanner.input, scanner.cacheRead, scanner.cacheCreation, scanner.output, streamErrorStatus ?: status.value, model, tokenId = tokenId)
             } else {
                 // Buffer JSON (single message) so we can extract token usage.
                 val bytes = response.readRawBytes()
-                recordUsageFromJson(account.id, userId, status.value, bytes)
+                recordUsageFromJson(account.id, userId, tokenId, status.value, bytes)
                 call.respondBytes(bytes = bytes, contentType = contentType, status = status)
             }
             ForwardResult.Served
@@ -323,7 +324,7 @@ class UpstreamForwarder(
         null
     }
 
-    private fun recordUsageFromJson(accountId: Int, userId: Int?, status: Int, bytes: ByteArray) {
+    private fun recordUsageFromJson(accountId: Int, userId: Int?, tokenId: Int?, status: Int, bytes: ByteArray) {
         var input = 0L; var output = 0L; var cacheRead = 0L; var cacheCreation = 0L
         var model: String? = null
         try {
@@ -337,6 +338,6 @@ class UpstreamForwarder(
         } catch (_: Exception) {
             // non-JSON error body; still record the event
         }
-        UsageRepo.record(accountId, userId, input, cacheRead, cacheCreation, output, status, model)
+        UsageRepo.record(accountId, userId, input, cacheRead, cacheCreation, output, status, model, tokenId = tokenId)
     }
 }

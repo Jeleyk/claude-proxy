@@ -154,6 +154,10 @@ object UsageEvents : Table("usage_events") {
     // datapath that produced this event: "proxy" (Claude Code) or "routing" (OpenAI/Anthropic
     // API gateways). Metered against separate per-user daily limits; stats show both together.
     val sourceCol = varchar("source", 16).default("proxy")
+    // inbound token that authenticated the request. Deliberately NOT an FK: deleting a token
+    // must keep its usage history. `source` picks the namespace ("proxy" → proxy_tokens.id,
+    // "routing" → routing_tokens.id); null = pre-migration rows or token-less attempts.
+    val tokenId = integer("token_id").nullable()
     override val primaryKey = PrimaryKey(id)
 }
 

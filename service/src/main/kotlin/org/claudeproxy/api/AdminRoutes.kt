@@ -652,6 +652,43 @@ private fun buildTokens(
 }
 
 /**
+ * Build the per-inbound-token usage payload for one user on one datapath ("proxy" | "routing"):
+ * range-aligned daily cost/token/request series per token, plus all-time totals per token.
+ * Deleted tokens keep their series with name=null; tokenId=null groups unattributed rows.
+ */
+private fun buildTokenUsage(userId: Int, source: String, days: Int, endDate: java.time.LocalDate): TokenUsagePayload {
+    val n = days.coerceIn(1, 90)
+    val startDate = endDate.minusDays((n - 1).toLong())
+    val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val dayLabels = (0 until n).map { startDate.plusDays(it.toLong()).toString() }
+    val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
+
+    val perToken = HashMap<Int?, Triple<DoubleArray, LongArray, LongArray>>() // tokenId -> (cost, tokens, requests)
+    UsageRepo.tokenDailyBucketsForUser(userId, source, start, end).forEach { b ->
+        val i = idx[b.date] ?: return@forEach
+        val (c, t, r) = perToken.getOrPut(b.tokenId) { Triple(DoubleArray(n), LongArray(n), LongArray(n)) }
+        c[i] += b.cost; t[i] += b.tokens; r[i] += b.requests
+    }
+    val totals = UsageRepo.totalsPerTokenForUser(userId, source)
+    val names = if (source == "routing") RoutingTokenRepo.namesForUser(userId) else ProxyTokenRepo.namesForUser(userId)
+
+    // Every token with any usage (all-time or in range) gets a series; usage-less tokens are
+    // omitted — the UI shows zeros for them from the table side.
+    val ids = (perToken.keys + totals.keys)
+    val series = ids.map { id ->
+        val (c, t, r) = perToken[id] ?: Triple(DoubleArray(n), LongArray(n), LongArray(n))
+        val tot = totals[id] ?: Totals()
+        TokenUsageSeriesDto(
+            tokenId = id, name = id?.let { names[it] },
+            cost = c.toList(), tokens = t.toList(), requests = r.toList(),
+            totalCost = tot.cost, totalTokens = tot.clean, totalRequests = tot.requests,
+        )
+    }.sortedByDescending { it.totalCost }
+    return TokenUsagePayload(dayLabels, series)
+}
+
+/**
  * Build bucketed window-utilization series (5h + weekly) for a range, with carry-forward.
  * [keep] decides which account ids contribute — pool-wide excludes personal accounts; the
  * per-user view keeps only that user's personal accounts.
@@ -842,6 +879,15 @@ private fun Route.statsRoutes() {
         call.respond(buildTokens(days, endDate, includeAccounts = true,
             accountFilter = AccountRepo.personalIdsOf(user.id),
             fetch = { s, e -> UsageRepo.tokenBucketsForUser(user.id, s, e) }))
+    }
+    // Per-inbound-token usage for the caller's Tokens / API Routing pages: all-time totals per
+    // token (table summary) + daily cost/token series for the charts. Strictly the caller's own
+    // data (incl. personal accounts), so a session is the only requirement.
+    get("/stats/mine/token-usage") {
+        val user = call.requireUser()
+        val source = if (call.parameters["source"] == "routing") "routing" else "proxy"
+        val (days, endDate) = call.rangeParams()
+        call.respond(buildTokenUsage(user.id, source, days, endDate))
     }
     get("/stats/mine/windows") {
         val user = call.requireUser()
