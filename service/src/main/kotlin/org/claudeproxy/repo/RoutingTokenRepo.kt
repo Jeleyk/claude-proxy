@@ -40,17 +40,19 @@ object RoutingTokenRepo {
             .associate { it[RoutingTokens.id] to it[RoutingTokens.name] }
     }
 
-    fun create(userId: Int, name: String): ProxyTokenDto = transaction {
+    fun create(userId: Int, name: String, systemPrompt: String? = null): ProxyTokenDto = transaction {
         val raw = "cxr_" + Crypto.randomToken(24)
         val hash = Crypto.sha256Hex(raw)
         val now = Instant.now()
+        val prompt = systemPrompt?.trim()?.takeIf { it.isNotEmpty() }
         val id = RoutingTokens.insert {
             it[RoutingTokens.userId] = userId
             it[tokenHash] = hash
             it[RoutingTokens.name] = name
+            it[RoutingTokens.systemPrompt] = prompt
             it[createdAt] = now
         }[RoutingTokens.id]
-        ProxyTokenDto(id, name, userId, now.toString(), null, token = raw)
+        ProxyTokenDto(id, name, userId, now.toString(), null, token = raw, systemPrompt = prompt)
     }
 
     fun listForUser(userId: Int): List<ProxyTokenDto> = transaction {
@@ -61,8 +63,34 @@ object RoutingTokenRepo {
                 userId = row[RoutingTokens.userId],
                 createdAt = row[RoutingTokens.createdAt].toString(),
                 lastUsedAt = row[RoutingTokens.lastUsedAt]?.toString(),
+                systemPrompt = row[RoutingTokens.systemPrompt],
             )
         }
+    }
+
+    /**
+     * The token's static system prompt for the resolve hot path (cached 60s, "" = none).
+     * Evicted on [updatePrompt]/[delete], so edits apply within a minute at worst — immediately
+     * on this instance.
+     */
+    fun promptOf(tokenId: Int): String? =
+        MemoryCache.getOrLoad("cp:rtoksp:$tokenId", 60) {
+            transaction {
+                RoutingTokens.selectAll().where { RoutingTokens.id eq tokenId }
+                    .firstOrNull()?.get(RoutingTokens.systemPrompt) ?: ""
+            }
+        }?.takeIf { it.isNotEmpty() }
+
+    /** Set or clear (null/blank) the token's static system prompt. Own tokens only. */
+    fun updatePrompt(id: Int, userId: Int, systemPrompt: String?): Boolean {
+        val prompt = systemPrompt?.trim()?.takeIf { it.isNotEmpty() }
+        val updated = transaction {
+            RoutingTokens.update({ (RoutingTokens.id eq id) and (RoutingTokens.userId eq userId) }) {
+                it[RoutingTokens.systemPrompt] = prompt
+            }
+        }
+        if (updated > 0) MemoryCache.evict("cp:rtoksp:$id")
+        return updated > 0
     }
 
     fun delete(id: Int, userId: Int): Boolean {
@@ -75,6 +103,7 @@ object RoutingTokenRepo {
         }
         if (deleted && hash != null) {
             MemoryCache.evict("cp:rtok:$hash")
+            MemoryCache.evict("cp:rtoksp:$id")
         }
         return deleted
     }

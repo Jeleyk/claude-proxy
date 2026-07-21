@@ -39,6 +39,9 @@ data class ResolveResult(
     val dailyLimitUsd: Double?,
     val usedUsd: Double?,
     val candidates: List<CandidateDto>,
+    // routing only: the token's static system prompt, injected by the gateway ahead of the
+    // client's own system content (but after the mandatory Claude Code block).
+    val systemPrompt: String? = null,
 )
 
 /**
@@ -76,10 +79,12 @@ class DatapathService(private val pool: AccountPool) {
         // Without it a user reaches only their own personal accounts.
         val allowGlobal = Permission.ADMIN in perms || Permission.POOL_GLOBAL_USE in perms
 
+        val sysPrompt = if (routing) tokenId?.let { RoutingTokenRepo.promptOf(it) } else null
+
         // Free paths (token counting, model listing) never consume quota: any account, no limits.
         if (isFreePath(path)) {
             val account = pool.selectAny(userId, allowedGroups, personalFirst, allowGlobal)
-            return ResolveResult(userId, tokenId, null, false, null, null, listOfNotNull(account).map { it.toCandidate() })
+            return ResolveResult(userId, tokenId, null, false, null, null, listOfNotNull(account).map { it.toCandidate() }, sysPrompt)
         }
 
         // Per-user daily USD limit is a shared-pool constraint; personal accounts are exempt.
@@ -88,7 +93,7 @@ class DatapathService(private val pool: AccountPool) {
         val overLimit = costLimit != null && usedCost >= costLimit
 
         val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst, allowGlobal)
-        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() })
+        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() }, sysPrompt)
     }
 
     /**

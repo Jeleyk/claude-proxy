@@ -106,6 +106,22 @@ class DatapathServiceTest {
     }
 
     @Test
+    fun `routing resolve carries the token's static system prompt`() = runBlocking {
+        val created = org.claudeproxy.repo.RoutingTokenRepo.create(adminId, "rt", "Always answer in French.")
+        val r = DatapathService(pool).resolve(created.token!!, "POST", "/v1/messages", source = "routing")
+        assertEquals("Always answer in French.", r.systemPrompt)
+
+        // clearing the prompt drops it from resolve (cache evicted on update)
+        org.claudeproxy.repo.RoutingTokenRepo.updatePrompt(created.id, adminId, "  ")
+        val r2 = DatapathService(pool).resolve(created.token!!, "POST", "/v1/messages", source = "routing")
+        assertEquals(null, r2.systemPrompt)
+
+        // proxy-datapath resolves never carry a prompt
+        val rp = DatapathService(pool).resolve(seededToken, "POST", "/v1/messages")
+        assertEquals(null, rp.systemPrompt)
+    }
+
+    @Test
     fun `applyOutcome records MCP tool calls and aggregates daily buckets`() = runBlocking {
         val accId = org.jetbrains.exposed.sql.transactions.transaction {
             org.claudeproxy.db.Accounts.selectAll().first()[org.claudeproxy.db.Accounts.id]

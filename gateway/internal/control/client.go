@@ -31,6 +31,8 @@ type ResolveResp struct {
 	DailyLimitUSD *float64    `json:"dailyLimitUsd"`
 	UsedUSD       *float64    `json:"usedUsd"`
 	Candidates    []Candidate `json:"candidates"`
+	// Routing only: the token's static system prompt, to inject ahead of client system content.
+	SystemPrompt *string `json:"systemPrompt"`
 }
 
 // UsageReport is one upstream attempt's outcome, posted to /internal/usage.

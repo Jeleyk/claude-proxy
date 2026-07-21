@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, fmtUsd, ProxyTokenDto, UserDto } from '../api';
-import { CodeBlock, Copy, Segmented } from '../ui';
+import { CodeBlock, Copy, Segmented, Select } from '../ui';
 import { TokenUsageSection } from './tokenUsage';
 
 // The routing gateways are fronted by nginx: OpenAI at /routing/openai (SDK appends /v1/...),
@@ -49,6 +49,7 @@ function anthropicCurl(base: string, token: string) {
 export function RoutingTokens() {
   const [tokens, setTokens] = useState<ProxyTokenDto[]>([]);
   const [name, setName] = useState('');
+  const [newPrompt, setNewPrompt] = useState('');
   const [revealed, setRevealed] = useState<ProxyTokenDto | null>(null);
   const [origin, setOrigin] = useState(window.location.origin);
   const [provider, setProvider] = useState<'openai' | 'anthropic'>('openai');
@@ -68,8 +69,10 @@ export function RoutingTokens() {
 
   async function create() {
     setErr(null);
-    try { const t = await api.createRoutingToken(name || 'token'); setRevealed(t); setName(''); load(); }
-    catch (e: any) { setErr(e.message); }
+    try {
+      const t = await api.createRoutingToken(name || 'token', newPrompt.trim() || undefined);
+      setRevealed(t); setName(''); setNewPrompt(''); load();
+    } catch (e: any) { setErr(e.message); }
   }
   async function del(id: number) {
     if (!confirm('Delete this routing token? Clients using it stop working.')) return;
@@ -133,6 +136,11 @@ export function RoutingTokens() {
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="token name (e.g. my-app)" onKeyDown={(e) => e.key === 'Enter' && create()} />
           <button onClick={create}>Create</button>
         </div>
+        <textarea
+          value={newPrompt} onChange={(e) => setNewPrompt(e.target.value)} rows={3}
+          placeholder="Static system prompt (optional) — always injected ahead of whatever system prompt the API request carries"
+          style={{ width: '100%', marginTop: 8, resize: 'vertical' }}
+        />
         {err && <div className="err">{err}</div>}
         {tok && (
           <div className="tokenreveal">
@@ -146,7 +154,66 @@ export function RoutingTokens() {
         )}
       </div>
 
+      {tokens.length > 0 && <PromptPanel tokens={tokens} onSaved={load} />}
+
       <TokenUsageSection source="routing" tokens={tokens} onDelete={del} emptyHint="No routing tokens yet." />
+    </div>
+  );
+}
+
+/**
+ * Per-token static system prompt editor. The prompt is injected by the routing gateways right
+ * after the mandatory Claude Code block — ahead of (higher priority than) any system prompt the
+ * API request itself carries.
+ */
+function PromptPanel({ tokens, onSaved }: { tokens: ProxyTokenDto[]; onSaved: () => void }) {
+  const [sel, setSel] = useState<number>(tokens[0].id);
+  const [text, setText] = useState('');
+  const [dirty, setDirty] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const cur = tokens.find((t) => t.id === sel) ?? tokens[0];
+
+  // Re-sync the editor when switching tokens or when a background refresh brings new data.
+  useEffect(() => {
+    if (!tokens.some((t) => t.id === sel)) setSel(tokens[0].id);
+  }, [tokens, sel]);
+  useEffect(() => {
+    if (!dirty) setText(cur.systemPrompt ?? '');
+  }, [cur.id, cur.systemPrompt, dirty]);
+
+  async function save(value: string | null) {
+    setErr(null);
+    try {
+      await api.updateRoutingTokenPrompt(cur.id, value);
+      setDirty(false); setSaved(true); setTimeout(() => setSaved(false), 1500);
+      onSaved();
+    } catch (e: any) { setErr(e.message); }
+  }
+
+  return (
+    <div className="panel narrow">
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <h2 style={{ margin: 0 }}>Static system prompt</h2>
+        <Select ariaLabel="Select token" value={String(cur.id)} minWidth={160}
+          onChange={(v) => { setSel(Number(v)); setDirty(false); }}
+          options={tokens.map((t) => ({ value: String(t.id), label: t.systemPrompt ? `${t.name} ●` : t.name }))} />
+      </div>
+      <p className="hint" style={{ margin: '8px 0' }}>
+        Injected on every request of this token, ahead of any system prompt the API request carries. ● = prompt set.
+      </p>
+      <textarea
+        value={text} rows={5}
+        onChange={(e) => { setText(e.target.value); setDirty(true); }}
+        placeholder="e.g. Always answer in Russian. Never reveal internal tooling."
+        style={{ width: '100%', resize: 'vertical' }}
+      />
+      <div className="row" style={{ marginTop: 8, gap: 8 }}>
+        <button onClick={() => save(text.trim() || null)} disabled={!dirty}>Save</button>
+        {cur.systemPrompt && <button className="ghost" onClick={() => { setText(''); save(null); }}>Clear</button>}
+        {saved && <span className="hint">Saved ✓</span>}
+      </div>
+      {err && <div className="err">{err}</div>}
     </div>
   );
 }

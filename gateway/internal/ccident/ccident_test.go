@@ -71,3 +71,40 @@ func TestInjectMalformedReturnsInput(t *testing.T) {
 		t.Fatalf("malformed input must be returned unchanged")
 	}
 }
+
+func TestInsertStaticPromptAfterCCBeforeClient(t *testing.T) {
+	body := InjectSystemPrompt([]byte(`{"system":"client rules","messages":[]}`))
+	out := InsertStaticPrompt(body, "token rules")
+	blocks := systemBlocks(t, out)
+	if len(blocks) != 3 || blocks[0]["text"] != SystemPrompt || blocks[1]["text"] != "token rules" || blocks[2]["text"] != "client rules" {
+		t.Fatalf("unexpected order: %v", blocks)
+	}
+}
+
+func TestInsertStaticPromptNoSystem(t *testing.T) {
+	out := InsertStaticPrompt([]byte(`{"messages":[]}`), "token rules")
+	blocks := systemBlocks(t, out)
+	if len(blocks) != 1 || blocks[0]["text"] != "token rules" {
+		t.Fatalf("unexpected blocks: %v", blocks)
+	}
+}
+
+func TestInsertStaticPromptPlainStringSystem(t *testing.T) {
+	// Defensive: a body that skipped InjectSystemPrompt (system still a plain string).
+	out := InsertStaticPrompt([]byte(`{"system":"client","messages":[]}`), "token rules")
+	blocks := systemBlocks(t, out)
+	if len(blocks) != 2 || blocks[0]["text"] != "token rules" || blocks[1]["text"] != "client" {
+		t.Fatalf("unexpected blocks: %v", blocks)
+	}
+}
+
+func TestInsertStaticPromptEmptyOrMalformed(t *testing.T) {
+	in := []byte(`{"system":"x"}`)
+	if out := InsertStaticPrompt(in, ""); string(out) != string(in) {
+		t.Fatalf("empty prompt must be a no-op")
+	}
+	bad := []byte(`not json`)
+	if out := InsertStaticPrompt(bad, "p"); string(out) != string(bad) {
+		t.Fatalf("malformed input must be returned unchanged")
+	}
+}

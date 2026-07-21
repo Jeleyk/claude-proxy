@@ -138,6 +138,8 @@ data class ProxyTokenDto(
     val lastUsedAt: String?,
     // full token value only returned once, at creation time
     val token: String? = null,
+    // static system prompt (routing tokens only; null for proxy tokens / unset)
+    val systemPrompt: String? = null,
 )
 
 @Serializable

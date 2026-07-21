@@ -271,6 +271,12 @@ function storedWinShell(): WinShell {
   return 'powershell';
 }
 
+// The install scripts live on the service (/api/install.*) at the same origin as the gateway base.
+const scriptOrigin = (base: string) => base.replace(/\/gateway\/?$/, '');
+const unixQuick = (base: string, t: string) =>
+  `curl -fsSL ${scriptOrigin(base)}/api/install.sh | bash -s -- ${t}`;
+const psQuick = (base: string, t: string) =>
+  `& ([scriptblock]::Create((irm ${scriptOrigin(base)}/api/install.ps1))) -Token ${t}`;
 const unixEnvRun = (base: string, t: string) =>
   `export ANTHROPIC_BASE_URL=${base}\nexport ANTHROPIC_AUTH_TOKEN=${t}\nclaude`;
 const unixWrapper = (base: string, t: string) =>
@@ -278,7 +284,12 @@ const unixWrapper = (base: string, t: string) =>
   `#!/usr/bin/env bash\n` +
   `ANTHROPIC_BASE_URL="${base}" ANTHROPIC_AUTH_TOKEN="${t}" exec claude "$@"\n` +
   `EOF\n` +
-  `chmod +x ~/.local/bin/claude-proxy && echo 'Installed. Run: claude-proxy [claude args]'`;
+  `chmod +x ~/.local/bin/claude-proxy\n` +
+  // macOS (and some distros) don't ship ~/.local/bin on PATH — append it to the shell rc once
+  `case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) rc=~/."$(basename "\${SHELL:-zsh}")"rc; ` +
+  `echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rc"; export PATH="$HOME/.local/bin:$PATH"; ` +
+  `echo "Added ~/.local/bin to PATH in $rc";; esac\n` +
+  `echo 'Installed. Run: claude-proxy [claude args]'`;
 const psEnvRun = (base: string, t: string) =>
   `$env:ANTHROPIC_BASE_URL="${base}"\n$env:ANTHROPIC_AUTH_TOKEN="${t}"\nclaude`;
 const psWrapper = (base: string, t: string) =>
@@ -296,13 +307,14 @@ export function ConnectScripts({ base, token, wrapper = false }: { base: string;
 
   let envRun: string;
   let wrap: string | null = null;
+  let quick: string | null = null;
   let winCmdNote = false;
   if (os === 'windows') {
-    if (win === 'powershell') { envRun = psEnvRun(base, token); if (wrapper) wrap = psWrapper(base, token); }
+    if (win === 'powershell') { envRun = psEnvRun(base, token); if (wrapper) { wrap = psWrapper(base, token); quick = psQuick(base, token); } }
     else { envRun = cmdEnvRun(base, token); winCmdNote = wrapper; }
   } else {
     envRun = unixEnvRun(base, token);
-    if (wrapper) wrap = unixWrapper(base, token);
+    if (wrapper) { wrap = unixWrapper(base, token); quick = unixQuick(base, token); }
   }
 
   return (
@@ -320,6 +332,13 @@ export function ConnectScripts({ base, token, wrapper = false }: { base: string;
           ]} />
         )}
       </div>
+
+      {quick && (
+        <>
+          <p className="hint" style={{ marginBottom: 4 }}>Quick install — one line, sets up the persistent <span className="mono">claude-proxy</span> command:</p>
+          <CodeBlock text={quick} />
+        </>
+      )}
 
       <p className="hint" style={{ marginBottom: 4 }}>Set the variables and run:</p>
       <CodeBlock text={envRun} />

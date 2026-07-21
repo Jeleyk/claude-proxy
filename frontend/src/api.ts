@@ -94,6 +94,8 @@ export interface ProxyTokenDto {
   createdAt: string;
   lastUsedAt: string | null;
   token?: string | null;
+  // routing tokens only: static system prompt injected ahead of client system content
+  systemPrompt?: string | null;
 }
 
 export interface RoleDto {
@@ -189,8 +191,12 @@ export const api = {
 
   // Routing tokens (cxr_...) for the OpenAI/Anthropic API gateways. Same shape as proxy tokens.
   routingTokens: () => req<ProxyTokenDto[]>('GET', '/api/routing-tokens'),
-  createRoutingToken: (name: string) => req<ProxyTokenDto>('POST', '/api/routing-tokens', { name }),
+  createRoutingToken: (name: string, systemPrompt?: string) =>
+    req<ProxyTokenDto>('POST', '/api/routing-tokens', { name, systemPrompt: systemPrompt || null }),
   deleteRoutingToken: (id: number) => req<unknown>('DELETE', `/api/routing-tokens/${id}`),
+  // Set (non-blank) or clear (null) a routing token's static system prompt.
+  updateRoutingTokenPrompt: (id: number, systemPrompt: string | null) =>
+    req<ProxyTokenDto[]>('PATCH', `/api/routing-tokens/${id}`, { systemPrompt }),
 
   statsSummary: () => req<UsageSummary[]>('GET', '/api/stats/summary'),
   statsRecent: () => req<UsageEvent[]>('GET', '/api/stats/recent'),

@@ -104,7 +104,11 @@ data class CreateRoleRequest(val name: String, val permissions: List<String> = e
 data class UpdateRoleRequest(val permissions: List<String>)
 
 @Serializable
-data class CreateProxyTokenRequest(val name: String)
+data class CreateProxyTokenRequest(val name: String, val systemPrompt: String? = null)
+
+/** PATCH body for a routing token: set (non-blank) or clear (null/blank) its static system prompt. */
+@Serializable
+data class UpdateRoutingTokenRequest(val systemPrompt: String? = null)
 
 @Serializable
 data class RolesPayload(val roles: List<org.claudeproxy.repo.RoleDto>, val allPermissions: List<String>)

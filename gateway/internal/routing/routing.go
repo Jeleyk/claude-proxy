@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"claudeproxy/gateway/internal/ccident"
 	"claudeproxy/gateway/internal/config"
 	"claudeproxy/gateway/internal/control"
 )
@@ -156,6 +157,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	prep, ok := h.tr.Prepare(w, r.Method, r.URL.Path, requestURI, body)
 	if !ok {
 		return // error already written
+	}
+	// Per-token static system prompt: inject right behind the Claude Code block, ahead of any
+	// client-supplied system, so the token owner's instructions outrank what arrives in the API.
+	if resp.SystemPrompt != nil && *resp.SystemPrompt != "" && len(prep.Body) > 0 {
+		prep.Body = ccident.InsertStaticPrompt(prep.Body, *resp.SystemPrompt)
 	}
 	prep.Beta = append(prep.Beta, r.Header.Values("anthropic-beta")...)
 

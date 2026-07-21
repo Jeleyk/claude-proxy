@@ -95,3 +95,40 @@ func SystemBlocks(clientSystem string) []json.RawMessage {
 	}
 	return blocks
 }
+
+// InsertStaticPrompt inserts a per-token static system prompt into an already-prepared Anthropic
+// body so it outranks any client-supplied system content: right after the mandatory Claude Code
+// block when it is first, else at the very front. Runs after the translator's Prepare, so both
+// gateways (translated OpenAI and passthrough Anthropic) get identical semantics. Malformed
+// bodies are returned unchanged.
+func InsertStaticPrompt(body []byte, prompt string) []byte {
+	if prompt == "" || len(body) == 0 {
+		return body
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	var arr []json.RawMessage
+	if raw, ok := obj["system"]; ok {
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			// system in a non-array shape (plain string): normalize into a block.
+			arr = []json.RawMessage{normalizeBlock(raw)}
+		}
+	}
+	at := 0
+	if len(arr) > 0 && firstIsCC(arr[0]) {
+		at = 1
+	}
+	arr = append(arr[:at:at], append([]json.RawMessage{textBlockRaw(prompt)}, arr[at:]...)...)
+	nb, err := json.Marshal(arr)
+	if err != nil {
+		return body
+	}
+	obj["system"] = nb
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AccountDto, api, fmtTokens, fmtUsd, GroupDto, PoolStats, RoleDto, UserDto } from '../api';
+import { AccountEditModal } from '../accounts';
 import { Check, Modal, NumberInput, Switch } from '../ui';
 
 export function Users({ isAdmin }: { isAdmin: boolean }) {
@@ -79,10 +80,11 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
   );
 }
 
-/** Admin oversight of one user's personal accounts (view + enable/disable + delete). */
+/** Admin oversight of one user's personal accounts (view + edit + enable/disable + delete). */
 function UserAccountsModal({ user, onClose }: { user: UserDto; onClose: () => void }) {
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState<AccountDto | null>(null);
 
   async function load() { try { setStats(await api.userAccounts(user.id)); } catch (e: any) { setErr(e.message); } }
   useEffect(() => { load(); }, []);
@@ -110,13 +112,23 @@ function UserAccountsModal({ user, onClose }: { user: UserDto; onClose: () => vo
                     <td className="num">{a.type === 'API_KEY' ? <span className="hint">n/a</span> : pct(a.weekly?.usageFraction)}</td>
                     <td className="num">{fmtUsd(a.totalCost)}</td>
                     <td><Switch checked={a.enabled} onChange={(v) => toggle(a, v)} /></td>
-                    <td><button className="sm danger" onClick={() => del(a)}>Delete</button></td>
+                    <td>
+                      <div className="row">
+                        <button className="sm" onClick={() => setEditing(a)}>Edit</button>
+                        <button className="sm danger" onClick={() => del(a)}>Delete</button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
+      {editing && (
+        <AccountEditModal a={editing} groups={[]} scope="personal"
+          update={(id, b) => api.updateUserAccount(user.id, id, b)}
+          onClose={() => setEditing(null)} onSaved={(s) => { setStats(s); setEditing(null); }} />
+      )}
     </Modal>
   );
 }

@@ -42,6 +42,8 @@ data class ResolveResponse(
     val dailyLimitUsd: Double? = null,
     val usedUsd: Double? = null,
     val candidates: List<CandidateDto> = emptyList(),
+    // routing only: static per-token system prompt the gateway injects ahead of client system.
+    val systemPrompt: String? = null,
 )
 
 /**

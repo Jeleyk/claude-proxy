@@ -62,6 +62,7 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
             ModelPriceRepo.delete(p)
             call.respond(ModelPriceRepo.list())
         }
+        installRoutes(publicBaseUrl)
         authRoutes()
         profileRoutes()
         accountRoutes(pool, probe)
@@ -548,7 +549,17 @@ private fun Route.routingTokenRoutes() {
     post("/routing-tokens") {
         val user = call.requirePermission(Permission.ROUTING_USE)
         val req = call.receive<CreateProxyTokenRequest>()
-        call.respond(RoutingTokenRepo.create(user.id, req.name))
+        call.respond(RoutingTokenRepo.create(user.id, req.name, req.systemPrompt))
+    }
+    // Set/clear the token's static system prompt (own tokens only).
+    patch("/routing-tokens/{id}") {
+        val user = call.requirePermission(Permission.ROUTING_USE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val req = call.receive<UpdateRoutingTokenRequest>()
+        val ok = RoutingTokenRepo.updatePrompt(id, user.id, req.systemPrompt)
+        if (ok) call.respond(RoutingTokenRepo.listForUser(user.id))
+        else call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
     }
     delete("/routing-tokens/{id}") {
         val user = call.requireUser()

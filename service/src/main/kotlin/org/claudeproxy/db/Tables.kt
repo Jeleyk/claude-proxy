@@ -73,6 +73,9 @@ object RoutingTokens : Table("routing_tokens") {
     val userId = integer("user_id").references(Users.id)
     val tokenHash = varchar("token_hash", 128).uniqueIndex()
     val name = varchar("name", 128)
+    // optional static system prompt injected by the routing gateways right after the mandatory
+    // Claude Code block — i.e. ahead of (higher priority than) any client-supplied system.
+    val systemPrompt = text("system_prompt").nullable()
     val createdAt = timestamp("created_at")
     val lastUsedAt = timestamp("last_used_at").nullable()
     override val primaryKey = PrimaryKey(id)
