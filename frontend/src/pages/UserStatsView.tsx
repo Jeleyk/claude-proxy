@@ -307,61 +307,83 @@ function McpBlock({ userId, days, endDate, mode }: {
 
   if (!data || data.tools.length === 0) return null;
   const total = data.tools.reduce((a, t) => a + t.totalCalls, 0);
+  const totalPerDay = data.days.map((_, i) => data.tools.reduce((a, t) => a + t.calls[i], 0));
+  const maxCalls = data.tools[0]?.totalCalls ?? 0; // sorted desc server-side
+  const servers = new Set(data.tools.map((t) => splitMcpName(t.name)[0])).size;
 
-  // Chart: top tools as their own series, everything else folded into "other".
+  // Per-tool chart: top tools as their own series, everything else folded into "other".
   const TOP = 6;
   const top = data.tools.slice(0, TOP);
   const rest = data.tools.slice(TOP);
-  const series = top.map((t, i) => ({ name: t.name, color: SERIES_COLORS[i % SERIES_COLORS.length], values: t.calls }));
+  const series = top.map((t, i) => ({
+    name: splitMcpName(t.name)[1], color: SERIES_COLORS[i % SERIES_COLORS.length], values: t.calls,
+  }));
   if (rest.length > 0) {
     const other = data.days.map((_, i) => rest.reduce((a, t) => a + t.calls[i], 0));
-    series.push({ name: 'other', color: SERIES_COLORS[TOP % SERIES_COLORS.length], values: other });
+    series.push({ name: `other (${rest.length})`, color: SERIES_COLORS[TOP % SERIES_COLORS.length], values: other });
   }
   const fmtCalls = (n: number) => n.toLocaleString();
-
-  // "mcp__server__tool" → server + tool (tool names may themselves contain "__")
-  const splitName = (name: string): [string, string] => {
-    const m = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name);
-    return m ? [m[1], m[2]] : ['', name];
-  };
 
   return (
     <>
       <h2>MCP tools</h2>
       <div className="chart-row">
-        <div className="panel" style={{ flex: '1 1 340px' }}>
-          <div className="tablewrap" style={{ margin: 0 }}>
-            <table>
-              <thead><tr><th>Server</th><th>Tool</th><th className="num">Calls</th><th className="num">Share</th></tr></thead>
-              <tbody>
-                {data.tools.map((t, i) => {
-                  const [server, tool] = splitName(t.name);
-                  return (
-                    <tr key={t.name}>
-                      <td>
-                        <span className="lg">
-                          {i < TOP && <span className="sw" style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }} />}
-                          {server || '—'}
-                        </span>
-                      </td>
-                      <td className="mono">{tool}</td>
-                      <td className="num">{t.totalCalls.toLocaleString()}</td>
-                      <td className="num hint">{total > 0 ? `${Math.round((t.totalCalls / total) * 100)}%` : '—'}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        <div className="panel">
+          <div className="chart-card-head">
+            <span className="t">Total MCP calls</span>
+            <span className="v">{fmtCalls(total)}</span>
+          </div>
+          <StackedChart days={data.days} height={190} fmt={fmtCalls} mode={mode}
+            series={[{ name: 'MCP calls', color: SERIES_COLORS[0], values: totalPerDay }]} />
+          <div className="hint" style={{ marginTop: 6 }}>
+            {data.tools.length} tool{data.tools.length === 1 ? '' : 's'} across {servers} server{servers === 1 ? '' : 's'} in this range
           </div>
         </div>
         <div className="panel">
-          <div className="chart-card-head"><span className="t">MCP calls per day</span><span className="v">{fmtCalls(total)}</span></div>
+          <div className="chart-card-head"><span className="t">Calls per day by tool</span></div>
           <StackedChart days={data.days} series={series} height={190} fmt={fmtCalls} mode={mode} />
           <Legend items={series.map((s) => ({ key: s.name, label: s.name, color: s.color }))} />
         </div>
       </div>
+      <div className="tablewrap">
+        <table>
+          <thead><tr><th>Server</th><th>Tool</th><th className="num">Calls</th><th style={{ width: '30%' }}>Share</th></tr></thead>
+          <tbody>
+            {data.tools.map((t, i) => {
+              const [server, tool] = splitMcpName(t.name);
+              const share = total > 0 ? (t.totalCalls / total) * 100 : 0;
+              return (
+                <tr key={t.name}>
+                  <td>
+                    <span className="lg">
+                      <span className="sw" style={{ background: i < TOP ? SERIES_COLORS[i % SERIES_COLORS.length] : SERIES_COLORS[TOP % SERIES_COLORS.length] }} />
+                      <span className="badge muted">{server || 'mcp'}</span>
+                    </span>
+                  </td>
+                  <td className="mono" title={t.name}>{tool}</td>
+                  <td className="num">{fmtCalls(t.totalCalls)}</td>
+                  <td>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div className="bar" style={{ flex: 1 }}>
+                        <span style={{ width: `${maxCalls > 0 ? Math.max(2, Math.round((t.totalCalls / maxCalls) * 100)) : 0}%` }} />
+                      </div>
+                      <span className="hint" style={{ minWidth: 38, textAlign: 'right' }}>{share < 1 ? '<1' : Math.round(share)}%</span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </>
   );
+}
+
+/** "mcp__server__tool" → [server, tool] (tool names may themselves contain "__"). */
+function splitMcpName(name: string): [string, string] {
+  const m = /^mcp__(.+?)__(.+)$/.exec(name);
+  return m ? [m[1], m[2]] : ['', name];
 }
 
 /** One datapath's per-inbound-token breakdown: totals table + stacked per-token charts. */
