@@ -2,7 +2,7 @@ package org.claudeproxy.repo
 
 import org.claudeproxy.Config
 import org.claudeproxy.accounts.Secrets
-import org.claudeproxy.cache.RedisCache
+import org.claudeproxy.cache.MemoryCache
 import org.claudeproxy.db.Crypto
 import org.claudeproxy.db.Db
 import org.claudeproxy.db.Users
@@ -15,7 +15,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
-/** With Redis disabled the token cache must be fully transparent (DB fallback). */
+/** The in-process token cache must be transparent: resolve, cache, and evict on delete. */
 class ProxyTokenCacheTest {
     private lateinit var dbFile: File
 
@@ -27,18 +27,18 @@ class ProxyTokenCacheTest {
             masterKey = "test-master-key-32-chars-minimum-xx", sessionSecret = "test-master-key-32-chars-minimum-xx",
             adminUser = "admin", adminPassword = "admin", upstreamBaseUrl = "https://api.anthropic.com",
             publicBaseUrl = "", databaseUrl = "", databaseUser = "claudeproxy", databasePassword = "",
-            internalToken = null, redisUrl = null,
+            internalToken = null,
         )
         Secrets.init(Crypto(cfg.masterKey))
         Db.init(cfg)
-        RedisCache.init(null) // disabled
+        MemoryCache.clear() // fresh DB per test — drop entries cached by earlier tests
     }
 
     @AfterTest
     fun teardown() = dbFile.delete().let {}
 
     @Test
-    fun `resolveAuth returns the owner and token id with Redis disabled`() {
+    fun `resolveAuth returns the owner and token id`() {
         val adminId = transaction { Users.selectAll().first()[Users.id] }
         val dto = ProxyTokenRepo.create(adminId, "t")
         assertEquals(TokenAuth(adminId, dto.id), ProxyTokenRepo.resolveAuth(dto.token!!))

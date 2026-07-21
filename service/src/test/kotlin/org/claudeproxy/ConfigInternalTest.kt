@@ -18,24 +18,10 @@ class ConfigInternalTest {
     }
 
     @Test
-    fun `redisUrl reads REDIS_URL`() {
-        System.setProperty("MASTER_KEY", "test-master-key-32-chars-minimum-xx")
-        System.setProperty("REDIS_URL", "redis://localhost:6379")
-        try {
-            val c = Config.load()
-            assertEquals("redis://localhost:6379", c.redisUrl)
-        } finally {
-            System.clearProperty("REDIS_URL")
-        }
-    }
-
-    @Test
-    fun `internalToken and redisUrl are null when unset`() {
+    fun `internalToken is null when unset`() {
         System.setProperty("MASTER_KEY", "test-master-key-32-chars-minimum-xx")
         System.clearProperty("INTERNAL_TOKEN")
-        System.clearProperty("REDIS_URL")
         val c = Config.load()
         assertNull(c.internalToken)
-        assertNull(c.redisUrl)
     }
 }

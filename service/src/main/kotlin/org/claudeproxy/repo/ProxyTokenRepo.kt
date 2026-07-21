@@ -1,6 +1,6 @@
 package org.claudeproxy.repo
 
-import org.claudeproxy.cache.RedisCache
+import org.claudeproxy.cache.MemoryCache
 import org.claudeproxy.db.Crypto
 import org.claudeproxy.db.ProxyTokens
 import org.claudeproxy.model.ProxyTokenDto
@@ -17,8 +17,8 @@ import java.time.Instant
 data class TokenAuth(val userId: Int, val tokenId: Int?)
 
 /**
- * Parse a cached resolve value: `"<userId>:<tokenId>"`, or the legacy plain `"<userId>"`
- * (pre-tokenId cache entries during a rolling deploy) which yields tokenId=null.
+ * Parse a cached resolve value: `"<userId>:<tokenId>"`; a plain `"<userId>"` (no token id)
+ * yields tokenId=null.
  */
 internal fun parseTokenAuth(cached: String?): TokenAuth? {
     if (cached == null) return null
@@ -30,13 +30,13 @@ object ProxyTokenRepo {
 
     /**
      * Resolves a raw proxy token to its owner + token id, or null. Hot path: the mapping is
-     * cached in Redis (`cp:tok:<hash>`, TTL 60s) with a DB fallback, so a cold/absent
-     * Redis is only ever a miss. `last_used_at` is bumped on cache misses (~once per 60s per
-     * token) rather than every request — this avoids a DB write on the hot path.
+     * cached in-process (`cp:tok:<hash>`, TTL 60s) with a DB fallback. `last_used_at` is bumped
+     * on cache misses (~once per 60s per token) rather than every request — this avoids a DB
+     * write on the hot path.
      */
     fun resolveAuth(rawToken: String): TokenAuth? {
         val hash = Crypto.sha256Hex(rawToken)
-        return parseTokenAuth(RedisCache.getOrLoad("cp:tok:$hash", 60) { loadByHash(hash) })
+        return parseTokenAuth(MemoryCache.getOrLoad("cp:tok:$hash", 60) { loadByHash(hash) })
     }
 
     private fun loadByHash(hash: String): String? = transaction {
@@ -87,8 +87,7 @@ object ProxyTokenRepo {
         }
         if (deleted && hash != null) {
             // A revoked token must stop working immediately, not after the 60s TTL.
-            RedisCache.evict("cp:tok:$hash")
-            RedisCache.publishInvalidate("tok:$hash")
+            MemoryCache.evict("cp:tok:$hash")
         }
         return deleted
     }

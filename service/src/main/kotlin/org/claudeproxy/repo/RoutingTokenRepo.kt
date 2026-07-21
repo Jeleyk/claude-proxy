@@ -1,6 +1,6 @@
 package org.claudeproxy.repo
 
-import org.claudeproxy.cache.RedisCache
+import org.claudeproxy.cache.MemoryCache
 import org.claudeproxy.db.Crypto
 import org.claudeproxy.db.RoutingTokens
 import org.claudeproxy.model.ProxyTokenDto
@@ -16,7 +16,7 @@ import java.time.Instant
 /**
  * Tokens for the OpenAI/Anthropic API routing gateways. A direct analogue of
  * [ProxyTokenRepo] over its own table + cache namespace (`cp:rtok:<hash>`), so a revoked
- * routing token stops working within the 60s TTL (immediately on delete via pub/sub).
+ * routing token stops working immediately (evicted on delete).
  * Raw tokens are `cxr_...`; only the SHA-256 is stored.
  */
 object RoutingTokenRepo {
@@ -24,7 +24,7 @@ object RoutingTokenRepo {
     /** Resolves a raw routing token to its owner + token id, or null (cached, DB fallback). */
     fun resolveAuth(rawToken: String): TokenAuth? {
         val hash = Crypto.sha256Hex(rawToken)
-        return parseTokenAuth(RedisCache.getOrLoad("cp:rtok:$hash", 60) { loadByHash(hash) })
+        return parseTokenAuth(MemoryCache.getOrLoad("cp:rtok:$hash", 60) { loadByHash(hash) })
     }
 
     private fun loadByHash(hash: String): String? = transaction {
@@ -74,8 +74,7 @@ object RoutingTokenRepo {
             (n > 0) to h
         }
         if (deleted && hash != null) {
-            RedisCache.evict("cp:rtok:$hash")
-            RedisCache.publishInvalidate("rtok:$hash")
+            MemoryCache.evict("cp:rtok:$hash")
         }
         return deleted
     }

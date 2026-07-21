@@ -27,6 +27,7 @@ import org.claudeproxy.model.WindowKind
 import org.claudeproxy.oauth.ClaudeOAuth
 import org.claudeproxy.proxy.Http
 import org.claudeproxy.repo.GroupRepo
+import org.claudeproxy.repo.McpUsageRepo
 import org.claudeproxy.repo.ModelPriceRepo
 import org.claudeproxy.repo.OAuthAddRepo
 import org.claudeproxy.repo.ProxyTokenRepo
@@ -689,6 +690,57 @@ private fun buildTokenUsage(userId: Int, source: String, days: Int, endDate: jav
 }
 
 /**
+ * Build the per-MCP-tool call payload for one user: range-aligned daily call series per tool
+ * plus range totals, sorted by total calls desc. Claude Code datapath only — the gateway
+ * reports MCP tool_use blocks solely for `source="proxy"` traffic.
+ */
+private fun buildMcpUsage(userId: Int, days: Int, endDate: java.time.LocalDate): McpUsagePayload {
+    val n = days.coerceIn(1, 90)
+    val startDate = endDate.minusDays((n - 1).toLong())
+    val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val dayLabels = (0 until n).map { startDate.plusDays(it.toLong()).toString() }
+    val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
+
+    val perTool = HashMap<String, LongArray>() // tool -> per-day calls
+    McpUsageRepo.dailyBucketsForUser(userId, start, end).forEach { b ->
+        val i = idx[b.date] ?: return@forEach
+        perTool.getOrPut(b.toolName) { LongArray(n) }[i] += b.calls
+    }
+    val tools = perTool.map { (name, arr) -> McpToolSeriesDto(name, arr.toList(), arr.sum()) }
+        .sortedByDescending { it.totalCalls }
+    return McpUsagePayload(dayLabels, tools)
+}
+
+/**
+ * Build the headline stats payload for one user. [source] ("proxy" | "routing" | null = both)
+ * filters the today/total counters, per-model tables and the recent list; the two daily-limit
+ * gauges always stay on their own basis (shared-pool spend of their datapath), matching how the
+ * limits are actually enforced. Shared by "My Stats" and the admin per-user view.
+ */
+private fun buildUserStats(userId: Int, source: String?, canAccounts: Boolean): MyStatsPayload {
+    val startOfDay = UserRepo.startOfUtcDay()
+    val today = UsageRepo.userTotals(userId, startOfDay, source = source)
+    val total = UsageRepo.userTotals(userId, source = source)
+    val recent = UsageRepo.recentForUser(userId, 20, source)
+    return MyStatsPayload(
+        todayCost = today.cost, todayClean = today.clean, todayRequests = today.requests,
+        totalCost = total.cost, totalClean = total.clean, totalRequests = total.requests,
+        dailyCostLimit = UserRepo.dailyLimitOf(userId),
+        proxyTodayCost = UsageRepo.userTotals(userId, startOfDay, globalOnly = true, source = "proxy").cost,
+        dailyRoutingCostLimit = UserRepo.dailyRoutingLimitOf(userId),
+        routingTodayCost = UsageRepo.userTotals(userId, startOfDay, globalOnly = true, source = "routing").cost,
+        perModel = UsageRepo.userPerModel(userId, source = source),
+        perModelToday = UsageRepo.userPerModel(userId, startOfDay, source),
+        recent = if (canAccounts) recent else recent.map { it.copy(accountName = null, accountId = 0) },
+    )
+}
+
+/** Optional `source` query param: "proxy" | "routing", anything else = no filter. */
+private fun io.ktor.server.application.ApplicationCall.sourceParam(): String? =
+    parameters["source"]?.takeIf { it == "proxy" || it == "routing" }
+
+/**
  * Build bucketed window-utilization series (5h + weekly) for a range, with carry-forward.
  * [keep] decides which account ids contribute — pool-wide excludes personal accounts; the
  * per-user view keeps only that user's personal accounts.
@@ -828,12 +880,14 @@ private fun Route.statsRoutes() {
     }
     post("/stats/reset") {
         call.requirePermission(Permission.STATS_VIEW)
+        McpUsageRepo.clearAll()
         call.respond(MessageResponse("Cleared ${UsageRepo.clearAll()} usage records for all users"))
     }
     post("/users/{id}/stats/reset") {
         call.requirePermission(Permission.USERS_MANAGE)
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        McpUsageRepo.clearUser(id)
         call.respond(MessageResponse("Cleared ${UsageRepo.clearUser(id)} usage records"))
     }
     post("/stats/mine/reset") {
@@ -841,26 +895,13 @@ private fun Route.statsRoutes() {
         // Resetting own stats zeroes today's spend, so it can bypass a daily limit — gate it.
         val ok = Permission.STATS_RESET_OWN in user.permissions || Permission.ADMIN in user.permissions
         if (!ok) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_RESET_OWN")
+        McpUsageRepo.clearUser(user.id)
         call.respond(MessageResponse("Cleared ${UsageRepo.clearUser(user.id)} of your usage records"))
     }
     get("/stats/mine") {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
-        // "today" mirrors the daily-limit basis (shared-pool PROXY spend, paired with dailyCostLimit
-        // below); routing spend has its own limit + page. All-time/history/charts stay complete.
-        val today = UsageRepo.userTotals(user.id, UserRepo.startOfUtcDay(), globalOnly = true, source = "proxy")
-        val total = UsageRepo.userTotals(user.id)
-        val recent = UsageRepo.recentForUser(user.id, 20)
-        call.respond(
-            MyStatsPayload(
-                todayCost = today.cost, todayClean = today.clean, todayRequests = today.requests,
-                totalCost = total.cost, totalClean = total.clean, totalRequests = total.requests,
-                dailyCostLimit = UserRepo.dailyLimitOf(user.id),
-                perModel = UsageRepo.userPerModel(user.id),
-                perModelToday = UsageRepo.userPerModel(user.id, UserRepo.startOfUtcDay()),
-                recent = if (user.canAccounts()) recent else recent.map { it.copy(accountName = null, accountId = 0) },
-            ),
-        )
+        call.respond(buildUserStats(user.id, call.sourceParam(), user.canAccounts()))
     }
     // Per-user charts mirroring the pool-wide graphs: Spend/Tokens cover ALL of the user's own
     // usage (any account), while per-account + window series are scoped to the user's personal accounts.
@@ -868,17 +909,19 @@ private fun Route.statsRoutes() {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
         val (days, endDate) = call.rangeParams()
+        val source = call.sourceParam()
         call.respond(buildDaily(days, endDate, includeAccounts = true,
             accountFilter = AccountRepo.personalIdsOf(user.id),
-            fetch = { s, e -> UsageRepo.dailyBucketsForUser(user.id, s, e) }))
+            fetch = { s, e -> UsageRepo.dailyBucketsForUser(user.id, s, e, source) }))
     }
     get("/stats/mine/tokens") {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
         val (days, endDate) = call.rangeParams()
+        val source = call.sourceParam()
         call.respond(buildTokens(days, endDate, includeAccounts = true,
             accountFilter = AccountRepo.personalIdsOf(user.id),
-            fetch = { s, e -> UsageRepo.tokenBucketsForUser(user.id, s, e) }))
+            fetch = { s, e -> UsageRepo.tokenBucketsForUser(user.id, s, e, source) }))
     }
     // Per-inbound-token usage for the caller's Tokens / API Routing pages: all-time totals per
     // token (table summary) + daily cost/token series for the charts. Strictly the caller's own
@@ -889,12 +932,94 @@ private fun Route.statsRoutes() {
         val (days, endDate) = call.rangeParams()
         call.respond(buildTokenUsage(user.id, source, days, endDate))
     }
+    // Per-MCP-tool call counts for the caller (Claude Code datapath): daily series + range totals.
+    get("/stats/mine/mcp") {
+        val user = call.requireUser()
+        if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
+        val (days, endDate) = call.rangeParams()
+        call.respond(buildMcpUsage(user.id, days, endDate))
+    }
     get("/stats/mine/windows") {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
         val (days, endDate) = call.rangeParams()
         val mine = AccountRepo.personalIdsOf(user.id)
         call.respond(buildWindows(days, endDate, includeAccounts = true, keep = { it in mine }))
+    }
+
+    // ---- admin per-user statistics (users.manage): the same views as "My Stats", for any user ----
+
+    // Aggregate overview of every user's spend (today + all-time, split by datapath).
+    get("/users/stats/overview") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val users = UserRepo.list().associateBy { it.id }
+        val rows = UsageRepo.overviewByUser(UserRepo.startOfUtcDay()).associateBy { it.userId }
+        // every user appears (even with zero usage); unattributed events get a userId=null line
+        val ids: List<Int?> = (users.keys + rows.keys).distinct()
+        val overview = ids.map { id ->
+            val u = id?.let { users[it] }
+            val r = rows[id]
+            UserStatsOverviewDto(
+                userId = id, username = u?.username,
+                enabled = u?.enabled ?: true,
+                dailyCostLimit = u?.dailyCostLimit, dailyRoutingCostLimit = u?.dailyRoutingCostLimit,
+                todayProxyCost = r?.todayProxyCost ?: 0.0, todayRoutingCost = r?.todayRoutingCost ?: 0.0,
+                todayCost = r?.todayCost ?: 0.0, todayRequests = r?.todayRequests ?: 0, todayTokens = r?.todayTokens ?: 0,
+                totalProxyCost = r?.totalProxyCost ?: 0.0, totalRoutingCost = r?.totalRoutingCost ?: 0.0,
+                totalCost = r?.totalCost ?: 0.0, totalRequests = r?.totalRequests ?: 0, totalTokens = r?.totalTokens ?: 0,
+                lastActivity = r?.lastActivity?.toString(),
+            )
+        }.sortedByDescending { it.totalCost }
+        call.respond(overview)
+    }
+    get("/users/{id}/stats") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+            ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        call.respond(buildUserStats(uid, call.sourceParam(), canAccounts = true))
+    }
+    get("/users/{id}/stats/daily") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+            ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val (days, endDate) = call.rangeParams()
+        val source = call.sourceParam()
+        call.respond(buildDaily(days, endDate, includeAccounts = true,
+            accountFilter = AccountRepo.personalIdsOf(uid),
+            fetch = { s, e -> UsageRepo.dailyBucketsForUser(uid, s, e, source) }))
+    }
+    get("/users/{id}/stats/tokens") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+            ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val (days, endDate) = call.rangeParams()
+        val source = call.sourceParam()
+        call.respond(buildTokens(days, endDate, includeAccounts = true,
+            accountFilter = AccountRepo.personalIdsOf(uid),
+            fetch = { s, e -> UsageRepo.tokenBucketsForUser(uid, s, e, source) }))
+    }
+    get("/users/{id}/stats/token-usage") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+            ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val source = if (call.parameters["source"] == "routing") "routing" else "proxy"
+        val (days, endDate) = call.rangeParams()
+        call.respond(buildTokenUsage(uid, source, days, endDate))
+    }
+    get("/users/{id}/stats/mcp") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+            ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val (days, endDate) = call.rangeParams()
+        call.respond(buildMcpUsage(uid, days, endDate))
+    }
+    get("/users/{id}/stats/windows") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+            ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val (days, endDate) = call.rangeParams()
+        val theirs = AccountRepo.personalIdsOf(uid)
+        call.respond(buildWindows(days, endDate, includeAccounts = true, keep = { it in theirs }))
     }
 }
 

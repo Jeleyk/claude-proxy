@@ -27,8 +27,6 @@ data class Config(
     // Shared secret gating the private /internal/* control API (used by the Go gateway).
     // Null during rollout — the datapath still works without it.
     val internalToken: String?,
-    // Redis connection URL for the service-side cache + pub/sub. Null => cache disabled (DB-only).
-    val redisUrl: String?,
 ) {
     companion object {
         fun load(): Config {
@@ -59,7 +57,6 @@ data class Config(
                 databaseUser = env("DATABASE_USER", "claudeproxy")!!,
                 databasePassword = env("DATABASE_PASSWORD", "")!!,
                 internalToken = env("INTERNAL_TOKEN"),
-                redisUrl = env("REDIS_URL"),
             )
         }
 

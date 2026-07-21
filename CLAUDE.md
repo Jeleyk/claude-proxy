@@ -30,13 +30,13 @@ them through the same account pool as the Claude Code proxy. They authenticate w
 tokens** (`cxr_…`, gated by `ROUTING_USE`), meter spend against a **separate per-user daily USD
 limit** (`users.daily_routing_cost_limit`), and tag usage rows `source="routing"` (proxy rows are
 `source="proxy"`) so the two datapaths share stats but keep independent limits. All three gateways
-are one Go module (`gateway/`, binaries under `cmd/`); they never touch Postgres/Redis.
+are one Go module (`gateway/`, binaries under `cmd/`); they never touch Postgres.
 
 Top-level dirs: `frontend/` (React) · `service/` (Kotlin business logic + control API + Kotlin
 datapath/rollback) · `gateway/` (Go — one module: the Claude Code datapath at `gateway/main.go`
 plus `cmd/openai` + `cmd/anthropic` routing gateways, shared `internal/`) · `deploy/` (nginx config
 + Dockerfiles).
-Containers: `claude-proxy-{nginx,front,service,gateway,gateway-openai,gateway-anthropic,redis,db}`.
+Containers: `claude-proxy-{nginx,front,service,gateway,gateway-openai,gateway-anthropic,db}`.
 `docker-compose.yml`, `.env.example`, `.dockerignore` stay at the repo root (compose sits next
 to server runtime state). See `docs/superpowers/specs/2026-07-12-repo-restructure-nginx-routing-design.md`.
 
@@ -45,10 +45,11 @@ to server runtime state). See `docs/superpowers/specs/2026-07-12-repo-restructur
 - **Backend:** Kotlin 2.2, Ktor 3.2 (Netty engine), Exposed 0.58 ORM, HikariCP, JVM target 21.
 - **Gateway:** Go 1.23 (stdlib `net/http` only, no framework) — the datapath in Spec B.
 - **DB:** PostgreSQL 16 in production; SQLite fallback when `DATABASE_URL` is unset.
-- **Cache:** Redis 7 (`redis:7-alpine`), **service-internal only** — a cache + pub/sub
-  accelerator, never a source of truth. Empty/restarted Redis is only ever a cold cache
-  (transparent DB fallback). Disabled when `REDIS_URL` is unset. The **gateway never touches
-  Redis or Postgres** — only the service does.
+- **Cache:** in-process `MemoryCache` (service-side TTL map) — hot-path accelerator (token
+  resolve, daily spend), never a source of truth: every miss falls through to the DB, a restart
+  is just a cold cache. Single-instance by design; if the service is ever scaled horizontally
+  this must become a shared cache again (a Redis implementation lived here until 2026-07 — see
+  git history).
 - **Frontend:** React 18 + Vite + TypeScript, **react-router-dom** for section URLs, hand-rolled
   SVG charts, no UI framework. Builds to `frontend/dist`; the nginx router serves it (same origin
   as the API — no CORS in prod).
@@ -65,7 +66,7 @@ to server runtime state). See `docs/superpowers/specs/2026-07-12-repo-restructur
 | `accounts/` | `AccountPool` (selection/rotation/fallback), `AccountRepo`, `RateLimitHeaders` (parse `anthropic-ratelimit-*`), `TokenRefresher` (background OAuth refresh), `LimitProbe`/`LimitScheduler`, `UpstreamAuth`, `Secrets`. |
 | `api/` | `AdminRoutes` (REST API for the UI), `Dtos`; `InternalRoutes` + `InternalDtos` (the private `/internal/resolve` + `/internal/usage` control API for the Go gateway, gated by `X-Internal-Token`). |
 | `datapath/` | `DatapathService` — the reusable resolve-a-request-into-an-ordered-plan + apply-an-outcome logic, shared by the Kotlin datapath and the control API (selection/crypto/limit bookkeeping stays here). |
-| `cache/` | `RedisCache` — Lettuce wrapper: cache-with-DB-fallback + pub/sub invalidation; no-op/passthrough when `REDIS_URL` is unset. |
+| `cache/` | `MemoryCache` — in-process TTL cache with DB fallback (token resolve, daily spend); evicted on token delete. |
 | `auth/` | `Security` (session cookies), `Passwords` (bcrypt). |
 | `db/` | `Database` (init + seed), `Tables` (Exposed schema), `Crypto` (AES-256-GCM for account secrets at rest). |
 | `model/Models.kt` | `Permission`/`AccountType`/`WindowKind`/health enums + serializable DTOs. |
@@ -87,7 +88,7 @@ cd gateway && go test ./...    # Go gateway unit tests (go vet ./... too)
 cd gateway && go run .            # Claude Code datapath gateway on :9000 (needs SERVICE_URL + INTERNAL_TOKEN)
 cd gateway && go run ./cmd/openai    # OpenAI routing gateway on :9100 (SERVICE_URL + INTERNAL_TOKEN; DEFAULT_MODEL opt.)
 cd gateway && go run ./cmd/anthropic # Anthropic routing gateway on :9200
-docker-compose up -d --build   # nginx (:8080) + front + service + gateway(+openai/anthropic) + redis + postgres
+docker-compose up -d --build   # nginx (:8080) + front + service + gateway(+openai/anthropic) + postgres
 ```
 
 The Gradle project now lives under `service/` — run `./gradlew` from there (or `service/gradlew
@@ -146,6 +147,12 @@ overrides in the `service` `environment:` block — **do not remove them**:
   report **utilization**, not remaining/limit.
 - **Cost model:** per-model USD pricing (input / output / cache_read / cache_write) in
   `ModelPrices`; per-request cost from the response usage; optional per-user daily USD limit.
+- **MCP-call accounting:** the Claude Code gateway counts MCP tool invocations — `tool_use`
+  content blocks named `mcp__server__tool` — via a structured SSE parse (`internal/proxy/mcpscan.go`,
+  riding `anthropic.SSEParser` next to the regex usage scan) and the buffered-JSON path, ships
+  them as `UsageReport.mcpCalls`, and the service writes one `mcp_tool_calls` row per
+  (request, tool). Served by `/api/stats/mine/mcp` + `/api/users/{id}/stats/mcp`; "MCP tools"
+  block in the shared `UserStatsView`. Proxy datapath only (routing gateways don't report it).
 - **Proxy tokens:** `cxp_...` (Claude Code datapath); **routing tokens:** `cxr_...` (OpenAI/Anthropic
   gateways) — distinct namespaces (a `cxp_` never authenticates routing and vice versa), both stored
   as SHA-256 and presented inbound via `Authorization: Bearer` or `x-api-key`.

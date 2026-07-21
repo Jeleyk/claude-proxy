@@ -11,6 +11,7 @@ import { RoutingTokens } from './pages/RoutingTokens';
 import { ModelPricing } from './pages/ModelPricing';
 import { Stats } from './pages/Stats';
 import { MyStats } from './pages/MyStats';
+import { UserStats } from './pages/UserStats';
 
 interface NavDef {
   path: string;
@@ -89,7 +90,10 @@ function Shell({ user, setUser }: { user: UserDto; setUser: (u: UserDto | null) 
   }
 
   const allowed = NAV.filter((n) => navAllowed(user, n));
-  const active = NAV.find((n) => n.path === location.pathname);
+  // prefix match so nested paths keep their section's label; the per-user stats view
+  // (/user-stats/5, opened from the Users list) belongs to the Users section
+  const active = NAV.find((n) => location.pathname === n.path || location.pathname.startsWith(n.path + '/'))
+    ?? (location.pathname.startsWith('/user-stats') ? NAV.find((n) => n.path === '/users') : undefined);
   const activeLabel = active?.label ?? 'claude-proxy';
   const landing = firstAllowedPath(user);
 
@@ -150,6 +154,7 @@ function Shell({ user, setUser }: { user: UserDto; setUser: (u: UserDto | null) 
             <Route path="/tokens" element={<RequirePerm user={user} perm="PROXY_USE"><Tokens /></RequirePerm>} />
             <Route path="/routing" element={<RequirePerm user={user} perm="ROUTING_USE"><RoutingTokens /></RequirePerm>} />
             <Route path="/pricing" element={<RequirePerm user={user} perm="ADMIN"><ModelPricing /></RequirePerm>} />
+            <Route path="/user-stats/:id" element={<RequirePerm user={user} perm="USERS_MANAGE"><UserStats /></RequirePerm>} />
             <Route path="/users" element={<RequirePerm user={user} perm="USERS_MANAGE"><Users isAdmin={has(user, 'ADMIN')} /></RequirePerm>} />
             <Route path="*" element={<Navigate to={landing} replace />} />
           </Routes>

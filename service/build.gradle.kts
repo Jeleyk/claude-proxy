@@ -44,9 +44,6 @@ dependencies {
     // Security
     implementation("at.favre.lib:bcrypt:0.10.2")
 
-    // Redis cache + pub/sub (service-internal accelerator; DB stays source of truth)
-    implementation("io.lettuce:lettuce-core:6.4.0.RELEASE")
-
     // Serialization / util
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")

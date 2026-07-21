@@ -12,7 +12,7 @@ func TestRelaySSEFlushesHeadAndScansUsage(t *testing.T) {
 	data := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"usage":{"input_tokens":1200,"output_tokens":1}}}` + "\n\n"
 	rec := httptest.NewRecorder()
-	scan, status := relaySSEInterval(rec, io.NopCloser(strings.NewReader(data)), 200, "text/event-stream",
+	scan, _, status := relaySSEInterval(rec, io.NopCloser(strings.NewReader(data)), 200, "text/event-stream",
 		func() (string, int) { return "", 0 }, time.Hour)
 
 	if status != 200 {
@@ -55,7 +55,7 @@ func TestRelaySSEInjectsMidStreamError(t *testing.T) {
 	}()
 	rec := httptest.NewRecorder()
 	called := false
-	scan, status := relaySSEInterval(rec, pr, 200, "text/event-stream", func() (string, int) {
+	scan, _, status := relaySSEInterval(rec, pr, 200, "text/event-stream", func() (string, int) {
 		called = true
 		return "event: error\ndata: injected-retry\n\n", 529
 	}, time.Hour)

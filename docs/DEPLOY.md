@@ -11,7 +11,7 @@ Claude Code / browser
          → claude-proxy-service (service:8787)  # /api + /internal control API + Kotlin datapath (rollback)
          → claude-proxy-gateway (gateway:9000)  # /gateway(→/v1), /v1 — Go datapath (Spec B)
            → claude-proxy-service /internal/resolve + /internal/usage (crypto, pool, usage)
-             → Postgres claude-proxy-db (./pgdata) · Redis claude-proxy-redis (cache, no persistence)
+             → Postgres claude-proxy-db (./pgdata)
 ```
 
 Only the host-nginx **upstream** changed: `proxy_pass http://127.0.0.1:8787` →
@@ -26,15 +26,12 @@ is now `https://proxy.example.com/gateway` (Claude Code appends `/v1/…`).
   `deploy/Dockerfile.service` (context = root). Container name `claude-proxy-service`. **No host
   port** — reachable only as `service:8787` on the compose network. `env_file: .env` plus an
   `environment:` block pinning `BIND_HOST=0.0.0.0`, `PUBLIC_DOMAIN=proxy.example.com`,
-  `INTERNAL_TOKEN=${INTERNAL_TOKEN}`, and `REDIS_URL=redis://redis:6379`. SQLite dir bind-mounted
+  and `INTERNAL_TOKEN=${INTERNAL_TOKEN}`. SQLite dir bind-mounted
   at `./data`. Has a `curl /healthz` healthcheck.
 - **gateway** — Go datapath (Spec B), built from `deploy/Dockerfile.gateway`. Container
   `claude-proxy-gateway`, reachable as `gateway:9000`. Calls the service's `/internal/*` control
   API (shared `INTERNAL_TOKEN`), forwards to Anthropic. `depends_on: service (healthy)`;
   `wget /healthz` healthcheck.
-- **redis** — `redis:7-alpine`, cache-only (`--save "" --appendonly no`, no persistence).
-  Container `claude-proxy-redis`. Service-internal accelerator only; a restart just yields a cold
-  cache. `depends_on` for the service; `redis-cli ping` healthcheck.
 - **nginx** — edge router, built from `deploy/Dockerfile.nginx`. Publishes `127.0.0.1:8080:8080`.
   `depends_on: service, front, gateway (healthy)`. Config in `deploy/nginx/` — `/gateway/` and
   `/v1/` now `proxy_pass` to `gateway:9000` (revert to `service:8787` to roll back the datapath);
@@ -78,13 +75,13 @@ rsync -az --exclude '.git' ./gateway/ root@YOUR_SERVER:/opt/claude-proxy/gateway
 
 **Gateway rollout (do it in two steps so it's reversible):**
 
-1. **Deploy service + redis + gateway, leave nginx on the Kotlin datapath.** Add
+1. **Deploy service + gateway, leave nginx on the Kotlin datapath.** Add
    `INTERNAL_TOKEN=<secret>` to the server `.env` first. Rebuild without touching nginx — the
    public path is still the Kotlin datapath, so a broken gateway has **no client impact**:
 
    ```bash
    ssh root@YOUR_SERVER 'cd /opt/claude-proxy && \
-     docker-compose up -d --build --force-recreate --no-deps service redis gateway'
+     docker-compose up -d --build --force-recreate --no-deps service gateway'
    ```
 
    Verify the gateway end-to-end **from inside the compose network** (not yet public):

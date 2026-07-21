@@ -193,6 +193,8 @@ button:focus-visible, .navitem:focus-visible { outline-offset: 1px; }
 
 /* ---- tables ---- */
 .tablewrap { border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; background: var(--panel); box-shadow: var(--shadow-sm); }
+/* a token/summary table directly followed by its charts needs breathing room */
+.tablewrap + .chart-row { margin-top: 16px; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 thead th {

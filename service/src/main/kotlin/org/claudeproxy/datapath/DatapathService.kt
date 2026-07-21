@@ -6,12 +6,13 @@ import org.claudeproxy.accounts.AccountRuntime
 import org.claudeproxy.accounts.RateLimitHeaders
 import org.claudeproxy.api.CandidateDto
 import org.claudeproxy.api.UsageReport
-import org.claudeproxy.cache.RedisCache
+import org.claudeproxy.cache.MemoryCache
 import org.claudeproxy.model.AccountHealth
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.model.LimitState
 import org.claudeproxy.model.Permission
 import org.claudeproxy.model.WindowKind
+import org.claudeproxy.repo.McpUsageRepo
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.RoutingTokenRepo
 import org.claudeproxy.repo.UsageRepo
@@ -98,6 +99,7 @@ class DatapathService(private val pool: AccountPool) {
         val routing = o.source == "routing"
         val source = if (routing) "routing" else "proxy"
         UsageRepo.record(o.accountId, o.userId, o.input, o.cacheRead, o.cacheWrite, o.output, o.status, o.model, source, o.tokenId)
+        if (o.mcpCalls.isNotEmpty()) McpUsageRepo.record(o.userId, o.tokenId, o.mcpCalls)
 
         // Keep the cached daily spend fresh. Only *global* (shared-pool) usage counts toward the
         // per-user daily limit; personal accounts are the user's own quota (exempt). Proxy and
@@ -106,7 +108,7 @@ class DatapathService(private val pool: AccountPool) {
         val ownerId = pool.get(o.accountId)?.ownerId
         if (o.userId != null && ownerId == null) {
             val cost = ModelPriceRepo.costOf(o.model, o.input, o.cacheRead, o.cacheWrite, o.output)
-            if (cost > 0.0) RedisCache.incrExistingByFloat(spendKey(o.userId, routing), cost)
+            if (cost > 0.0) MemoryCache.incrExistingByFloat(spendKey(o.userId, routing), cost)
         }
 
         val prev = pool.get(o.accountId)?.limit ?: LimitState()
@@ -158,13 +160,13 @@ class DatapathService(private val pool: AccountPool) {
     }
 
     /**
-     * Cached shared-pool daily spend (USD) for a user on the given datapath. Cached in Redis
+     * Cached shared-pool daily spend (USD) for a user on the given datapath. Cached in-process
      * under `cp:spend:<user>:<utcDate>` (proxy) / `cp:rspend:<user>:<utcDate>` (routing) until
      * the next UTC midnight, with a DB recompute on miss.
      */
     private fun cachedDailySpend(userId: Int, routing: Boolean): Double {
         val ttl = secondsToUtcMidnight()
-        val cached = RedisCache.getOrLoad(spendKey(userId, routing), ttl) {
+        val cached = MemoryCache.getOrLoad(spendKey(userId, routing), ttl) {
             UsageRepo.userTotals(userId, UserRepo.startOfUtcDay(), globalOnly = true, source = if (routing) "routing" else "proxy").cost.toString()
         }
         return cached?.toDoubleOrNull() ?: 0.0

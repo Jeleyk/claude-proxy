@@ -46,6 +46,8 @@ type UsageReport struct {
 	Model            *string           `json:"model"`
 	RatelimitHeaders map[string]string `json:"ratelimitHeaders"`
 	Source           string            `json:"source,omitempty"`
+	// MCP tool invocations observed in the response (tool_use blocks named "mcp__…"), by name.
+	McpCalls map[string]int64 `json:"mcpCalls,omitempty"`
 }
 
 type resolveReq struct {

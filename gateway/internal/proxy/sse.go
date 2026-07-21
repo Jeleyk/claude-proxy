@@ -12,14 +12,15 @@ import (
 // event → nginx "upstream prematurely closed connection while reading response header" (502).
 const keepAliveInterval = 15 * time.Second
 
-// relaySSE streams an SSE response to the client in real time while teeing token usage out of
-// the stream. It flushes the response head immediately, injects keep-alive comments during
-// silence, and on a retryable mid-stream error writes a normalized error frame (via onMidStreamErr)
-// so the client retries. Returns the scanned usage and the status to record for this attempt.
+// relaySSE streams an SSE response to the client in real time while teeing token usage and MCP
+// tool-call counts out of the stream. It flushes the response head immediately, injects
+// keep-alive comments during silence, and on a retryable mid-stream error writes a normalized
+// error frame (via onMidStreamErr) so the client retries. Returns the scanned usage, the MCP
+// tool-call counts (nil when none), and the status to record for this attempt.
 func relaySSE(
 	w http.ResponseWriter, upstream io.ReadCloser, status int, contentType string,
 	onMidStreamErr func() (string, int),
-) (usageScan, int) {
+) (usageScan, map[string]int64, int) {
 	return relaySSEInterval(w, upstream, status, contentType, onMidStreamErr, keepAliveInterval)
 }
 
@@ -27,7 +28,7 @@ func relaySSE(
 func relaySSEInterval(
 	w http.ResponseWriter, upstream io.ReadCloser, status int, contentType string,
 	onMidStreamErr func() (string, int), interval time.Duration,
-) (usageScan, int) {
+) (usageScan, map[string]int64, int) {
 	fl, _ := w.(http.Flusher)
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
@@ -41,6 +42,7 @@ func relaySSEInterval(
 	}
 
 	var scan usageScan
+	var mcp mcpScan
 	var errs errScan
 	recorded := status
 
@@ -75,6 +77,7 @@ func relaySSEInterval(
 		select {
 		case b := <-dataCh:
 			scan.Feed(b)
+			mcp.Feed(b)
 			errs.Feed(b)
 			if errs.retryable() != "" {
 				// A limit/overload surfaced *inside* the stream: the 200 head is already out, so
@@ -88,7 +91,7 @@ func relaySSEInterval(
 					}
 				}
 				recorded = rs
-				return scan, recorded
+				return scan, mcp.calls, recorded
 			}
 			_, _ = w.Write(b)
 			if fl != nil {
@@ -102,7 +105,7 @@ func relaySSEInterval(
 			}
 		case <-errCh:
 			// Upstream closed (EOF or error); usage already scanned.
-			return scan, recorded
+			return scan, mcp.calls, recorded
 		}
 	}
 }

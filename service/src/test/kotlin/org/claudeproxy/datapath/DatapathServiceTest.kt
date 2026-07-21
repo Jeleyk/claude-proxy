@@ -30,7 +30,7 @@ class DatapathServiceTest {
         masterKey = "test-master-key-32-chars-minimum-xx", sessionSecret = "test-master-key-32-chars-minimum-xx",
         adminUser = "admin", adminPassword = "admin", upstreamBaseUrl = "https://api.anthropic.com",
         publicBaseUrl = "", databaseUrl = "", databaseUser = "claudeproxy", databasePassword = "",
-        internalToken = null, redisUrl = null,
+        internalToken = null,
     )
 
     @BeforeTest
@@ -39,6 +39,8 @@ class DatapathServiceTest {
         val cfg = config(dbFile.absolutePath)
         Secrets.init(Crypto(cfg.masterKey))
         Db.init(cfg)
+        // Fresh DB per test but the cache is process-global: user/spend keys would leak between tests.
+        org.claudeproxy.cache.MemoryCache.clear()
         // The seeded bootstrap admin has PROXY_USE (all perms). Use it as the token owner.
         adminId = org.jetbrains.exposed.sql.transactions.transaction {
             org.claudeproxy.db.Users.selectAll().first()[org.claudeproxy.db.Users.id]
@@ -101,6 +103,29 @@ class DatapathServiceTest {
         )
         runBlocking { pool.reload() }
         return token to accId
+    }
+
+    @Test
+    fun `applyOutcome records MCP tool calls and aggregates daily buckets`() = runBlocking {
+        val accId = org.jetbrains.exposed.sql.transactions.transaction {
+            org.claudeproxy.db.Accounts.selectAll().first()[org.claudeproxy.db.Accounts.id]
+        }
+        val svc = DatapathService(pool)
+        svc.applyOutcome(
+            org.claudeproxy.api.UsageReport(
+                accountId = accId, userId = adminId, tokenId = 1, input = 10, output = 5, status = 200,
+                model = "claude-sonnet-5",
+                mcpCalls = mapOf("mcp__github__get_issue" to 2L, "mcp__memory__search" to 1L),
+            ),
+        )
+        // A report without MCP calls must not add rows.
+        svc.applyOutcome(org.claudeproxy.api.UsageReport(accountId = accId, userId = adminId, status = 200))
+
+        val now = java.time.Instant.now()
+        val buckets = org.claudeproxy.repo.McpUsageRepo.dailyBucketsForUser(adminId, now.minusSeconds(3600), now.plusSeconds(60))
+        assertEquals(2, buckets.size)
+        assertEquals(2L, buckets.first { it.toolName == "mcp__github__get_issue" }.calls)
+        assertEquals(1L, buckets.first { it.toolName == "mcp__memory__search" }.calls)
     }
 
     @Test

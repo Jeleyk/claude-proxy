@@ -161,6 +161,23 @@ object UsageEvents : Table("usage_events") {
     override val primaryKey = PrimaryKey(id)
 }
 
+/**
+ * MCP tool invocations observed on the Claude Code datapath: one row per (request, tool),
+ * counted by the gateway from `tool_use` content blocks named `mcp__server__tool` in the
+ * response. Counts only — token/cost attribution stays in [UsageEvents].
+ */
+object McpToolCalls : Table("mcp_tool_calls") {
+    val id = long("id").autoIncrement()
+    val ts = timestamp("ts")
+    val userId = integer("user_id").references(Users.id).nullable()
+    // inbound proxy token. Deliberately NOT an FK: deleting a token keeps its call history.
+    val tokenId = integer("token_id").nullable()
+    val toolName = varchar("tool_name", 256)
+    val calls = integer("calls").default(1)
+    override val primaryKey = PrimaryKey(id)
+    init { index(false, userId, ts) }
+}
+
 /** Time series of observed window utilization (0..1) per account per window. */
 object WindowSnapshots : Table("window_snapshots") {
     val id = long("id").autoIncrement()
@@ -212,6 +229,6 @@ object OAuthAddSessions : Table("oauth_add_sessions") {
 val ALL_TABLES = arrayOf(
     Users, Settings, ModelPrices, Roles, RolePermissions, UserRoles, ProxyTokens, RoutingTokens,
     AccountGroups, UserGroupAccess,
-    Accounts, AccountSecrets, AccountLimits, UsageEvents, WindowSnapshots, OAuthAddSessions,
-    SessionOwners, SessionMap,
+    Accounts, AccountSecrets, AccountLimits, UsageEvents, McpToolCalls, WindowSnapshots,
+    OAuthAddSessions, SessionOwners, SessionMap,
 )

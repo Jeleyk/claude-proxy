@@ -102,6 +102,21 @@ export interface RoleDto {
   permissions: string[];
 }
 
+/** Datapath filter for the stats views: undefined = both sources. */
+export type StatsSource = 'proxy' | 'routing' | undefined;
+
+/** Own stats live under /api/stats/mine; the admin view of another user under /api/users/{id}/stats. */
+function statsBase(uid: number | null): string {
+  return uid == null ? '/api/stats/mine' : `/api/users/${uid}/stats`;
+}
+
+function qs(params: Record<string, string | number | undefined>): string {
+  const parts = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== '')
+    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`);
+  return parts.length ? `?${parts.join('&')}` : '';
+}
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
@@ -183,11 +198,24 @@ export const api = {
   statsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/daily?days=${days}${end ? `&end=${end}` : ''}`),
   statsWindows: (days: number, end?: string) => req<WindowStats>('GET', `/api/stats/windows?days=${days}${end ? `&end=${end}` : ''}`),
   statsTokens: (days: number, end?: string) => req<TokenStats>('GET', `/api/stats/tokens?days=${days}${end ? `&end=${end}` : ''}`),
+  // Per-user statistics: uid=null → the caller's own ("My Stats"), a number → admin view of that
+  // user (USERS_MANAGE). `source` filters to one datapath ('proxy' | 'routing'); undefined = both.
+  userStats: (uid: number | null, source?: StatsSource) =>
+    req<MyStats>('GET', `${statsBase(uid)}${qs({ source })}`),
+  userStatsDaily: (uid: number | null, days: number, end?: string, source?: StatsSource) =>
+    req<DailyStats>('GET', `${statsBase(uid)}/daily${qs({ days, end, source })}`),
+  userStatsWindows: (uid: number | null, days: number, end?: string) =>
+    req<WindowStats>('GET', `${statsBase(uid)}/windows${qs({ days, end })}`),
+  userStatsTokens: (uid: number | null, days: number, end?: string, source?: StatsSource) =>
+    req<TokenStats>('GET', `${statsBase(uid)}/tokens${qs({ days, end, source })}`),
+  // Per-inbound-token usage (Tokens / API Routing pages + the stats views): all-time totals + daily series.
+  userTokenUsage: (uid: number | null, source: 'proxy' | 'routing', days: number, end?: string) =>
+    req<TokenUsage>('GET', `${statsBase(uid)}/token-usage${qs({ source, days, end })}`),
+  // Per-MCP-tool call counts (Claude Code datapath): daily series + range totals per tool.
+  userMcpUsage: (uid: number | null, days: number, end?: string) =>
+    req<McpUsage>('GET', `${statsBase(uid)}/mcp${qs({ days, end })}`),
+  usersOverview: () => req<UserStatsOverview[]>('GET', '/api/users/stats/overview'),
   myStats: () => req<MyStats>('GET', '/api/stats/mine'),
-  myStatsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/mine/daily?days=${days}${end ? `&end=${end}` : ''}`),
-  myStatsWindows: (days: number, end?: string) => req<WindowStats>('GET', `/api/stats/mine/windows?days=${days}${end ? `&end=${end}` : ''}`),
-  myStatsTokens: (days: number, end?: string) => req<TokenStats>('GET', `/api/stats/mine/tokens?days=${days}${end ? `&end=${end}` : ''}`),
-  // Per-inbound-token usage (Tokens / API Routing pages): all-time totals + daily series.
   tokenUsage: (source: 'proxy' | 'routing', days: number, end?: string) =>
     req<TokenUsage>('GET', `/api/stats/mine/token-usage?source=${source}&days=${days}${end ? `&end=${end}` : ''}`),
   setAccountOrder: (preferGlobalPool: boolean) => req<UserDto>('PATCH', '/api/my/account-order', { preferGlobalPool }),
@@ -197,14 +225,29 @@ export const api = {
 };
 
 export interface UsageSummary { accountId: number; accountName: string | null; requests: number; inputTokens: number; outputTokens: number; cost: number; }
-export interface UsageEvent { id: number; accountId: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; cost: number; httpStatus: number; model: string | null; }
+export interface UsageEvent { id: number; accountId: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; cost: number; httpStatus: number; model: string | null; source: string; }
 export interface ModelUsage { model: string | null; requests: number; cleanTokens: number; cost: number; }
 export interface ModelBreakdown { today: ModelUsage[]; allTime: ModelUsage[]; }
 export interface MyStats {
   todayCost: number; todayClean: number; todayRequests: number;
   totalCost: number; totalClean: number; totalRequests: number;
   dailyCostLimit: number | null;
+  proxyTodayCost: number;             // spend counted against dailyCostLimit today
+  dailyRoutingCostLimit: number | null;
+  routingTodayCost: number;           // spend counted against dailyRoutingCostLimit today
   perModel: ModelUsage[]; perModelToday: ModelUsage[]; recent: UsageEvent[];
+}
+export interface UserStatsOverview {
+  userId: number | null;              // null = usage left by since-deleted users
+  username: string | null;
+  enabled: boolean;
+  dailyCostLimit: number | null;
+  dailyRoutingCostLimit: number | null;
+  todayProxyCost: number; todayRoutingCost: number; todayCost: number;
+  todayRequests: number; todayTokens: number;
+  totalProxyCost: number; totalRoutingCost: number; totalCost: number;
+  totalRequests: number; totalTokens: number;
+  lastActivity: string | null;
 }
 export interface AccountSeries { accountId: number; accountName: string | null; cost: number[]; requests: number[]; }
 export interface DailyStats {
@@ -253,6 +296,13 @@ export interface TokenUsageSeries {
   totalRequests: number;
 }
 export interface TokenUsage { days: string[]; perToken: TokenUsageSeries[]; }
+
+export interface McpToolSeries {
+  name: string;                // full tool name, e.g. "mcp__github__get_issue"
+  calls: number[];             // per-day call counts, aligned with `days`
+  totalCalls: number;          // sum over the range
+}
+export interface McpUsage { days: string[]; tools: McpToolSeries[]; }
 
 export function has(user: UserDto | null, perm: string): boolean {
   return !!user && user.permissions.includes(perm);

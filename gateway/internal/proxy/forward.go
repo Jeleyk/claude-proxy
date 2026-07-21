@@ -104,13 +104,14 @@ func (h *Handler) forward(
 
 	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
 		model := modelFromRequest(outBody)
-		scan, recorded := relaySSE(w, resp.Body, resp.StatusCode, contentType, func() (string, int) {
+		scan, mcpCalls, recorded := relaySSE(w, resp.Body, resp.StatusCode, contentType, func() (string, int) {
 			return midStreamError(cands, idx)
 		})
 		report.Status = recorded
 		report.Input, report.Output = scan.Input, scan.Output
 		report.CacheRead, report.CacheWrite = scan.CacheRead, scan.CacheWrite
 		report.Model = model
+		report.McpCalls = mcpCalls
 		return forwardResult{retry: false, report: report}
 	}
 
@@ -173,10 +174,15 @@ func extractRateLimitHeaders(h http.Header) map[string]string {
 	return out
 }
 
-// fillUsageFromJSON pulls model + token counts out of a buffered JSON response.
+// fillUsageFromJSON pulls model + token counts + MCP tool-call counts out of a buffered JSON
+// response.
 func fillUsageFromJSON(report *control.UsageReport, body []byte) {
 	var obj struct {
-		Model string `json:"model"`
+		Model   string `json:"model"`
+		Content []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"content"`
 		Usage struct {
 			Input       int64 `json:"input_tokens"`
 			Output      int64 `json:"output_tokens"`
@@ -194,6 +200,11 @@ func fillUsageFromJSON(report *control.UsageReport, body []byte) {
 	report.Output = obj.Usage.Output
 	report.CacheRead = obj.Usage.CacheRead
 	report.CacheWrite = obj.Usage.CacheCreate
+	var mcp mcpScan
+	for _, block := range obj.Content {
+		mcp.count(block.Type, block.Name)
+	}
+	report.McpCalls = mcp.calls
 }
 
 // modelFromRequest reads the "model" field from the request body.

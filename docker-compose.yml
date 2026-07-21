@@ -17,19 +17,6 @@ services:
       timeout: 3s
       retries: 15
 
-  # Redis: service-side cache + pub/sub only (never a source of truth). Cache-only, no
-  # persistence — a restart just yields a cold cache that transparently rebuilds from Postgres.
-  redis:
-    image: redis:7-alpine
-    container_name: claude-proxy-redis
-    restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   # Kotlin service: management API + datapath + control API. Reachable only on the compose
   # network (nginx fronts it); no host port. DNS alias on the network is the service key: `service`.
   service:
@@ -43,8 +30,6 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     expose:
       - "8787"
@@ -60,8 +45,6 @@ services:
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-claudeproxy}
       # Shared secret gating the private /internal/* control API (also set on the gateway).
       INTERNAL_TOKEN: ${INTERNAL_TOKEN}
-      # Redis cache + pub/sub (service-internal accelerator; DB stays source of truth).
-      REDIS_URL: "redis://redis:6379"
     volumes:
       - ./data:/data
     healthcheck:
@@ -72,7 +55,7 @@ services:
 
   # Gateway: the Go datapath (Spec B). Thin data plane — resolves each request against the
   # service's /internal/* control API, forwards to Anthropic, relays SSE, reports usage back.
-  # Never touches Postgres or Redis directly. nginx flips /gateway,/v1 here in Task D3.
+  # Never touches Postgres directly. nginx flips /gateway,/v1 here in Task D3.
   gateway:
     build:
       context: .
@@ -98,7 +81,7 @@ services:
 
   # Routing gateway (OpenAI): exposes the OpenAI Chat Completions API but serves each request
   # from a Claude Code subscription via the control API (source="routing"). Same Go module as
-  # `gateway`; never touches Postgres/Redis. nginx fronts it at /routing/openai/.
+  # `gateway`; never touches Postgres. nginx fronts it at /routing/openai/.
   gateway-openai:
     build:
       context: .

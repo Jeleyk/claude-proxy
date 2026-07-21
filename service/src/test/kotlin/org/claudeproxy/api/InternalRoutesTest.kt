@@ -49,10 +49,12 @@ class InternalRoutesTest {
             masterKey = "test-master-key-32-chars-minimum-xx", sessionSecret = "test-master-key-32-chars-minimum-xx",
             adminUser = "admin", adminPassword = "admin", upstreamBaseUrl = "https://api.anthropic.com",
             publicBaseUrl = "", databaseUrl = "", databaseUser = "claudeproxy", databasePassword = "",
-            internalToken = token, redisUrl = null,
+            internalToken = token,
         )
         Secrets.init(Crypto(cfg.masterKey))
         Db.init(cfg)
+        // Fresh DB per test but the cache is process-global: user/spend keys would leak between tests.
+        org.claudeproxy.cache.MemoryCache.clear()
         adminId = transaction { Users.selectAll().first()[Users.id] }
         seededToken = ProxyTokenRepo.create(adminId, "test").token!!
         AccountRepo.create(

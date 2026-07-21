@@ -187,6 +187,7 @@ object UserRepo {
         org.claudeproxy.db.UsageEvents.update({ org.claudeproxy.db.UsageEvents.userId eq userId }) {
             it[org.claudeproxy.db.UsageEvents.userId] = null
         }
+        McpUsageRepo.detachUser(userId)
         // delete this user's personal accounts (their secrets/limits/usage cascade off Accounts)
         org.claudeproxy.db.Accounts.deleteWhere { org.claudeproxy.db.Accounts.ownerId eq userId }
         // detach global accounts this user created so the users row can be removed (Postgres FK)

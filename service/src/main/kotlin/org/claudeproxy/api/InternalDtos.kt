@@ -63,4 +63,6 @@ data class UsageReport(
     val ratelimitHeaders: Map<String, String> = emptyMap(),
     // datapath that produced this attempt: "proxy" (default) or "routing".
     val source: String = "proxy",
+    // MCP tool invocations seen in the response (tool_use blocks named "mcp__…"), by tool name.
+    val mcpCalls: Map<String, Long> = emptyMap(),
 )

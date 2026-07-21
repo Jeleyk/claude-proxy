@@ -117,16 +117,36 @@ data class StatsPayload(
 
 @Serializable
 data class MyStatsPayload(
+    // today/total reflect the selected `source` filter (null = both datapaths), across ALL accounts
     val todayCost: Double,
     val todayClean: Long,
     val todayRequests: Long,
     val totalCost: Double,
     val totalClean: Long,
     val totalRequests: Long,
+    // limit gauges are always on their own basis (shared-pool spend of one datapath), independent of the filter
     val dailyCostLimit: Double?,
-    val perModel: List<org.claudeproxy.repo.ModelUsageDto>,        // all-time, per model
-    val perModelToday: List<org.claudeproxy.repo.ModelUsageDto>,   // since start of the UTC day
+    val proxyTodayCost: Double = 0.0,           // spend counted against dailyCostLimit today
+    val dailyRoutingCostLimit: Double? = null,
+    val routingTodayCost: Double = 0.0,         // spend counted against dailyRoutingCostLimit today
+    val perModel: List<org.claudeproxy.repo.ModelUsageDto>,        // all-time, per model (source-filtered)
+    val perModelToday: List<org.claudeproxy.repo.ModelUsageDto>,   // since start of the UTC day (source-filtered)
     val recent: List<org.claudeproxy.repo.UsageEventDto>,
+)
+
+/** One user's line in the admin per-user usage overview. */
+@Serializable
+data class UserStatsOverviewDto(
+    val userId: Int?,                   // null = events left by since-deleted users
+    val username: String?,
+    val enabled: Boolean = true,
+    val dailyCostLimit: Double? = null,
+    val dailyRoutingCostLimit: Double? = null,
+    val todayProxyCost: Double, val todayRoutingCost: Double, val todayCost: Double,
+    val todayRequests: Long, val todayTokens: Long,
+    val totalProxyCost: Double, val totalRoutingCost: Double, val totalCost: Double,
+    val totalRequests: Long, val totalTokens: Long,
+    val lastActivity: String?,
 )
 
 /** Pool-wide per-model breakdown for the global Statistics page (today vs all-time toggle). */
@@ -207,6 +227,20 @@ data class TokenUsageSeriesDto(
 data class TokenUsagePayload(
     val days: List<String>,                // date labels (UTC), oldest→newest
     val perToken: List<TokenUsageSeriesDto>, // sorted by all-time cost desc
+)
+
+@Serializable
+data class McpToolSeriesDto(
+    val name: String,                      // full tool name, e.g. "mcp__github__get_issue"
+    val calls: List<Long>,                 // per-day call counts, range-aligned with `days`
+    val totalCalls: Long,                  // sum over the range
+)
+
+/** Per-MCP-tool call counts for one user on the Claude Code datapath. */
+@Serializable
+data class McpUsagePayload(
+    val days: List<String>,                // date labels (UTC), oldest→newest
+    val tools: List<McpToolSeriesDto>,     // sorted by totalCalls desc
 )
 
 @Serializable

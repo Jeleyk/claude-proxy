@@ -193,7 +193,7 @@ object AccountRepo {
             it[cipherBlob] = Secrets.encode(secret)
         }
         id
-    }.also { org.claudeproxy.cache.RedisCache.publishInvalidate("pool") }
+    }
 
     fun updateConfig(
         id: Int, name: String?, groupId: Int?, priority: Int?, threshold: Double?, coefficient: Double?,
@@ -226,7 +226,7 @@ object AccountRepo {
         AccountLimits.deleteWhere { accountId eq id }
         AccountSecrets.deleteWhere { accountId eq id }
         Accounts.deleteWhere { Accounts.id eq id } > 0
-    }.also { if (it) org.claudeproxy.cache.RedisCache.publishInvalidate("pool") }
+    }
 
     fun persistLimit(id: Int, limit: LimitState) = transaction {
         limit.windows.forEach { (kind, w) ->

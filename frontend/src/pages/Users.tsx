@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { AccountDto, api, fmtTokens, fmtUsd, GroupDto, PoolStats, RoleDto, UserDto } from '../api';
 import { Check, Modal, NumberInput, Switch } from '../ui';
 
 export function Users({ isAdmin }: { isAdmin: boolean }) {
+  const navigate = useNavigate();
   const [users, setUsers] = useState<UserDto[]>([]);
   const [roles, setRoles] = useState<RoleDto[]>([]);
   const [groups, setGroups] = useState<GroupDto[]>([]);
@@ -52,6 +54,7 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
                 <td>
                   <div className="row">
                     <button className="sm ghost" onClick={() => setEditing(u)}>Edit</button>
+                    <button className="sm ghost" onClick={() => navigate(`/user-stats/${u.id}`)}>Stats</button>
                     <button className="sm ghost" onClick={() => setAccountsFor(u)}>Accounts</button>
                     <button className="sm ghost" onClick={async () => { if (confirm(`Reset ${u.username}'s statistics?`)) { const r = await api.resetUserStats(u.id); alert(r.message); load(); } }}>Reset stats</button>
                     <button className="sm danger" onClick={async () => { if (confirm(`Delete ${u.username}?`)) { await api.deleteUser(u.id); load(); } }}>Delete</button>

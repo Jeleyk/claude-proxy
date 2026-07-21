@@ -1,14 +1,51 @@
 // Per-inbound-token usage: the "Your tokens" table with all-time token/cost totals, plus
 // daily cost + tokens charts stacked per token. Shared by the Proxy Tokens (source="proxy")
-// and API Routing (source="routing") pages.
+// and API Routing (source="routing") pages, and reused by the My Stats / User Stats views.
 import { useEffect, useMemo, useState } from 'react';
 import { api, fmtTokens, fmtUsd, ProxyTokenDto, TokenUsage, TokenUsageSeries } from '../api';
 import { ChartMode, SERIES_COLORS, StackedChart } from '../Chart';
 import { Legend, RangeControls, todayUtc } from './statsShared';
 
-function seriesLabel(s: TokenUsageSeries): string {
+export function seriesLabel(s: TokenUsageSeries): string {
   if (s.tokenId == null) return 'unattributed';
   return s.name ?? `deleted #${s.tokenId}`;
+}
+
+/** Tokens with any usage, colored consistently across the table + both charts. */
+export function usageItems(data: TokenUsage | null) {
+  return (data?.perToken ?? [])
+    .filter((s) => s.totalRequests > 0 || s.cost.some((v) => v > 0) || s.tokens.some((v) => v > 0))
+    .map((s, i) => ({ key: String(s.tokenId ?? 'none'), label: seriesLabel(s), color: SERIES_COLORS[i % SERIES_COLORS.length], s }));
+}
+
+/** The Spend/Tokens per-day stacked chart pair for one datapath's per-token series. */
+export function TokenUsageChartsRow({ data, mode }: { data: TokenUsage; mode: ChartMode }) {
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const items = useMemo(() => usageItems(data), [data]);
+  const visible = items.filter((it) => !hidden.has(it.key));
+  const costTotal = visible.reduce((t, it) => t + it.s.cost.reduce((a, b) => a + b, 0), 0);
+  const tokTotal = visible.reduce((t, it) => t + it.s.tokens.reduce((a, b) => a + b, 0), 0);
+
+  function toggle(k: string) {
+    setHidden((h) => { const n = new Set(h); if (n.has(k)) n.delete(k); else n.add(k); return n; });
+  }
+
+  return (
+    <div className="chart-row">
+      <div className="panel">
+        <div className="chart-card-head"><span className="t">Spend per day</span><span className="v">{fmtUsd(costTotal)}</span></div>
+        <StackedChart days={data.days} height={190} fmt={fmtUsd} mode={mode}
+          series={visible.map((it) => ({ name: it.label, color: it.color, values: it.s.cost }))} />
+        <Legend items={items} hidden={hidden} onToggle={toggle} />
+      </div>
+      <div className="panel">
+        <div className="chart-card-head"><span className="t">Tokens per day</span><span className="v">{fmtTokens(tokTotal)}</span></div>
+        <StackedChart days={data.days} height={190} fmt={fmtTokens} mode={mode}
+          series={visible.map((it) => ({ name: it.label, color: it.color, values: it.s.tokens }))} />
+        <Legend items={items} hidden={hidden} onToggle={toggle} />
+      </div>
+    </div>
+  );
 }
 
 export function TokenUsageSection({ source, tokens, onDelete, emptyHint }: {
@@ -21,7 +58,6 @@ export function TokenUsageSection({ source, tokens, onDelete, emptyHint }: {
   const [days, setDays] = useState(7);
   const [endDate, setEndDate] = useState(todayUtc());
   const [mode, setMode] = useState<ChartMode>('bars');
-  const [hidden, setHidden] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let gone = false;
@@ -37,17 +73,7 @@ export function TokenUsageSection({ source, tokens, onDelete, emptyHint }: {
     return m;
   }, [data]);
 
-  const items = useMemo(() => (data?.perToken ?? [])
-    .filter((s) => s.totalRequests > 0 || s.cost.some((v) => v > 0) || s.tokens.some((v) => v > 0))
-    .map((s, i) => ({ key: String(s.tokenId ?? 'none'), label: seriesLabel(s), color: SERIES_COLORS[i % SERIES_COLORS.length], s })), [data]);
-
-  const visible = items.filter((it) => !hidden.has(it.key));
-  const costTotal = visible.reduce((t, it) => t + it.s.cost.reduce((a, b) => a + b, 0), 0);
-  const tokTotal = visible.reduce((t, it) => t + it.s.tokens.reduce((a, b) => a + b, 0), 0);
-
-  function toggle(k: string) {
-    setHidden((h) => { const n = new Set(h); if (n.has(k)) n.delete(k); else n.add(k); return n; });
-  }
+  const hasUsage = usageItems(data).length > 0;
 
   return (
     <>
@@ -74,24 +100,11 @@ export function TokenUsageSection({ source, tokens, onDelete, emptyHint }: {
         </table>
       </div>
 
-      {items.length > 0 && data && (
+      {hasUsage && data && (
         <>
           <h2>Usage by token</h2>
           <RangeControls days={days} onDays={setDays} endDate={endDate} onEndDate={setEndDate} mode={mode} onMode={setMode} />
-          <div className="chart-row">
-            <div className="panel">
-              <div className="chart-card-head"><span className="t">Spend per day</span><span className="v">{fmtUsd(costTotal)}</span></div>
-              <StackedChart days={data.days} height={190} fmt={fmtUsd} mode={mode}
-                series={visible.map((it) => ({ name: it.label, color: it.color, values: it.s.cost }))} />
-              <Legend items={items} hidden={hidden} onToggle={toggle} />
-            </div>
-            <div className="panel">
-              <div className="chart-card-head"><span className="t">Tokens per day</span><span className="v">{fmtTokens(tokTotal)}</span></div>
-              <StackedChart days={data.days} height={190} fmt={fmtTokens} mode={mode}
-                series={visible.map((it) => ({ name: it.label, color: it.color, values: it.s.tokens }))} />
-              <Legend items={items} hidden={hidden} onToggle={toggle} />
-            </div>
-          </div>
+          <TokenUsageChartsRow data={data} mode={mode} />
         </>
       )}
     </>

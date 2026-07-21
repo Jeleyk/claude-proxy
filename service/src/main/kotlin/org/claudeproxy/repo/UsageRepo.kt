@@ -19,7 +19,7 @@ import java.time.ZoneOffset
 data class UsageEventDto(
     val id: Int, val accountId: Int, val accountName: String?, val userId: Int?, val ts: String,
     val inputTokens: Long, val outputTokens: Long, val cacheReadTokens: Long, val cacheWriteTokens: Long,
-    val cost: Double, val httpStatus: Int, val model: String?,
+    val cost: Double, val httpStatus: Int, val model: String?, val source: String = "proxy",
 )
 
 @Serializable
@@ -133,12 +133,15 @@ object UsageRepo {
         return acc.map { (m, a) -> ModelUsageDto(m, a[0].toLong(), a[1].toLong(), a[2]) }.sortedByDescending { it.cost }
     }
 
-    /** Per-model breakdown for a single user; [since] limits to events at/after that instant. */
-    fun userPerModel(userId: Int, since: Instant? = null): List<ModelUsageDto> = transaction {
+    /**
+     * Per-model breakdown for a single user; [since] limits to events at/after that instant,
+     * [source] ("proxy" | "routing") restricts to one datapath.
+     */
+    fun userPerModel(userId: Int, since: Instant? = null, source: String? = null): List<ModelUsageDto> = transaction {
         val q = if (since != null)
             UsageEvents.selectAll().where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
         else UsageEvents.selectAll().where { UsageEvents.userId eq userId }
-        perModelOf(q)
+        perModelOf(if (source == null) q else q.filter { it[UsageEvents.sourceCol] == source })
     }
 
     /** Pool-wide per-model breakdown (excludes personal accounts); [since] limits the window. */
@@ -148,10 +151,11 @@ object UsageRepo {
         perModelOf(if (personal.isEmpty()) q else q.filter { it[UsageEvents.accountId] !in personal })
     }
 
-    fun recentForUser(userId: Int, limit: Int = 100): List<UsageEventDto> = transaction {
+    fun recentForUser(userId: Int, limit: Int = 100, source: String? = null): List<UsageEventDto> = transaction {
         val names = accountNames()
-        UsageEvents.selectAll().where { UsageEvents.userId eq userId }
-            .orderBy(UsageEvents.ts, SortOrder.DESC).limit(limit).map { it.toEventDto(names) }
+        val q = if (source == null) UsageEvents.selectAll().where { UsageEvents.userId eq userId }
+        else UsageEvents.selectAll().where { (UsageEvents.userId eq userId) and (UsageEvents.sourceCol eq source) }
+        q.orderBy(UsageEvents.ts, SortOrder.DESC).limit(limit).map { it.toEventDto(names) }
     }
 
     fun totalsPerAccount(): Map<Int, Totals> = transaction {
@@ -189,11 +193,12 @@ object UsageRepo {
     }
 
     /** Daily (account, day) buckets for one user's own usage in [start, end), across ALL accounts (incl. personal). */
-    fun dailyBucketsForUser(userId: Int, start: Instant, end: Instant): List<DailyBucketDto> = transaction {
+    fun dailyBucketsForUser(userId: Int, start: Instant, end: Instant, source: String? = null): List<DailyBucketDto> = transaction {
         val acc = HashMap<Pair<Int, String>, DoubleArray>() // (accountId, date) -> [cost, requests, tokens]
         UsageEvents.selectAll()
             .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
             .forEach { row ->
+                if (source != null && row[UsageEvents.sourceCol] != source) return@forEach
                 val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
                 val a = acc.getOrPut(row[UsageEvents.accountId] to date) { DoubleArray(3) }
                 a[0] += row[UsageEvents.cost]
@@ -204,11 +209,12 @@ object UsageRepo {
     }
 
     /** Daily (account, model, day) token buckets for one user's own usage in [start, end), across ALL accounts (incl. personal). */
-    fun tokenBucketsForUser(userId: Int, start: Instant, end: Instant): List<TokenBucketDto> = transaction {
+    fun tokenBucketsForUser(userId: Int, start: Instant, end: Instant, source: String? = null): List<TokenBucketDto> = transaction {
         val acc = HashMap<Triple<Int, String?, String>, LongArray>() // (accountId, model, date) -> [in, out, cacheRead, cacheWrite]
         UsageEvents.selectAll()
             .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
             .forEach { row ->
+                if (source != null && row[UsageEvents.sourceCol] != source) return@forEach
                 val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
                 val a = acc.getOrPut(Triple(row[UsageEvents.accountId], row[UsageEvents.model], date)) { LongArray(4) }
                 a[0] += row[UsageEvents.inputTokens]
@@ -267,6 +273,44 @@ object UsageRepo {
         acc.map { (k, a) -> TokenBucketDto(k.first, k.second, k.third, a[0], a[1], a[2], a[3]) }
     }
 
+    /**
+     * One user's aggregate line for the admin per-user overview: today (since [startOfDay]) and
+     * all-time totals, split by datapath. userId null groups unattributed (deleted-user) events.
+     */
+    class UserOverviewRow(
+        val userId: Int?,
+        var todayProxyCost: Double = 0.0, var todayRoutingCost: Double = 0.0,
+        var todayRequests: Long = 0, var todayTokens: Long = 0,
+        var totalProxyCost: Double = 0.0, var totalRoutingCost: Double = 0.0,
+        var totalRequests: Long = 0, var totalTokens: Long = 0,
+        var lastActivity: Instant? = null,
+    ) {
+        val todayCost: Double get() = todayProxyCost + todayRoutingCost
+        val totalCost: Double get() = totalProxyCost + totalRoutingCost
+    }
+
+    /** Per-user usage overview (all accounts, both datapaths) in a single pass over the events. */
+    fun overviewByUser(startOfDay: Instant): List<UserOverviewRow> = transaction {
+        val acc = HashMap<Int?, UserOverviewRow>()
+        UsageEvents.selectAll().forEach { row ->
+            val r = acc.getOrPut(row[UsageEvents.userId]) { UserOverviewRow(row[UsageEvents.userId]) }
+            val cost = row[UsageEvents.cost]
+            val tokens = row[UsageEvents.inputTokens] + row[UsageEvents.outputTokens] +
+                row[UsageEvents.cacheReadTokens] + row[UsageEvents.cacheWriteTokens]
+            val routing = row[UsageEvents.sourceCol] == "routing"
+            if (routing) r.totalRoutingCost += cost else r.totalProxyCost += cost
+            r.totalRequests += 1; r.totalTokens += tokens
+            val ts = row[UsageEvents.ts]
+            if (ts >= startOfDay) {
+                if (routing) r.todayRoutingCost += cost else r.todayProxyCost += cost
+                r.todayRequests += 1; r.todayTokens += tokens
+            }
+            val last = r.lastActivity
+            if (last == null || ts > last) r.lastActivity = ts
+        }
+        acc.values.toList()
+    }
+
     fun clearAll(): Int = transaction { UsageEvents.deleteAll() }
     fun clearUser(userId: Int): Int = transaction { UsageEvents.deleteWhere { UsageEvents.userId eq userId } }
 
@@ -303,6 +347,7 @@ object UsageRepo {
             inputTokens = this[UsageEvents.inputTokens], outputTokens = this[UsageEvents.outputTokens],
             cacheReadTokens = this[UsageEvents.cacheReadTokens], cacheWriteTokens = this[UsageEvents.cacheWriteTokens],
             cost = this[UsageEvents.cost], httpStatus = this[UsageEvents.httpStatus], model = this[UsageEvents.model],
+            source = this[UsageEvents.sourceCol],
         )
     }
 }
