@@ -29,7 +29,11 @@ The routing gateways expose standard OpenAI/Anthropic API contracts to arbitrary
 them through the same account pool as the Claude Code proxy. They authenticate with **routing
 tokens** (`cxr_…`, gated by `ROUTING_USE`), meter spend against a **separate per-user daily USD
 limit** (`users.daily_routing_cost_limit`), and tag usage rows `source="routing"` (proxy rows are
-`source="proxy"`) so the two datapaths share stats but keep independent limits. All three gateways
+`source="proxy"`) so the two datapaths share stats but keep independent limits. A routing token
+may carry a **static system prompt** (`routing_tokens.system_prompt`, editable on the API Routing
+page): the service returns it from `/internal/resolve` and `routing.go` injects it via
+`ccident.InsertStaticPrompt` right after the mandatory Claude Code block — ahead of (higher
+priority than) any system content arriving in the API request. All three gateways
 are one Go module (`gateway/`, binaries under `cmd/`); they never touch Postgres.
 
 Top-level dirs: `frontend/` (React) · `service/` (Kotlin business logic + control API + Kotlin
