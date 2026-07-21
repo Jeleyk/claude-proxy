@@ -57,7 +57,12 @@ object Db {
         log.info("Database ready ({})", if (config.databaseUrl.isNotBlank()) "PostgreSQL" else "SQLite ${config.dbPath}")
     }
 
-    /** Default roles bundling permissions. Idempotent. */
+    /**
+     * Default roles bundling permissions. Permissions are written ONLY when the role itself is
+     * being created (first boot / a new built-in role appearing) — an existing role's permission
+     * set belongs to the admin, and re-seeding it on every start silently resurrected
+     * permissions the admin had removed (every redeploy restarts the service).
+     */
     private fun seedRoles() {
         val defaults = mapOf(
             "admin" to Permission.entries.toList(),
@@ -66,8 +71,9 @@ object Db {
             "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE, Permission.ROUTING_USE),
         )
         defaults.forEach { (roleName, perms) ->
-            val roleId = Roles.select(Roles.id).where { Roles.name eq roleName }.firstOrNull()?.get(Roles.id)
-                ?: Roles.insert { it[name] = roleName }[Roles.id]
+            val exists = Roles.select(Roles.id).where { Roles.name eq roleName }.any()
+            if (exists) return@forEach
+            val roleId = Roles.insert { it[name] = roleName }[Roles.id]
             perms.forEach { p ->
                 RolePermissions.insertIgnore {
                     it[RolePermissions.roleId] = roleId
@@ -79,10 +85,14 @@ object Db {
 
     /**
      * One-time backfill for the new POOL_GLOBAL_USE permission: any role that could already
-     * reach the shared pool (i.e. has PROXY_USE) keeps that ability explicitly. seedRoles()
-     * covers the built-in roles; this also covers admin-made custom roles. Idempotent.
+     * reach the shared pool (i.e. has PROXY_USE) keeps that ability explicitly. Recorded in the
+     * settings table so it truly runs once — re-running on every start would resurrect the
+     * permission after an admin removes it.
      */
     private fun migrateGlobalPoolPermission() {
+        val markerKey = "migrated:pool_global_use"
+        val done = Settings.selectAll().where { Settings.key eq markerKey }.any()
+        if (done) return
         val roleIds = RolePermissions
             .select(RolePermissions.roleId)
             .where { RolePermissions.permission eq Permission.PROXY_USE.name }
@@ -92,6 +102,10 @@ object Db {
                 it[roleId] = rid
                 it[permission] = Permission.POOL_GLOBAL_USE.name
             }
+        }
+        Settings.insert {
+            it[key] = markerKey
+            it[value] = Instant.now().toString()
         }
     }
 
