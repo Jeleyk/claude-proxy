@@ -2,13 +2,22 @@
 
 An nginx router (in `docker-compose`) fronts three components on one origin:
 
-- **Datapath** — `/gateway/{...}` (nginx strips the prefix → the service sees `/v1/{...}`)
-  transparently proxies the Anthropic API for Claude Code. Served by the Kotlin **service**
-  today; a Go **gateway** in Spec B (nginx flips one `proxy_pass`).
+- **Datapath** — `/gateway/{...}` (nginx strips the prefix → `/v1/{...}`) transparently proxies
+  the Anthropic API for Claude Code. Served by the Go **gateway**. The Kotlin **service** still
+  contains a full datapath, kept as an instant rollback: flipping one nginx `proxy_pass` back to
+  `service:8787` reverts it.
+- **API routing** — `/routing/openai/{...}` and `/routing/anthropic/{...}` expose the standard
+  OpenAI and Anthropic contracts to arbitrary clients, served from the same account pool by the
+  Go **gateway-openai** / **gateway-anthropic** binaries. Usage is tagged `source="routing"` and
+  metered against a separate per-user daily limit.
 - **Management API** — `/api/*` REST endpoints on the Kotlin **service**.
-- **SPA** — the React admin UI, static files served by nginx at `/` (react-router).
+- **SPA** — the React admin UI, static files served at `/` (react-router).
 
-The Kotlin service (`service/`) still owns all business logic; it no longer serves the UI.
+The Kotlin service (`service/`) owns all business logic and state; it no longer serves the UI.
+The Go gateways (`gateway/`, one module) are a stateless data plane: they resolve each request
+against the service's private `/internal/*` control API — which returns an ordered candidate list
+with decrypted upstream credentials — forward to Anthropic, relay the stream, and report usage
+back. They never touch the database.
 
 ## Request lifecycle (datapath)
 
@@ -53,9 +62,13 @@ The Kotlin service (`service/`) still owns all business logic; it no longer serv
   (AES-256-GCM ciphertext), `account_limits` (per-window utilization), `window_snapshots`
   (time series for the usage graphs).
 - `account_groups`, `user_group_access` — per-user routing scope.
-- `proxy_tokens` (SHA-256 hash + owner).
+- `proxy_tokens` / `routing_tokens` (SHA-256 hash + owner + `enabled`; routing tokens also carry
+  an optional static `system_prompt`). Separate namespaces: a `cxp_` never authenticates routing
+  and vice versa.
 - `usage_events` (input/output/cache_read/cache_write tokens, cost, model, httpStatus, userId,
-  accountId), `model_prices` (4 prices per model pattern).
+  accountId, `source` = proxy|routing, `token_id` attributing spend to the inbound token),
+  `model_prices` (4 prices per model pattern).
+- `mcp_tool_calls` — one row per (request, MCP tool) parsed out of the response stream.
 - `settings`, `oauth_add_sessions` (PKCE state for "Login with Claude").
 
 Postgres in production (`DATABASE_URL` set); SQLite fallback otherwise. Use Exposed `upsert`
@@ -66,7 +79,10 @@ Postgres in production (`DATABASE_URL` set); SQLite fallback otherwise. Use Expo
 Per model pattern, `model_prices` stores USD-per-million-token prices for input, output,
 cache_read, cache_write. `ModelPriceRepo.costOf(model, …)` computes each event's cost from the
 response token breakdown; per-user daily spend is summed from `usage_events` since 00:00 UTC and
-compared to the user's optional `dailyCostLimit`.
+compared to the user's optional `dailyCostLimit` (and `dailyRoutingCostLimit` for the routing
+datapath). Note the deliberate split: **limits** are enforced on UTC days, while every **displayed**
+statistic — charts and "today" counters alike — is sliced on the viewer's timezone (`tz` query
+param). Figures the UI shows against a limit are labelled UTC for that reason.
 
 ## Auth & RBAC
 
@@ -77,11 +93,12 @@ compared to the user's optional `dailyCostLimit`.
 
 ## Frontend
 
-React 18 + Vite + TS in `frontend/src/`, built to `frontend/dist` and served by the nginx
-router. Section URLs use **react-router-dom** (`/dashboard`, `/my/accounts`, `/my/stats`,
+React 18 + Vite + TS in `frontend/src/`, built to `frontend/dist` and served by the `front`
+image. Section URLs use **react-router-dom** (`/dashboard`, `/my/accounts`, `/my/stats`,
 `/stats`, `/tokens`, `/pricing`, `/users`); nginx `try_files` falls unknown paths back to
-`index.html`. Pages: Dashboard (pool), Accounts, Tokens, Stats (cost + window-utilization SVG
-charts), MyStats, ModelPricing, Users, Login. Charts are hand-rolled SVG in `Chart.tsx`; shared
+`index.html`. Pages: Dashboard (pool), Tokens, API Routing, Stats (cost + window-utilization SVG
+charts), MyStats / UserStats (the shared `UserStatsView`), MyAccounts, ModelPricing, Users,
+Login. Charts are hand-rolled SVG in `Chart.tsx`; shared
 components in `ui.tsx`; API client + types in `api.ts`. In dev, Vite (`:5173`) proxies `/api`,
 `/gateway`, `/v1`, `/healthz` to the service; in production everything is same-origin via nginx.
 

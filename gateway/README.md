@@ -1,8 +1,16 @@
-# gateway (Go proxy) — Spec B
+# gateway (Go)
 
-The thin Go data plane for the Anthropic datapath. It replaces the Kotlin datapath behind
-`/gateway`, `/v1` (nginx strips the `/gateway` prefix). All state lives in the **service**
-(Kotlin/Postgres); the gateway is stateless and never touches Postgres or Redis directly.
+The thin Go data plane. One module, three binaries:
+
+| Binary | Port | Serves |
+|--------|------|--------|
+| `.` (`main.go`) | 9000 | The Claude Code datapath behind `/gateway`, `/v1` (nginx strips the `/gateway` prefix) — this document. |
+| `cmd/openai` | 9100 | OpenAI Chat Completions (`/routing/openai`), translated to/from Anthropic. |
+| `cmd/anthropic` | 9200 | Native Anthropic Messages (`/routing/anthropic`), with the Claude Code system prompt injected. |
+
+All state lives in the **service** (Kotlin/Postgres); the gateways are stateless and never touch
+the database. The two routing binaries share `internal/` with the datapath and resolve through the
+same control API, tagging their usage `source="routing"`.
 
 ## Flow (per request)
 
@@ -34,9 +42,14 @@ makes clients abort → nginx 502 + retry loops. Don't regress it.
 | `internal/proxy/handler.go` | Request entry, token extraction, resolve, retry loop. |
 | `internal/proxy/forward.go` | Single upstream attempt (headers, auth, status decision, non-SSE). |
 | `internal/proxy/sse.go` | SSE relay (head flush, keep-alives, mid-stream inject). |
-| `internal/proxy/usagescan.go` · `errscan.go` | Token counting + mid-stream error detection. |
+| `internal/proxy/usagescan.go` | Token counting out of the stream. |
+| `internal/proxy/mcpscan.go` | MCP `tool_use` block counting (`mcp__server__tool`). |
 | `internal/proxy/rewrite.go` | Body rewrite: device-id stamp + UUIDv5 session rotation. |
 | `internal/proxy/inject.go` | Mid-stream error frame builder. |
+| `internal/anthropic/` | Shared SSE parser + `errscan` (mid-stream `overloaded_error` detection). |
+| `internal/ccident/` | Claude Code identity: mandatory system block + static-prompt insertion. |
+| `internal/openaigw/` · `internal/anthropicgw/` | The two routing gateways' translation + handlers. |
+| `internal/routing/` | Shared routing-gateway plumbing (resolve, retry, usage reporting). |
 
 ## Config
 
