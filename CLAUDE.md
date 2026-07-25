@@ -181,6 +181,13 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   Those are labelled UTC in the UI (the limit card spells out its own 00:00 UTC countdown);
   `UsageRepo.overviewByUser` takes both day starts for exactly this reason. Guarded by
   `repo/ViewerDayStatsTest`.
+- **Window utilization charts** (`/stats/windows`, `/stats/mine/…`, `/users/{id}/…`): 30-min
+  buckets (matching the ~30-min `LimitProbe` sampling), capped at 336 — longer ranges coarsen the
+  bucket width. `planWindowBuckets` sizes the grid and **truncates it at `now`** when the range
+  ends today. Do not "simplify" that back to the end of the last calendar day: `aggregateWindows`
+  carries the last reading forward across gaps, so trailing empty buckets draw a flat line hours
+  into the future that reads as live data. The width is derived from the full span *before*
+  truncation, so dropping the tail never re-scales the buckets. Guarded by `api/WindowBucketPlanTest`.
 - **Window burn per day** (`/stats/window-daily`, `/stats/mine/…`, `/users/{id}/…`): how much of
   each limit window was *consumed* per day, in window-fractions (1.0 = one full window). Computed
   in `aggregateWindowDaily` as the sum of positive steps of the utilization series — a drop means
