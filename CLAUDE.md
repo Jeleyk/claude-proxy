@@ -187,7 +187,13 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   ends today. Do not "simplify" that back to the end of the last calendar day: `aggregateWindows`
   carries the last reading forward across gaps, so trailing empty buckets draw a flat line hours
   into the future that reads as live data. The width is derived from the full span *before*
-  truncation, so dropping the tail never re-scales the buckets. Guarded by `api/WindowBucketPlanTest`.
+  truncation, so dropping the tail never re-scales the buckets. When the grid is truncated (i.e. it
+  reaches the present), one extra **live column** is appended: `liveWindowSamples` reads the pool's
+  in-memory `LimitState` — fresher than anything persisted, since `WindowSnapshotRepo` throttles
+  writes to one per (account, window) per minute — and labels it with the actual clock time. Those
+  synthetic samples are stamped *mid* extra-bucket, not on its boundary: the boundary is a truncated
+  long, so for non-integral widths a boundary sample floors back and gets averaged into the last
+  real bucket, overwriting a genuine reading. Guarded by `api/WindowBucketPlanTest`.
 - **Window burn per day** (`/stats/window-daily`, `/stats/mine/…`, `/users/{id}/…`): how much of
   each limit window was *consumed* per day, in window-fractions (1.0 = one full window). Computed
   in `aggregateWindowDaily` as the sum of positive steps of the utilization series — a drop means

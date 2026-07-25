@@ -6,6 +6,7 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -29,6 +30,8 @@ class WindowBucketPlanTest {
         assertEquals(Instant.parse("2026-01-11T00:00:00Z"), plan.end)
         assertEquals(48, plan.buckets)
         assertEquals(halfHourMs, plan.widthMs)
+        // A historical range does not reach the present, so there is no live column to add.
+        assertFalse(plan.truncated, "a past range must not be flagged as reaching now")
     }
 
     @Test
@@ -44,6 +47,68 @@ class WindowBucketPlanTest {
         assertEquals(Instant.parse("2026-01-15T06:30:00Z"), plan.end)
         assertTrue(plan.end.isAfter(now), "the bucket containing now must be included")
         assertTrue(plan.buckets < 48, "the rest of the day must not be charted")
+        assertTrue(plan.truncated, "a range reaching now must be flagged for the live column")
+    }
+
+    /**
+     * The live "now" column is delivered by stamping synthetic samples into an extra bucket past
+     * the grid. That bucket's start is a truncated long, so a sample sitting exactly on it can
+     * floor back into the previous bucket whenever the width is not integral (coarsened ranges) —
+     * hence the mid-bucket stamp. This pins that down against the real aggregator.
+     */
+    @Test
+    fun `live samples land in the extra bucket, not the last real one`() {
+        // A deliberately non-integral width, as a >7-day range produces.
+        val plan = planWindowBuckets(
+            days = 30, endDate = LocalDate.parse("2026-02-14"), zone = utc,
+            now = Instant.parse("2026-02-14T00:00:00Z"),
+        )
+        assertTrue(plan.widthMs % 1.0 != 0.0, "this test needs a fractional bucket width")
+
+        val liveTs = Instant.ofEpochMilli(plan.end.toEpochMilli() + (plan.widthMs / 2).toLong())
+        val total = plan.buckets + 1
+        val payload = aggregateWindows(
+            samples = listOf(org.claudeproxy.repo.WindowSample(1, "5h", liveTs, 0.42, 1.0)),
+            startMs = plan.start.toEpochMilli(), widthMs = plan.widthMs, buckets = total,
+            labels = (0 until total).map { "b$it" }, includeAccounts = false, names = emptyMap(),
+        )
+
+        // The reading shows up in the appended column…
+        assertEquals(0.42, payload.totalFiveHour[total - 1]!!, 1e-9)
+        // …and nowhere before it: the grid holds no other samples, so every earlier bucket is null.
+        assertEquals(null, payload.totalFiveHour[total - 2], "live value must not bleed into the grid")
+    }
+
+    /**
+     * What the mid-bucket offset actually buys. Carry-forward means a boundary-stamped live sample
+     * still *reaches* the appended column, so the visible symptom is not a missing point — it is
+     * that the sample also lands in the last real bucket and is averaged into whatever genuine
+     * reading was there, silently rewriting history at the right edge.
+     */
+    @Test
+    fun `stamping on the extra bucket boundary corrupts the last real bucket`() {
+        val widthMs = 7714285.714285714 // 30 days over the 336-bucket cap => fractional width
+        val grid = 3
+        val total = grid + 1
+        val labels = (0 until total).map { "b$it" }
+        // A genuine reading inside the last real bucket.
+        val real = org.claudeproxy.repo.WindowSample(
+            1, "5h", Instant.ofEpochMilli((2 * widthMs).toLong() + 100), 0.2, 1.0,
+        )
+        fun runWith(liveTs: Instant) = aggregateWindows(
+            samples = listOf(real, org.claudeproxy.repo.WindowSample(1, "5h", liveTs, 0.9, 1.0)),
+            startMs = 0L, widthMs = widthMs, buckets = total,
+            labels = labels, includeAccounts = false, names = emptyMap(),
+        ).totalFiveHour
+
+        val onBoundary = runWith(Instant.ofEpochMilli((grid * widthMs).toLong()))
+        assertEquals(0.55, onBoundary[grid - 1]!!, 1e-9) // (0.2 + 0.9) / 2 — the real reading is gone
+
+        val midBucket = runWith(
+            Instant.ofEpochMilli((grid * widthMs).toLong() + (widthMs / 2).toLong()),
+        )
+        assertEquals(0.2, midBucket[grid - 1]!!, 1e-9)   // last real bucket untouched
+        assertEquals(0.9, midBucket[total - 1]!!, 1e-9)  // live value in its own column
     }
 
     @Test

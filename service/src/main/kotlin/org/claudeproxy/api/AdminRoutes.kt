@@ -73,7 +73,7 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
         roleRoutes()
         proxyTokenRoutes()
         routingTokenRoutes()
-        statsRoutes()
+        statsRoutes(pool)
     }
 }
 
@@ -801,27 +801,72 @@ private fun io.ktor.server.application.ApplicationCall.sourceParam(): String? =
  * [keep] decides which account ids contribute — pool-wide excludes personal accounts; the
  * per-user view keeps only that user's personal accounts.
  */
-private fun buildWindows(
+private suspend fun buildWindows(
     days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean,
+    pool: AccountPool,
     zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
     keep: ((Int) -> Boolean)? = null,
 ): WindowStatsPayload {
-    val plan = planWindowBuckets(days, endDate, zone, java.time.Instant.now())
-    val labels = (0 until plan.buckets).map {
-        java.time.Instant.ofEpochMilli(plan.start.toEpochMilli() + (it * plan.widthMs).toLong())
-            .atZone(zone).toLocalDateTime().toString().substring(5, 16)
-    }
+    val now = java.time.Instant.now()
+    val plan = planWindowBuckets(days, endDate, zone, now)
     // Default keep: exclude personal accounts (pool-wide view).
     val includeAccount = keep ?: AccountRepo.personalIds().let { personal -> { id: Int -> id !in personal } }
     val samples = org.claudeproxy.repo.WindowSnapshotRepo.fetch(plan.start, plan.end).filter { includeAccount(it.accountId) }
+
+    // Live "now" column. Buckets are 30 min wide and snapshots are throttled to one per minute, so
+    // the right edge of the grid can lag reality by most of a bucket — on a 5-hour window that is a
+    // meaningful blind spot. When the range reaches the present, append one extra column holding the
+    // pool's *current* readings, labelled with the actual clock time rather than a bucket boundary.
+    val live = if (plan.truncated) liveWindowSamples(pool, plan, includeAccount) else emptyList()
+    val extra = if (live.isEmpty()) 0 else 1
+    val gridLabels = (0 until plan.buckets).map {
+        java.time.Instant.ofEpochMilli(plan.start.toEpochMilli() + (it * plan.widthMs).toLong())
+            .atZone(zone).toLocalDateTime().toString().substring(5, 16)
+    }
+    val labels = if (extra == 0) gridLabels
+    else gridLabels + now.atZone(zone).toLocalDateTime().toString().substring(5, 16)
+
     return aggregateWindows(
-        samples, plan.start.toEpochMilli(), plan.widthMs, plan.buckets, labels, includeAccounts, AccountRepo.namesMap(),
+        samples + live, plan.start.toEpochMilli(), plan.widthMs, plan.buckets + extra,
+        labels, includeAccounts, AccountRepo.namesMap(),
     )
 }
 
-/** Time grid for the window-utilization charts: half-open [start, end) split into [buckets]. */
+/**
+ * Synthesize the samples backing the live "now" column from the pool's in-memory limit state — the
+ * freshest reading there is, updated on every upstream response, ahead of what has been persisted.
+ *
+ * They are stamped in the middle of the extra bucket (`plan.end` .. `+widthMs`) so
+ * [aggregateWindows] bins them there and nowhere else. Mid-bucket rather than exactly on
+ * `plan.end`: the bucket boundary is a truncated long, so a sample sitting on it can floor back
+ * into the previous bucket for non-integral widths (coarsened ranges).
+ *
+ * Accounts with no reading for a window contribute nothing, which leaves them to the aggregator's
+ * carry-forward — the same treatment a gap in the persisted series gets.
+ */
+private suspend fun liveWindowSamples(
+    pool: AccountPool, plan: BucketPlan, includeAccount: (Int) -> Boolean,
+): List<org.claudeproxy.repo.WindowSample> {
+    val ts = java.time.Instant.ofEpochMilli(plan.end.toEpochMilli() + (plan.widthMs / 2).toLong())
+    return pool.snapshot()
+        .filter { includeAccount(it.id) }
+        .flatMap { acct ->
+            org.claudeproxy.model.WindowKind.entries.mapNotNull { kind ->
+                acct.limit.window(kind)?.utilization?.let { util ->
+                    org.claudeproxy.repo.WindowSample(acct.id, kind.code, ts, util, acct.coefficient)
+                }
+            }
+        }
+}
+
+/**
+ * Time grid for the window-utilization charts: half-open [start, end) split into [buckets].
+ * [truncated] means the requested range ran past `now` and was cut short — i.e. the chart reaches
+ * the present, so a live "now" column is meaningful.
+ */
 internal data class BucketPlan(
     val start: java.time.Instant, val end: java.time.Instant, val widthMs: Double, val buckets: Int,
+    val truncated: Boolean = false,
 )
 
 /**
@@ -845,12 +890,12 @@ internal fun planWindowBuckets(
     val fullEnd = endDate.plusDays(1).atStartOfDay(zone).toInstant()
     val fullBuckets = (n * 48).coerceAtMost(336)
     val widthMs = (fullEnd.toEpochMilli() - start.toEpochMilli()).toDouble() / fullBuckets
-    if (!fullEnd.isAfter(now)) return BucketPlan(start, fullEnd, widthMs, fullBuckets)
+    if (!fullEnd.isAfter(now)) return BucketPlan(start, fullEnd, widthMs, fullBuckets, truncated = false)
     // Keep the bucket holding `now` — it is partially elapsed but already carries readings.
     val elapsed = (now.toEpochMilli() - start.toEpochMilli()).toDouble()
     val buckets = (Math.floor(elapsed / widthMs).toInt() + 1).coerceIn(1, fullBuckets)
     val end = java.time.Instant.ofEpochMilli(start.toEpochMilli() + (buckets * widthMs).toLong())
-    return BucketPlan(start, end, widthMs, buckets)
+    return BucketPlan(start, end, widthMs, buckets, truncated = true)
 }
 
 /**
@@ -1001,13 +1046,13 @@ internal fun aggregateWindowDaily(
     return WindowDailyPayload(dayLabels, total(0), total(1), perAccount, includeAccounts)
 }
 
-private fun Route.statsRoutes() {
+private fun Route.statsRoutes(pool: AccountPool) {
     // Window-utilization (5h + weekly) trend over time.
     get("/stats/windows") {
         call.requirePermission(Permission.STATS_VIEW)
         val user = call.requireUser()
         val (days, endDate, zone) = call.rangeParams()
-        call.respond(buildWindows(days, endDate, user.canAccounts(), zone))
+        call.respond(buildWindows(days, endDate, user.canAccounts(), pool, zone))
     }
     // Per-day window burn (5h + weekly), reset-aware — how much of each window was spent per day.
     get("/stats/window-daily") {
@@ -1115,7 +1160,7 @@ private fun Route.statsRoutes() {
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
         val (days, endDate, zone) = call.rangeParams()
         val mine = AccountRepo.personalIdsOf(user.id)
-        call.respond(buildWindows(days, endDate, includeAccounts = true, zone = zone, keep = { it in mine }))
+        call.respond(buildWindows(days, endDate, includeAccounts = true, pool = pool, zone = zone, keep = { it in mine }))
     }
     get("/stats/mine/window-daily") {
         val user = call.requireUser()
@@ -1200,7 +1245,7 @@ private fun Route.statsRoutes() {
             ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val (days, endDate, zone) = call.rangeParams()
         val theirs = AccountRepo.personalIdsOf(uid)
-        call.respond(buildWindows(days, endDate, includeAccounts = true, zone = zone, keep = { it in theirs }))
+        call.respond(buildWindows(days, endDate, includeAccounts = true, pool = pool, zone = zone, keep = { it in theirs }))
     }
     get("/users/{id}/stats/window-daily") {
         call.requirePermission(Permission.USERS_MANAGE)
