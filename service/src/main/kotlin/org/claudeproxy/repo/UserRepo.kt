@@ -130,8 +130,18 @@ object UserRepo {
         )
     }
 
-    fun startOfUtcDay(): Instant =
-        java.time.LocalDate.now(java.time.ZoneOffset.UTC).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    /**
+     * Start of today on the *limit* clock. The per-user daily USD limits are enforced on UTC days,
+     * so anything read against a limit must use this — never the viewer's zone.
+     */
+    fun startOfUtcDay(): Instant = startOfDayIn(java.time.ZoneOffset.UTC)
+
+    /**
+     * Start of today on [zone]'s clock — the basis for *displayed* "today" counters, so they line
+     * up with the charts (which are already sliced on the viewer's days).
+     */
+    fun startOfDayIn(zone: java.time.ZoneId): Instant =
+        java.time.LocalDate.now(zone).atStartOfDay(zone).toInstant()
 
     fun allowedGroupsOf(userId: Int): Set<Int> = transaction {
         UserGroupAccess.selectAll().where { UserGroupAccess.userId eq userId }

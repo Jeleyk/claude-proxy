@@ -8,7 +8,8 @@ import {
 } from '../api';
 import { LineChart, SERIES_COLORS, StackedChart } from '../Chart';
 import {
-  Legend, RangeControls, sumKinds, todayLocal, tokenSeries, TOKEN_KINDS, W5H, WindowBurnCharts, WWK,
+  fmtEventTs, Legend, RangeControls, sumKinds, todayLocal, tokenSeries, TOKEN_KINDS, W5H,
+  WindowBurnCharts, WWK,
 } from './statsShared';
 import { Segmented, Select, useChartMode } from '../ui';
 import { TokenUsageChartsRow, usageItems } from './tokenUsage';
@@ -297,7 +298,7 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
           <tbody>
             {s.recent.map((e) => (
               <tr key={e.id}>
-                <td className="hint">{new Date(e.ts).toLocaleTimeString()}</td>
+                <td className="hint">{fmtEventTs(e.ts)}</td>
                 <td>{sourceBadge(e.source)}</td>
                 <td>{e.accountName ?? '—'}</td>
                 <td className="hint">{e.model ?? '—'}</td>

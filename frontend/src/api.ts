@@ -219,7 +219,8 @@ export const api = {
 
   statsSummary: () => req<UsageSummary[]>('GET', '/api/stats/summary'),
   statsRecent: () => req<UsageEvent[]>('GET', '/api/stats/recent'),
-  statsModels: () => req<ModelBreakdown>('GET', '/api/stats/models'),
+  // `tz` makes the "today" half of the breakdown the viewer's day, matching the charts.
+  statsModels: () => req<ModelBreakdown>('GET', `/api/stats/models${qs({ tz: localTz() })}`),
   statsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/daily${qs({ days, end, tz: localTz() })}`),
   statsWindows: (days: number, end?: string) => req<WindowStats>('GET', `/api/stats/windows${qs({ days, end, tz: localTz() })}`),
   statsTokens: (days: number, end?: string) => req<TokenStats>('GET', `/api/stats/tokens${qs({ days, end, tz: localTz() })}`),
@@ -229,7 +230,7 @@ export const api = {
   // Per-user statistics: uid=null → the caller's own ("My Stats"), a number → admin view of that
   // user (USERS_MANAGE). `source` filters to one datapath ('proxy' | 'routing'); undefined = both.
   userStats: (uid: number | null, source?: StatsSource) =>
-    req<MyStats>('GET', `${statsBase(uid)}${qs({ source })}`),
+    req<MyStats>('GET', `${statsBase(uid)}${qs({ source, tz: localTz() })}`),
   userStatsDaily: (uid: number | null, days: number, end?: string, source?: StatsSource) =>
     req<DailyStats>('GET', `${statsBase(uid)}/daily${qs({ days, end, source, tz: localTz() })}`),
   userStatsWindows: (uid: number | null, days: number, end?: string) =>
@@ -244,8 +245,8 @@ export const api = {
   // Per-MCP-tool call counts (Claude Code datapath): daily series + range totals per tool.
   userMcpUsage: (uid: number | null, days: number, end?: string) =>
     req<McpUsage>('GET', `${statsBase(uid)}/mcp${qs({ days, end, tz: localTz() })}`),
-  usersOverview: () => req<UserStatsOverview[]>('GET', '/api/users/stats/overview'),
-  myStats: () => req<MyStats>('GET', '/api/stats/mine'),
+  usersOverview: () => req<UserStatsOverview[]>('GET', `/api/users/stats/overview${qs({ tz: localTz() })}`),
+  myStats: () => req<MyStats>('GET', `/api/stats/mine${qs({ tz: localTz() })}`),
   tokenUsage: (source: 'proxy' | 'routing', days: number, end?: string) =>
     req<TokenUsage>('GET', `/api/stats/mine/token-usage${qs({ source, days, end, tz: localTz() })}`),
   setAccountOrder: (preferGlobalPool: boolean) => req<UserDto>('PATCH', '/api/my/account-order', { preferGlobalPool }),

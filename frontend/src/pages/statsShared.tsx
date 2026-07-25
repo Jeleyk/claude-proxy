@@ -22,6 +22,23 @@ export function todayLocal(): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/**
+ * Timestamp for the "recent requests" lists, rendered on the viewer's clock.
+ *
+ * Bare time-of-day is only unambiguous while the event is recent: on a quiet instance the list
+ * still holds yesterday's (or last week's) requests, and "09:14" then reads as if it just
+ * happened. Past 23h — just under a full day, so a same-hour event from yesterday can't
+ * masquerade as today's — the date is shown alongside.
+ */
+export function fmtEventTs(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  const olderThan23h = Date.now() - d.getTime() > 23 * 3600 * 1000;
+  return olderThan23h
+    ? d.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleTimeString();
+}
+
 /** Calendar-date arithmetic on a YYYY-MM-DD label; zone-independent by construction. */
 export function shiftDate(d: string, days: number): string {
   const dt = new Date(d + 'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate() + days); return dt.toISOString().slice(0, 10);

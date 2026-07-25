@@ -284,23 +284,32 @@ object UsageRepo {
     }
 
     /**
-     * One user's aggregate line for the admin per-user overview: today (since [startOfDay]) and
-     * all-time totals, split by datapath. userId null groups unattributed (deleted-user) events.
+     * One user's aggregate line for the admin per-user overview: today + all-time totals, split by
+     * datapath. userId null groups unattributed (deleted-user) events.
+     *
+     * "Today" has two bases here, deliberately: the display counters (`todayCost`, `todayRequests`,
+     * `todayTokens`) follow the *viewer's* day like every chart, while the per-datapath costs
+     * (`todayProxyCost`/`todayRoutingCost`) — which are read against the daily USD limits — stay on
+     * the UTC day the limits are actually enforced on. The two agree only at UTC±0.
      */
     class UserOverviewRow(
         val userId: Int?,
         var todayProxyCost: Double = 0.0, var todayRoutingCost: Double = 0.0,
+        var todayCost: Double = 0.0,
         var todayRequests: Long = 0, var todayTokens: Long = 0,
         var totalProxyCost: Double = 0.0, var totalRoutingCost: Double = 0.0,
         var totalRequests: Long = 0, var totalTokens: Long = 0,
         var lastActivity: Instant? = null,
     ) {
-        val todayCost: Double get() = todayProxyCost + todayRoutingCost
         val totalCost: Double get() = totalProxyCost + totalRoutingCost
     }
 
-    /** Per-user usage overview (all accounts, both datapaths) in a single pass over the events. */
-    fun overviewByUser(startOfDay: Instant): List<UserOverviewRow> = transaction {
+    /**
+     * Per-user usage overview (all accounts, both datapaths) in a single pass over the events.
+     * [startOfDay] bounds the viewer-day display counters; [startOfLimitDay] (UTC) bounds the
+     * per-datapath costs the limits are read against — see [UserOverviewRow].
+     */
+    fun overviewByUser(startOfDay: Instant, startOfLimitDay: Instant = startOfDay): List<UserOverviewRow> = transaction {
         val acc = HashMap<Int?, UserOverviewRow>()
         UsageEvents.selectAll().forEach { row ->
             val r = acc.getOrPut(row[UsageEvents.userId]) { UserOverviewRow(row[UsageEvents.userId]) }
@@ -312,8 +321,11 @@ object UsageRepo {
             r.totalRequests += 1; r.totalTokens += tokens
             val ts = row[UsageEvents.ts]
             if (ts >= startOfDay) {
-                if (routing) r.todayRoutingCost += cost else r.todayProxyCost += cost
+                r.todayCost += cost
                 r.todayRequests += 1; r.todayTokens += tokens
+            }
+            if (ts >= startOfLimitDay) {
+                if (routing) r.todayRoutingCost += cost else r.todayProxyCost += cost
             }
             val last = r.lastActivity
             if (last == null || ts > last) r.lastActivity = ts

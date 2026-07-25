@@ -19,3 +19,13 @@ docs/superpowers/
 
 # graphify skill output (generated)
 graphify-out/
+
+# Agent scratch + operator-private notes (real hostnames, server paths, runbooks).
+# Anything deployment-specific belongs here, never in the repo.
+.claude/
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+out/

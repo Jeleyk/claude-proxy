@@ -9,13 +9,13 @@ architecture or deploy steps change.
 API. It stores several Anthropic accounts (OAuth subscriptions and/or API keys), routes each
 request to the highest-priority account that still has headroom, falls back when all are
 saturated, tracks USD cost and rolling-window limits, and ships a React admin UI with
-role-based access control. Production: host nginx + Cloudflare in front of an in-compose nginx
-router at `https://proxy.example.com`.
+role-based access control. Production shape: a TLS-terminating host proxy (nginx/Caddy, optionally
+behind a CDN) in front of an in-compose nginx router on `127.0.0.1:8080`.
 
 ## Components & URL routing
 
 The app is split into self-contained components fronted by one nginx router (in `docker-compose`,
-listening on `127.0.0.1:8080`). Host nginx + Cloudflare terminate TLS and proxy to `:8080`.
+listening on `127.0.0.1:8080`). A host reverse proxy terminates TLS and proxies to `:8080`.
 
 | Public path   | Component            | Notes                                                    |
 |---------------|----------------------|----------------------------------------------------------|
@@ -100,12 +100,13 @@ The Gradle project now lives under `service/` — run `./gradlew` from there (or
 
 ## Deployment — read `docs/DEPLOY.md` before deploying
 
-Server `root@YOUR_SERVER`, dir `/opt/claude-proxy`, behind host nginx
-(`/etc/nginx/sites/proxy.example.com.conf`) + Cloudflare. Host nginx terminates TLS and now
-proxies to the **in-compose nginx router** on `127.0.0.1:8080` (was the service directly on
-`:8787`); the compose nginx fans out to `service` and (Spec B) `gateway`.
+A Docker Compose stack on one host, behind a TLS-terminating reverse proxy that points at the
+**in-compose nginx router** on `127.0.0.1:8080`; the compose nginx fans out to `service` and the
+Go gateways. `docs/DEPLOY.md` uses placeholders (`root@YOUR_SERVER`, `/opt/claude-proxy`,
+`proxy.example.com`) — real hostnames and paths belong in an operator-private note, never in the
+repo.
 
-> ⚠️ **NEVER `rsync --delete` into `/opt/claude-proxy/`.** That directory holds runtime state
+> ⚠️ **NEVER `rsync --delete` into the deploy directory.** It holds runtime state
 > that is NOT in the repo: `pgdata/` (the entire Postgres DB, bind-mounted) and `.env` (server
 > secrets, incl. `DATABASE_PASSWORD`). A `--delete` once wiped the database. Sync **only
 > source**, without `--delete`, excluding `pgdata`, `.env`, `data`. Full recipe + safety in
@@ -114,15 +115,17 @@ proxies to the **in-compose nginx router** on `127.0.0.1:8080` (was the service 
 ## Config precedence gotcha
 
 Effective config = Docker image `ENV` < compose `env_file: .env` < compose `environment:`.
-Because `.env` ships `BIND_HOST=127.0.0.1` (a local default), `docker-compose.yml` pins two
-overrides in the `service` `environment:` block — **do not remove them**:
+Because `.env` ships `BIND_HOST=127.0.0.1` (a local default), `docker-compose.yml` pins an
+override in the `service` `environment:` block — **do not remove it**:
 
 - `BIND_HOST: "0.0.0.0"` — the service must bind all interfaces inside the container, or the
   compose **nginx** (reaching it as `service:8787` over the compose network) can't connect
   (→ nginx 502, healthcheck fails).
-- `PUBLIC_DOMAIN: "proxy.example.com"` — sets the token base URL and the CORS `allowHost`.
-  In prod the SPA is same-origin (served by nginx), so CORS is moot there; the setting still
-  matters for the Vite dev origin and the displayed base URL.
+
+`PUBLIC_DOMAIN` is passed through from `.env` (`PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-}`) — it sets the
+token base URL and the CORS `allowHost`. In prod the SPA is same-origin (served by nginx), so CORS
+is moot there; the setting still matters for the Vite dev origin and the displayed base URL.
+Blank/unset is valid: the UI then falls back to the browser's current origin.
 
 ## Domain concepts (see `docs/ARCHITECTURE.md` for depth)
 
@@ -166,11 +169,18 @@ overrides in the `service` `environment:` block — **do not remove them**:
   A routing token's settings (enable switch + static system prompt) live in one Edit dialog on
   the API Routing page; creation only takes a name.
 - **Viewer-local days:** every time-series endpoint takes an IANA `tz` query param
-  (`rangeParams()` in `AdminRoutes`); the frontend sends `Intl…resolvedOptions().timeZone` on
-  every stats request, so days are sliced on the viewer's clock. Missing/unparseable `tz` falls
-  back to UTC — the pre-existing behaviour. The per-user **daily USD limits stay on UTC days**
-  (`UserRepo.startOfUtcDay`, enforced in `DatapathService`/`ProxyRoutes`), so the limit card in
-  the UI is deliberately labelled with its own 00:00 UTC countdown.
+  (`rangeParams()` in `AdminRoutes`), and so do the **"today" counter** payloads that carry no
+  date range — `/stats/mine`, `/users/{id}/stats`, `/stats/models`, `/users/stats/overview` — via
+  `zoneParam()` + `UserRepo.startOfDayIn(zone)`. The frontend sends
+  `Intl…resolvedOptions().timeZone` on every stats request, so the cards and the charts under them
+  are sliced on the same (viewer's) day. Missing/unparseable `tz` falls back to UTC — the
+  pre-existing behaviour. **Exception, load-bearing:** the per-user **daily USD limits stay on UTC
+  days** (`UserRepo.startOfUtcDay`, enforced in `DatapathService`/`ProxyRoutes`), so everything
+  read *against a limit* keeps the UTC basis — `MyStatsPayload.proxyTodayCost`/`routingTodayCost`,
+  `UserOverviewRow.todayProxyCost`/`todayRoutingCost`, and the Users-list "Spent today" column.
+  Those are labelled UTC in the UI (the limit card spells out its own 00:00 UTC countdown);
+  `UsageRepo.overviewByUser` takes both day starts for exactly this reason. Guarded by
+  `repo/ViewerDayStatsTest`.
 - **Window burn per day** (`/stats/window-daily`, `/stats/mine/…`, `/users/{id}/…`): how much of
   each limit window was *consumed* per day, in window-fractions (1.0 = one full window). Computed
   in `aggregateWindowDaily` as the sum of positive steps of the utilization series — a drop means

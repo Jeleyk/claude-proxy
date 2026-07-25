@@ -5,7 +5,8 @@ import {
 } from '../api';
 import { LineChart, Series, SERIES_COLORS, StackedChart } from '../Chart';
 import {
-  Legend, RangeControls, sumKinds, todayLocal, tokenSeries, TOKEN_KINDS, W5H, WindowBurnCharts, WWK,
+  fmtEventTs, Legend, RangeControls, sumKinds, todayLocal, tokenSeries, TOKEN_KINDS, W5H,
+  WindowBurnCharts, WWK,
 } from './statsShared';
 import { Segmented, Select, useChartMode } from '../ui';
 import { SkeletonChartRow, SkeletonControls, SkeletonTable } from '../Skeleton';
@@ -275,7 +276,7 @@ export function Stats({ user }: { user: UserDto }) {
               <tbody>
                 {recent.map((e) => (
                   <tr key={e.id}>
-                    <td className="hint">{new Date(e.ts).toLocaleTimeString()}</td>
+                    <td className="hint">{fmtEventTs(e.ts)}</td>
                     {canAccounts && <td>{e.accountName ?? '—'}</td>}
                     <td className="hint">{e.model ?? '—'}</td>
                     <td className="num">{e.inputTokens}</td>

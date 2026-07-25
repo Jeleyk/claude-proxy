@@ -39,7 +39,9 @@ services:
       BIND_HOST: "0.0.0.0"
       # Public domain — sets publicBaseUrl (token base URL) and the CORS allowHost for the
       # Vite dev origin. The SPA is same-origin in prod (served by nginx), so CORS is moot there.
-      PUBLIC_DOMAIN: "proxy.example.com"
+      # Comes from .env (PUBLIC_DOMAIN=proxy.example.com); blank => the UI falls back to the
+      # browser's current origin.
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-}
       DATABASE_URL: jdbc:postgresql://postgres:5432/claudeproxy
       DATABASE_USER: claudeproxy
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-claudeproxy}

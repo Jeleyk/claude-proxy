@@ -763,9 +763,16 @@ private fun buildMcpUsage(
  * filters the today/total counters, per-model tables and the recent list; the two daily-limit
  * gauges always stay on their own basis (shared-pool spend of their datapath), matching how the
  * limits are actually enforced. Shared by "My Stats" and the admin per-user view.
+ *
+ * The displayed "today" counters are sliced on [zone] — the viewer's clock — so the cards agree
+ * with the charts below them. The limit gauges deliberately stay on the UTC day, because that is
+ * the day the limits are enforced on; the UI labels them with their own 00:00 UTC countdown.
  */
-private fun buildUserStats(userId: Int, source: String?, canAccounts: Boolean): MyStatsPayload {
-    val startOfDay = UserRepo.startOfUtcDay()
+private fun buildUserStats(
+    userId: Int, source: String?, canAccounts: Boolean, zone: java.time.ZoneId,
+): MyStatsPayload {
+    val startOfDay = UserRepo.startOfDayIn(zone)
+    val startOfLimitDay = UserRepo.startOfUtcDay()
     val active = org.claudeproxy.datapath.ActiveSessions.countsForUser(userId)
     val today = UsageRepo.userTotals(userId, startOfDay, source = source)
     val total = UsageRepo.userTotals(userId, source = source)
@@ -774,9 +781,9 @@ private fun buildUserStats(userId: Int, source: String?, canAccounts: Boolean): 
         todayCost = today.cost, todayClean = today.clean, todayRequests = today.requests,
         totalCost = total.cost, totalClean = total.clean, totalRequests = total.requests,
         dailyCostLimit = UserRepo.dailyLimitOf(userId),
-        proxyTodayCost = UsageRepo.userTotals(userId, startOfDay, globalOnly = true, source = "proxy").cost,
+        proxyTodayCost = UsageRepo.userTotals(userId, startOfLimitDay, globalOnly = true, source = "proxy").cost,
         dailyRoutingCostLimit = UserRepo.dailyRoutingLimitOf(userId),
-        routingTodayCost = UsageRepo.userTotals(userId, startOfDay, globalOnly = true, source = "routing").cost,
+        routingTodayCost = UsageRepo.userTotals(userId, startOfLimitDay, globalOnly = true, source = "routing").cost,
         activeProxySessions = active.proxy,
         activeRoutingSessions = active.routing,
         perModel = UsageRepo.userPerModel(userId, source = source),
@@ -994,10 +1001,11 @@ private fun Route.statsRoutes() {
         val recent = UsageRepo.recent(20)
         call.respond(if (user.canAccounts()) recent else recent.map { it.copy(accountName = null, accountId = 0) })
     }
-    // Pool-wide per-model breakdown: today (UTC) + all-time, for the client-side toggle.
+    // Pool-wide per-model breakdown: today (on the caller's clock) + all-time, for the toggle.
     get("/stats/models") {
         call.requirePermission(Permission.STATS_VIEW)
-        call.respond(ModelBreakdownPayload(today = UsageRepo.perModel(UserRepo.startOfUtcDay()), allTime = UsageRepo.perModel()))
+        val startOfDay = UserRepo.startOfDayIn(call.zoneParam())
+        call.respond(ModelBreakdownPayload(today = UsageRepo.perModel(startOfDay), allTime = UsageRepo.perModel()))
     }
     // Daily cost time series (graphs). Default: last 7 days ending today in the caller's timezone.
     get("/stats/daily") {
@@ -1036,7 +1044,7 @@ private fun Route.statsRoutes() {
     get("/stats/mine") {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
-        call.respond(buildUserStats(user.id, call.sourceParam(), user.canAccounts()))
+        call.respond(buildUserStats(user.id, call.sourceParam(), user.canAccounts(), call.zoneParam()))
     }
     // Per-user charts mirroring the pool-wide graphs: Spend/Tokens cover ALL of the user's own
     // usage (any account), while per-account + window series are scoped to the user's personal accounts.
@@ -1095,7 +1103,10 @@ private fun Route.statsRoutes() {
     get("/users/stats/overview") {
         call.requirePermission(Permission.USERS_MANAGE)
         val users = UserRepo.list().associateBy { it.id }
-        val rows = UsageRepo.overviewByUser(UserRepo.startOfUtcDay()).associateBy { it.userId }
+        // Display counters on the viewer's day; the per-datapath costs read against the daily
+        // limits stay on the UTC day the limits are enforced on.
+        val rows = UsageRepo.overviewByUser(UserRepo.startOfDayIn(call.zoneParam()), UserRepo.startOfUtcDay())
+            .associateBy { it.userId }
         // every user appears (even with zero usage); unattributed events get a userId=null line
         val ids: List<Int?> = (users.keys + rows.keys).distinct()
         val overview = ids.map { id ->
@@ -1118,7 +1129,7 @@ private fun Route.statsRoutes() {
         call.requirePermission(Permission.USERS_MANAGE)
         val uid = call.parameters["id"]?.toIntOrNull()
             ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
-        call.respond(buildUserStats(uid, call.sourceParam(), canAccounts = true))
+        call.respond(buildUserStats(uid, call.sourceParam(), canAccounts = true, zone = call.zoneParam()))
     }
     get("/users/{id}/stats/daily") {
         call.requirePermission(Permission.USERS_MANAGE)
@@ -1182,8 +1193,16 @@ private fun Route.statsRoutes() {
  */
 private fun io.ktor.server.application.ApplicationCall.rangeParams(): Triple<Int, java.time.LocalDate, java.time.ZoneId> {
     val days = parameters["days"]?.toIntOrNull() ?: 7
-    val zone = parameters["tz"]?.let { runCatching { java.time.ZoneId.of(it) }.getOrNull() } ?: java.time.ZoneOffset.UTC
+    val zone = zoneParam()
     val endDate = parameters["end"]?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
         ?: java.time.LocalDate.now(zone)
     return Triple(days, endDate, zone)
 }
+
+/**
+ * The viewer's IANA timezone from `tz`, for endpoints that need the zone but not a date range
+ * (the "today" counter payloads). Missing/unparseable falls back to UTC — the behaviour these
+ * endpoints had before they became viewer-local.
+ */
+private fun io.ktor.server.application.ApplicationCall.zoneParam(): java.time.ZoneId =
+    parameters["tz"]?.let { runCatching { java.time.ZoneId.of(it) }.getOrNull() } ?: java.time.ZoneOffset.UTC
