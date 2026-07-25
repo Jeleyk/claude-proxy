@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, fmtUsd, ProxyTokenDto, UserDto } from '../api';
+import { api, fmtUntilUtcMidnight, fmtUsd, ProxyTokenDto, UserDto } from '../api';
 import { CodeBlock, Copy, Modal, Segmented, Switch } from '../ui';
 import { TokenUsageSection } from './tokenUsage';
 
@@ -108,7 +108,8 @@ export function RoutingTokens() {
             <>
               <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
                 <span><b>{fmtUsd(me.todayRoutingCost)}</b> / {fmtUsd(me.dailyRoutingCostLimit)} spent today</span>
-                <span className="hint">resets 00:00 UTC</span>
+                {/* the limit runs on UTC days regardless of your clock — say when it lifts */}
+                <span className="hint">resets in {fmtUntilUtcMidnight()} · 00:00 UTC</span>
               </div>
               <div className="bar"><span style={{ width: `${Math.min(100, Math.round((me.todayRoutingCost / me.dailyRoutingCostLimit) * 100))}%` }} /></div>
             </>

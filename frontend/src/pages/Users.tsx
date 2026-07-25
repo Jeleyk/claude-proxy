@@ -40,7 +40,9 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
       {!users ? <SkeletonTable rows={4} cols={6} /> : (
       <div className="tablewrap">
         <table>
-          <thead><tr><th>Username</th><th>Roles</th><th>Group access</th><th>Spent today</th><th>Daily limit</th><th>On</th><th></th></tr></thead>
+          {/* "today" here is the UTC day the limits are enforced on, not the viewer's local day
+              the charts use — the two only line up in UTC±0 */}
+          <thead><tr><th>Username</th><th>Roles</th><th>Group access</th><th>Spent today <span className="hint">UTC</span></th><th>Daily limit</th><th>On</th><th></th></tr></thead>
           <tbody>
             {users.map((u) => (
               <tr key={u.id}>
