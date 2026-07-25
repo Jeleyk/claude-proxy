@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"claudeproxy/gateway/internal/anthropic"
 )
 
 // keepAliveInterval bounds how long the relay waits during upstream silence before emitting an
@@ -12,39 +14,59 @@ import (
 // event → nginx "upstream prematurely closed connection while reading response header" (502).
 const keepAliveInterval = 15 * time.Second
 
+// sseResult is the outcome of relaying one SSE response.
+type sseResult struct {
+	scan   usageScan
+	mcp    map[string]int64
+	status int
+	// retry means the upstream failed with a retryable error (overloaded / rate-limited) before
+	// the client had seen a single byte of real content, so the next account can take over
+	// invisibly — see relaySSEInterval.
+	retry bool
+}
+
 // relaySSE streams an SSE response to the client in real time while teeing token usage and MCP
 // tool-call counts out of the stream. It flushes the response head immediately, injects
-// keep-alive comments during silence, and on a retryable mid-stream error writes a normalized
-// error frame (via onMidStreamErr) so the client retries. Returns the scanned usage, the MCP
-// tool-call counts (nil when none), and the status to record for this attempt.
+// keep-alive comments during silence, and handles a retryable mid-stream error either by
+// retrying the next account (nothing client-visible written yet) or by writing a normalized
+// error frame (via onMidStreamErr) so the client re-sends the request.
+//
+// [headSent] tells it a previous attempt already wrote the response head, so this one must not
+// write it again. [canRetry] is false on the last candidate.
 func relaySSE(
 	w http.ResponseWriter, upstream io.ReadCloser, status int, contentType string,
-	onMidStreamErr func() (string, int),
-) (usageScan, map[string]int64, int) {
-	return relaySSEInterval(w, upstream, status, contentType, onMidStreamErr, keepAliveInterval)
+	headSent, canRetry bool, onMidStreamErr func() (string, int),
+) sseResult {
+	return relaySSEInterval(w, upstream, status, contentType, headSent, canRetry, onMidStreamErr, keepAliveInterval)
 }
 
 // relaySSEInterval is relaySSE with an injectable keep-alive interval (for tests).
 func relaySSEInterval(
 	w http.ResponseWriter, upstream io.ReadCloser, status int, contentType string,
-	onMidStreamErr func() (string, int), interval time.Duration,
-) (usageScan, map[string]int64, int) {
+	headSent, canRetry bool, onMidStreamErr func() (string, int), interval time.Duration,
+) sseResult {
 	fl, _ := w.(http.Flusher)
-	if contentType != "" {
-		w.Header().Set("Content-Type", contentType)
-	}
-	w.WriteHeader(status)
-	// Send the head + an ignored SSE comment right away so the client enters streaming mode
-	// immediately, even if the first real event is far off.
-	_, _ = io.WriteString(w, ": keep-alive\n\n")
-	if fl != nil {
-		fl.Flush()
+	if !headSent {
+		if contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		w.WriteHeader(status)
+		// Send the head + an ignored SSE comment right away so the client enters streaming mode
+		// immediately, even if the first real event is far off.
+		_, _ = io.WriteString(w, ": keep-alive\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
 	}
 
 	var scan usageScan
 	var mcp mcpScan
-	var errs errScan
+	var errs anthropic.ErrScan
 	recorded := status
+	// Whether any upstream bytes reached the client. Keep-alive comments don't count: SSE
+	// consumers discard comment lines, so a stream that has only sent those is still a blank
+	// slate another account can take over.
+	wroteData := false
 
 	// Read on a goroutine so we can select on a keep-alive timer during upstream silence.
 	done := make(chan struct{})
@@ -79,10 +101,17 @@ func relaySSEInterval(
 			scan.Feed(b)
 			mcp.Feed(b)
 			errs.Feed(b)
-			if errs.retryable() != "" {
-				// A limit/overload surfaced *inside* the stream: the 200 head is already out, so
-				// we can't retry another account transparently. Don't relay the raw error frame;
-				// hand the client a normalized retryable error so it re-sends the whole request.
+			if errs.Retryable() != "" {
+				// A limit/overload (typically `overloaded_error`) surfaced *inside* the stream.
+				// If the client hasn't seen any real content yet, the next account can pick the
+				// request up on this same open stream and nothing about the swap is observable —
+				// so do that rather than failing a request another account could serve.
+				if !wroteData && canRetry {
+					return sseResult{scan: scan, mcp: mcp.calls, status: recorded, retry: true}
+				}
+				// Content is already out (or there's no account left): mid-stream is too late for
+				// a transparent swap. Don't relay the raw error frame; hand the client a
+				// normalized retryable error so it re-sends the whole request.
 				frame, rs := onMidStreamErr()
 				if frame != "" {
 					_, _ = io.WriteString(w, frame)
@@ -91,9 +120,10 @@ func relaySSEInterval(
 					}
 				}
 				recorded = rs
-				return scan, mcp.calls, recorded
+				return sseResult{scan: scan, mcp: mcp.calls, status: recorded}
 			}
 			_, _ = w.Write(b)
+			wroteData = true
 			if fl != nil {
 				fl.Flush()
 			}
@@ -105,7 +135,7 @@ func relaySSEInterval(
 			}
 		case <-errCh:
 			// Upstream closed (EOF or error); usage already scanned.
-			return scan, mcp.calls, recorded
+			return sseResult{scan: scan, mcp: mcp.calls, status: recorded}
 		}
 	}
 }

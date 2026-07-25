@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"claudeproxy/gateway/internal/anthropic"
 	"claudeproxy/gateway/internal/ccident"
 	"claudeproxy/gateway/internal/config"
 	"claudeproxy/gateway/internal/control"
@@ -167,10 +168,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	prep.Beta = append(prep.Beta, r.Header.Values("anthropic-beta")...)
 
+	// headSent survives across attempts: once the streamed 200 is open (because an attempt got a
+	// 200 and only then hit an overload), the next account writes into that same response.
+	headSent := false
 	for i, cand := range resp.Candidates {
 		canRetry := i < len(resp.Candidates)-1
-		res := h.forward(r.Context(), w, cand, resp.UserID, resp.TokenID, prep, canRetry)
+		res := h.forward(r.Context(), w, cand, resp.UserID, resp.TokenID, prep, canRetry, headSent)
 		h.ctrl.ReportUsage(context.Background(), res.report)
+		headSent = res.headSent
 		if !res.retry {
 			return
 		}
@@ -180,10 +185,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type forwardResult struct {
 	retry  bool
 	report control.UsageReport
+	// headSent means the streamed 200 head is already on the wire, so a retry must continue
+	// writing into the open response rather than starting a new one.
+	headSent bool
 }
 
 func (h *Handler) forward(
-	ctx context.Context, w http.ResponseWriter, cand control.Candidate, userID, tokenID *int, prep Prepared, canRetry bool,
+	ctx context.Context, w http.ResponseWriter, cand control.Candidate, userID, tokenID *int, prep Prepared, canRetry, headSent bool,
 ) forwardResult {
 	model := prep.RequestedModel
 	report := control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Source: "routing"}
@@ -221,11 +229,11 @@ func (h *Handler) forward(
 	if err != nil {
 		if canRetry {
 			report.Status = 0
-			return forwardResult{retry: true, report: report}
+			return forwardResult{retry: true, headSent: headSent, report: report}
 		}
-		h.tr.WriteError(w, http.StatusBadGateway, "api_error", "upstream request failed")
+		h.failAfterHead(w, headSent, http.StatusBadGateway, "api_error", "upstream request failed")
 		report.Status = http.StatusBadGateway
-		return forwardResult{retry: false, report: report}
+		return forwardResult{retry: false, headSent: headSent, report: report}
 	}
 	defer resp.Body.Close()
 
@@ -234,33 +242,65 @@ func (h *Handler) forward(
 
 	if retryableStatuses[resp.StatusCode] && canRetry {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return forwardResult{retry: true, report: report}
+		return forwardResult{retry: true, headSent: headSent, report: report}
 	}
 
 	contentType := resp.Header.Get("Content-Type")
 	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
 		sw := h.tr.NewStreamWriter(w, prep)
-		u := h.relayStream(w, resp.Body, sw)
+		u, retry := h.relayStream(w, resp.Body, sw, headSent, canRetry)
 		applyUsage(&report, u, model)
-		return forwardResult{retry: false, report: report}
+		return forwardResult{retry: retry, headSent: true, report: report}
 	}
 
 	buf, _ := io.ReadAll(resp.Body)
+	if headSent {
+		// An earlier attempt opened a streamed 200 and then overloaded before any content; this
+		// one came back non-streamed, so the status line is spent. Close the open stream with a
+		// client-shaped error instead of truncating it silently.
+		h.failAfterHead(w, true, resp.StatusCode, "api_error", "upstream returned a non-streamed response")
+		return forwardResult{retry: false, headSent: true, report: report}
+	}
 	u := h.tr.RelayJSON(w, resp.StatusCode, buf, prep)
 	applyUsage(&report, u, model)
-	return forwardResult{retry: false, report: report}
+	return forwardResult{retry: false, headSent: false, report: report}
+}
+
+// failAfterHead reports a terminal failure in whichever form the response still allows: a normal
+// client-shaped error when nothing has been sent, or an error frame on an already-open stream.
+func (h *Handler) failAfterHead(w http.ResponseWriter, headSent bool, status int, kind, message string) {
+	if !headSent {
+		h.tr.WriteError(w, status, kind, message)
+		return
+	}
+	// The status line is gone; an SSE comment is the only thing every client tolerates, and the
+	// truncated stream itself signals the failure.
+	_, _ = io.WriteString(w, ": claude-proxy: "+message+"\n\n")
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
 }
 
 // relayStream streams an SSE response to the client in real time while feeding usage/translation
 // through the StreamWriter. It flushes the head immediately and injects keep-alive comments
 // during upstream silence, exactly like the production gateway.
-func (h *Handler) relayStream(w http.ResponseWriter, upstream io.ReadCloser, sw StreamWriter) Usage {
+//
+// Anthropic can accept a request with a 200 and only then fail it with an in-stream
+// `overloaded_error`. When that happens before the translator has emitted anything client-visible,
+// the second return value asks the caller to hand the request to the next account — which takes
+// over this same open stream, invisibly to the client. Once real frames are out, a swap would be
+// visible (duplicated content), so the stream is simply closed and the client retries.
+func (h *Handler) relayStream(
+	w http.ResponseWriter, upstream io.ReadCloser, sw StreamWriter, headSent, canRetry bool,
+) (Usage, bool) {
 	fl, _ := w.(http.Flusher)
-	w.Header().Set("Content-Type", h.tr.StreamContentType())
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, ": keep-alive\n\n")
-	if fl != nil {
-		fl.Flush()
+	if !headSent {
+		w.Header().Set("Content-Type", h.tr.StreamContentType())
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, ": keep-alive\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
 	}
 
 	done := make(chan struct{})
@@ -287,12 +327,21 @@ func (h *Handler) relayStream(w http.ResponseWriter, upstream io.ReadCloser, sw 
 		}
 	}()
 
+	var errs anthropic.ErrScan
+	wroteData := false
 	ticker := time.NewTicker(keepAliveInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case b := <-dataCh:
+			errs.Feed(b)
+			if errs.Retryable() != "" && !wroteData && canRetry {
+				// Nothing client-visible yet — let another account serve this request instead of
+				// translating an upstream overload into a client-facing failure.
+				return sw.Usage(), true
+			}
 			sw.Feed(b)
+			wroteData = true
 			if fl != nil {
 				fl.Flush()
 			}
@@ -306,7 +355,7 @@ func (h *Handler) relayStream(w http.ResponseWriter, upstream io.ReadCloser, sw 
 			if fl != nil {
 				fl.Flush()
 			}
-			return sw.Usage()
+			return sw.Usage(), false
 		}
 	}
 }

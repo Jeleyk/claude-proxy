@@ -86,10 +86,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// headSent survives across attempts: once a stream is open (because an attempt got a 200 and
+	// only then hit an overload), the next account keeps writing into that same response.
+	headSent := false
 	for i, cand := range resp.Candidates {
 		canRetry := i < len(resp.Candidates)-1
-		res := h.forward(r.Context(), w, r, cand, resp.Candidates, i, resp.UserID, resp.TokenID, body, canRetry)
+		res := h.forward(r.Context(), w, r, cand, resp.Candidates, i, resp.UserID, resp.TokenID, body, canRetry, headSent)
 		h.ctrl.ReportUsage(context.Background(), res.report)
+		headSent = res.headSent
 		if !res.retry {
 			return
 		}

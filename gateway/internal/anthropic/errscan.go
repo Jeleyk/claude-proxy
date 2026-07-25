@@ -1,9 +1,9 @@
-package proxy
+package anthropic
 
 import "strings"
 
-// errScan incrementally scans a streamed response for a *retryable* error frame that arrives
-// after the 200 head is already out, mirroring the Kotlin SseErrorScanner. Anthropic signals a
+// ErrScan incrementally scans a streamed response for a *retryable* error frame that arrives
+// after the 200 head is already out, mirroring the Kotlin SseErrorScanner. Shared by the Claude Code datapath and the routing gateways. Anthropic signals a
 // mid-stream failure with a dedicated SSE frame:
 //
 //	event: error
@@ -11,7 +11,7 @@ import "strings"
 //
 // `event: error` is an SSE field line, so model-generated text can't forge it. Once seen, we
 // read the inner error type; only rate_limit_error / overloaded_error / api_error are retryable.
-type errScan struct {
+type ErrScan struct {
 	retryableType string
 	sawErrorEvent bool
 	carry         string
@@ -20,7 +20,7 @@ type errScan struct {
 var retryableErrTypes = []string{"rate_limit_error", "overloaded_error", "api_error"}
 
 // Feed scans another chunk. Returns nothing; call retryable() to read the result.
-func (e *errScan) Feed(b []byte) {
+func (e *ErrScan) Feed(b []byte) {
 	if len(b) == 0 || e.retryableType != "" {
 		return
 	}
@@ -44,5 +44,5 @@ func (e *errScan) Feed(b []byte) {
 	}
 }
 
-// retryable returns the retryable error type seen mid-stream, or "" if none.
-func (e *errScan) retryable() string { return e.retryableType }
+// Retryable returns the retryable error type seen mid-stream, or "" if none.
+func (e *ErrScan) Retryable() string { return e.retryableType }

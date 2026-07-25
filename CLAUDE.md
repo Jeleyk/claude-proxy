@@ -197,6 +197,17 @@ overrides in the `service` `environment:` block — **do not remove them**:
   `"You are Claude Code, Anthropic's official CLI for Claude."` — otherwise 400/401.
 - Rate-limit headers: `anthropic-ratelimit-unified-5h-utilization` / `-7d-utilization` (0..1),
   `-5h-status`, `-5h-reset` (epoch seconds). No remaining/limit for subscriptions.
+- **`overloaded_error` can arrive *after* a 200.** Anthropic accepts the request, then fails it
+  with an in-stream `event: error` frame. Both Go datapaths scan for it
+  (`anthropic.ErrScan`, shared): if nothing client-visible has been written yet — only
+  `: keep-alive` comments, which SSE consumers discard — the next candidate takes the request over
+  **on the same open stream**, invisibly to the client (`headSent` threads through
+  `forward`/`relaySSE`/`relayStream` so the head is written exactly once). Once real frames are
+  out, or no candidate is left, the error is surfaced instead: the proxy datapath writes a
+  normalized retryable frame (`midStreamError`), routing lets the translator emit its own error
+  shape. Retryable HTTP statuses (429/401/500/502/503/529) still swap accounts before any head is
+  sent, as before. The Kotlin rollback datapath does **not** do the in-stream swap — it normalizes
+  and lets the client retry (its coroutine relay carries the load-bearing 502 fix; left alone).
 - **SSE relay is timing-sensitive.** `UpstreamForwarder` must flush the response head
   *immediately*, stream with `readAvailable` (not the buffering `readRemaining`), and inject
   `: keep-alive\n\n` SSE comments during upstream silence. Adaptive-thinking Opus on a 1M
