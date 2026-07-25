@@ -806,23 +806,51 @@ private fun buildWindows(
     zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
     keep: ((Int) -> Boolean)? = null,
 ): WindowStatsPayload {
-    val n = days.coerceIn(1, 30)
-    val startDate = endDate.minusDays((n - 1).toLong())
-    val start = startDate.atStartOfDay(zone).toInstant()
-    val end = endDate.plusDays(1).atStartOfDay(zone).toInstant()
-    // 30-min bins: the limit probe samples each account every ~30 min, so half-hour
-    // buckets are the finest resolution the data actually supports. Capped at 336
-    // (= 7 days of 30-min bins); longer ranges coarsen to keep the payload sane.
-    val buckets = (n * 48).coerceAtMost(336)
-    val widthMs = (end.toEpochMilli() - start.toEpochMilli()).toDouble() / buckets
-    val labels = (0 until buckets).map {
-        java.time.Instant.ofEpochMilli(start.toEpochMilli() + (it * widthMs).toLong())
+    val plan = planWindowBuckets(days, endDate, zone, java.time.Instant.now())
+    val labels = (0 until plan.buckets).map {
+        java.time.Instant.ofEpochMilli(plan.start.toEpochMilli() + (it * plan.widthMs).toLong())
             .atZone(zone).toLocalDateTime().toString().substring(5, 16)
     }
     // Default keep: exclude personal accounts (pool-wide view).
     val includeAccount = keep ?: AccountRepo.personalIds().let { personal -> { id: Int -> id !in personal } }
-    val samples = org.claudeproxy.repo.WindowSnapshotRepo.fetch(start, end).filter { includeAccount(it.accountId) }
-    return aggregateWindows(samples, start.toEpochMilli(), widthMs, buckets, labels, includeAccounts, AccountRepo.namesMap())
+    val samples = org.claudeproxy.repo.WindowSnapshotRepo.fetch(plan.start, plan.end).filter { includeAccount(it.accountId) }
+    return aggregateWindows(
+        samples, plan.start.toEpochMilli(), plan.widthMs, plan.buckets, labels, includeAccounts, AccountRepo.namesMap(),
+    )
+}
+
+/** Time grid for the window-utilization charts: half-open [start, end) split into [buckets]. */
+internal data class BucketPlan(
+    val start: java.time.Instant, val end: java.time.Instant, val widthMs: Double, val buckets: Int,
+)
+
+/**
+ * Plan the bucket grid for a window-utilization range.
+ *
+ * 30-min bins: the limit probe samples each account every ~30 min, so half-hour buckets are the
+ * finest resolution the data actually supports. Capped at 336 (= 7 days of 30-min bins); longer
+ * ranges coarsen the bucket width to keep the payload sane.
+ *
+ * The grid **stops at [now]** when the requested range runs past it. Sizing the axis to the end of
+ * the last calendar day instead would leave the rest of today as empty trailing buckets, and since
+ * [aggregateWindows] carries the last reading forward across gaps, those render as a flat line
+ * stretching hours into the future — indistinguishable from real, current data. Truncating keeps
+ * the bucket width intact (it is computed from the full span first) and simply drops the tail.
+ */
+internal fun planWindowBuckets(
+    days: Int, endDate: java.time.LocalDate, zone: java.time.ZoneId, now: java.time.Instant,
+): BucketPlan {
+    val n = days.coerceIn(1, 30)
+    val start = endDate.minusDays((n - 1).toLong()).atStartOfDay(zone).toInstant()
+    val fullEnd = endDate.plusDays(1).atStartOfDay(zone).toInstant()
+    val fullBuckets = (n * 48).coerceAtMost(336)
+    val widthMs = (fullEnd.toEpochMilli() - start.toEpochMilli()).toDouble() / fullBuckets
+    if (!fullEnd.isAfter(now)) return BucketPlan(start, fullEnd, widthMs, fullBuckets)
+    // Keep the bucket holding `now` — it is partially elapsed but already carries readings.
+    val elapsed = (now.toEpochMilli() - start.toEpochMilli()).toDouble()
+    val buckets = (Math.floor(elapsed / widthMs).toInt() + 1).coerceIn(1, fullBuckets)
+    val end = java.time.Instant.ofEpochMilli(start.toEpochMilli() + (buckets * widthMs).toLong())
+    return BucketPlan(start, end, widthMs, buckets)
 }
 
 /**
