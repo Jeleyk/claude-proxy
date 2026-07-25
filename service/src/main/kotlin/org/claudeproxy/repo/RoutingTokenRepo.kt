@@ -21,15 +21,19 @@ import java.time.Instant
  */
 object RoutingTokenRepo {
 
-    /** Resolves a raw routing token to its owner + token id, or null (cached, DB fallback). */
+    /**
+     * Resolves a raw routing token to its owner + token id, or null (cached, DB fallback).
+     * A disabled token resolves to null — the gateways reject it like an unknown token.
+     */
     fun resolveAuth(rawToken: String): TokenAuth? {
         val hash = Crypto.sha256Hex(rawToken)
         return parseTokenAuth(MemoryCache.getOrLoad("cp:rtok:$hash", 60) { loadByHash(hash) })
     }
 
     private fun loadByHash(hash: String): String? = transaction {
-        val row = RoutingTokens.selectAll().where { RoutingTokens.tokenHash eq hash }.firstOrNull()
-            ?: return@transaction null
+        val row = RoutingTokens.selectAll()
+            .where { (RoutingTokens.tokenHash eq hash) and (RoutingTokens.enabled eq true) }
+            .firstOrNull() ?: return@transaction null
         RoutingTokens.update({ RoutingTokens.tokenHash eq hash }) { it[lastUsedAt] = Instant.now() }
         "${row[RoutingTokens.userId]}:${row[RoutingTokens.id]}"
     }
@@ -64,8 +68,24 @@ object RoutingTokenRepo {
                 createdAt = row[RoutingTokens.createdAt].toString(),
                 lastUsedAt = row[RoutingTokens.lastUsedAt]?.toString(),
                 systemPrompt = row[RoutingTokens.systemPrompt],
+                enabled = row[RoutingTokens.enabled],
             )
         }
+    }
+
+    /** Turn a routing token on/off (own tokens only); evicts the resolve cache — see [ProxyTokenRepo.setEnabled]. */
+    fun setEnabled(id: Int, userId: Int, enabled: Boolean): Boolean {
+        val (updated, hash) = transaction {
+            val h = RoutingTokens.selectAll()
+                .where { (RoutingTokens.id eq id) and (RoutingTokens.userId eq userId) }
+                .firstOrNull()?.get(RoutingTokens.tokenHash)
+            val n = RoutingTokens.update({ (RoutingTokens.id eq id) and (RoutingTokens.userId eq userId) }) {
+                it[RoutingTokens.enabled] = enabled
+            }
+            (n > 0) to h
+        }
+        if (updated && hash != null) MemoryCache.evict("cp:rtok:$hash")
+        return updated
     }
 
     /**

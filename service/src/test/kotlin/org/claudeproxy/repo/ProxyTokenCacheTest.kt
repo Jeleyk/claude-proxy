@@ -13,9 +13,14 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
-/** The in-process token cache must be transparent: resolve, cache, and evict on delete. */
+/**
+ * The in-process token cache must be transparent: resolve, cache, and evict on delete or on a
+ * disable/enable switch — a token switched off must stop resolving at once, not after the TTL.
+ */
 class ProxyTokenCacheTest {
     private lateinit var dbFile: File
 
@@ -51,6 +56,44 @@ class ProxyTokenCacheTest {
         assertEquals(TokenAuth(adminId, dto.id), ProxyTokenRepo.resolveAuth(dto.token!!))
         ProxyTokenRepo.delete(dto.id, adminId)
         assertNull(ProxyTokenRepo.resolveAuth(dto.token!!))
+    }
+
+    @Test
+    fun `disabled token stops resolving and resolves again once re-enabled`() {
+        val adminId = transaction { Users.selectAll().first()[Users.id] }
+        val dto = ProxyTokenRepo.create(adminId, "t3")
+        // Resolve first so the mapping is cached: the switch must evict, not wait out the TTL.
+        assertEquals(TokenAuth(adminId, dto.id), ProxyTokenRepo.resolveAuth(dto.token!!))
+
+        assertTrue(ProxyTokenRepo.setEnabled(dto.id, adminId, false))
+        assertNull(ProxyTokenRepo.resolveAuth(dto.token!!))
+        assertFalse(ProxyTokenRepo.listForUser(adminId).first { it.id == dto.id }.enabled)
+
+        assertTrue(ProxyTokenRepo.setEnabled(dto.id, adminId, true))
+        assertEquals(TokenAuth(adminId, dto.id), ProxyTokenRepo.resolveAuth(dto.token!!))
+    }
+
+    @Test
+    fun `tokens are enabled by default and only their owner may switch them`() {
+        val adminId = transaction { Users.selectAll().first()[Users.id] }
+        val dto = ProxyTokenRepo.create(adminId, "t4")
+        assertTrue(dto.enabled)
+        assertFalse(ProxyTokenRepo.setEnabled(dto.id, adminId + 1, false))
+        assertEquals(TokenAuth(adminId, dto.id), ProxyTokenRepo.resolveAuth(dto.token!!))
+    }
+
+    @Test
+    fun `routing tokens switch off and on the same way`() {
+        val adminId = transaction { Users.selectAll().first()[Users.id] }
+        val dto = RoutingTokenRepo.create(adminId, "r1")
+        assertTrue(dto.enabled)
+        assertEquals(TokenAuth(adminId, dto.id), RoutingTokenRepo.resolveAuth(dto.token!!))
+
+        assertTrue(RoutingTokenRepo.setEnabled(dto.id, adminId, false))
+        assertNull(RoutingTokenRepo.resolveAuth(dto.token!!))
+
+        assertTrue(RoutingTokenRepo.setEnabled(dto.id, adminId, true))
+        assertEquals(TokenAuth(adminId, dto.id), RoutingTokenRepo.resolveAuth(dto.token!!))
     }
 
     @Test

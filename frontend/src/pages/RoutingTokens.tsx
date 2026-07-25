@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, fmtUsd, ProxyTokenDto, UserDto } from '../api';
-import { CodeBlock, Copy, Segmented, Select } from '../ui';
+import { CodeBlock, Copy, Modal, Segmented, Switch } from '../ui';
 import { TokenUsageSection } from './tokenUsage';
 
 // The routing gateways are fronted by nginx: OpenAI at /routing/openai (SDK appends /v1/...),
@@ -49,8 +49,8 @@ function anthropicCurl(base: string, token: string) {
 export function RoutingTokens() {
   const [tokens, setTokens] = useState<ProxyTokenDto[]>([]);
   const [name, setName] = useState('');
-  const [newPrompt, setNewPrompt] = useState('');
   const [revealed, setRevealed] = useState<ProxyTokenDto | null>(null);
+  const [editing, setEditing] = useState<ProxyTokenDto | null>(null);
   const [origin, setOrigin] = useState(window.location.origin);
   const [provider, setProvider] = useState<'openai' | 'anthropic'>('openai');
   const [lang, setLang] = useState<'python' | 'curl'>('python');
@@ -67,16 +67,23 @@ export function RoutingTokens() {
   }
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, []);
 
+  // Creation only takes a name — the static system prompt is set afterwards, in the token's
+  // Edit dialog, so the create box stays a one-liner.
   async function create() {
     setErr(null);
     try {
-      const t = await api.createRoutingToken(name || 'token', newPrompt.trim() || undefined);
-      setRevealed(t); setName(''); setNewPrompt(''); load();
+      const t = await api.createRoutingToken(name || 'token');
+      setRevealed(t); setName(''); load();
     } catch (e: any) { setErr(e.message); }
   }
   async function del(id: number) {
     if (!confirm('Delete this routing token? Clients using it stop working.')) return;
     await api.deleteRoutingToken(id); load();
+  }
+  async function toggle(id: number, enabled: boolean) {
+    setErr(null);
+    try { setTokens(await api.setRoutingTokenEnabled(id, enabled)); }
+    catch (e: any) { setErr(e.message); }
   }
 
   const b = bases(origin);
@@ -109,6 +116,8 @@ export function RoutingTokens() {
         </div>
       )}
 
+      {/* Create + connect in one card: the example below is filled in with the token you just
+          created, so there is nothing to paste in by hand. */}
       <div className="panel narrow">
         <h2 style={{ marginTop: 0 }}>Endpoints</h2>
         <div className="connect-tabs">
@@ -126,21 +135,11 @@ export function RoutingTokens() {
           <Copy text={base} label="Copy base URL" />
         </div>
         <div className="mono" style={{ wordBreak: 'break-all' }}>{base}</div>
-        <p className="hint" style={{ marginBottom: 4, marginTop: 12 }}>Example (swap in a token you create below):</p>
-        <CodeBlock text={snippet('<your-routing-token>')} />
-      </div>
 
-      <div className="panel narrow">
-        <h2 style={{ marginTop: 0 }}>Create routing token</h2>
-        <div className="row">
+        <div className="row" style={{ marginTop: 14 }}>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="token name (e.g. my-app)" onKeyDown={(e) => e.key === 'Enter' && create()} />
-          <button onClick={create}>Create</button>
+          <button onClick={create}>Create token</button>
         </div>
-        <textarea
-          value={newPrompt} onChange={(e) => setNewPrompt(e.target.value)} rows={3}
-          placeholder="Static system prompt (optional) — always injected ahead of whatever system prompt the API request carries"
-          style={{ width: '100%', marginTop: 8, resize: 'vertical' }}
-        />
         {err && <div className="err">{err}</div>}
         {tok && (
           <div className="tokenreveal">
@@ -148,72 +147,91 @@ export function RoutingTokens() {
               <b>New token — copy it now, it won't be shown again</b>
               <Copy text={tok} label="Copy token" />
             </div>
-            <div className="mono" style={{ margin: '8px 0', wordBreak: 'break-all' }}>{tok}</div>
-            <CodeBlock text={snippet(tok)} />
+            <div className="mono" style={{ marginTop: 8, wordBreak: 'break-all' }}>{tok}</div>
           </div>
         )}
+        <p className="hint" style={{ marginBottom: 4, marginTop: 12 }}>
+          {tok ? 'Ready to run — your new token is already in it:' : 'Example (a created token drops straight in here):'}
+        </p>
+        <CodeBlock text={snippet(tok ?? '<your-routing-token>')} />
       </div>
 
-      {tokens.length > 0 && <PromptPanel tokens={tokens} onSaved={load} />}
+      <TokenUsageSection source="routing" tokens={tokens} onDelete={del} onToggle={toggle}
+        onEdit={setEditing} emptyHint="No routing tokens yet." />
 
-      <TokenUsageSection source="routing" tokens={tokens} onDelete={del} emptyHint="No routing tokens yet." />
+      {editing && (
+        <RoutingTokenModal token={tokens.find((t) => t.id === editing.id) ?? editing}
+          onClose={() => setEditing(null)} onChanged={load} />
+      )}
     </div>
   );
 }
 
 /**
- * Per-token static system prompt editor. The prompt is injected by the routing gateways right
- * after the mandatory Claude Code block — ahead of (higher priority than) any system prompt the
- * API request itself carries.
+ * Everything configurable about one routing token: the on/off switch and the static system
+ * prompt, which the routing gateways inject right after the mandatory Claude Code block — ahead
+ * of (higher priority than) any system prompt the API request itself carries.
+ *
+ * The prompt saves explicitly (it's a text edit); the switch applies immediately, since it's
+ * reversible and its whole point is cutting a token off fast.
  */
-function PromptPanel({ tokens, onSaved }: { tokens: ProxyTokenDto[]; onSaved: () => void }) {
-  const [sel, setSel] = useState<number>(tokens[0].id);
-  const [text, setText] = useState('');
+function RoutingTokenModal({ token, onClose, onChanged }: {
+  token: ProxyTokenDto; onClose: () => void; onChanged: () => void;
+}) {
+  const [text, setText] = useState(token.systemPrompt ?? '');
   const [dirty, setDirty] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const cur = tokens.find((t) => t.id === sel) ?? tokens[0];
 
-  // Re-sync the editor when switching tokens or when a background refresh brings new data.
-  useEffect(() => {
-    if (!tokens.some((t) => t.id === sel)) setSel(tokens[0].id);
-  }, [tokens, sel]);
-  useEffect(() => {
-    if (!dirty) setText(cur.systemPrompt ?? '');
-  }, [cur.id, cur.systemPrompt, dirty]);
+  // A background refresh may bring a newer prompt; never clobber an edit in progress.
+  useEffect(() => { if (!dirty) setText(token.systemPrompt ?? ''); }, [token.systemPrompt, dirty]);
 
   async function save(value: string | null) {
     setErr(null);
     try {
-      await api.updateRoutingTokenPrompt(cur.id, value);
+      await api.updateRoutingTokenPrompt(token.id, value);
       setDirty(false); setSaved(true); setTimeout(() => setSaved(false), 1500);
-      onSaved();
+      onChanged();
     } catch (e: any) { setErr(e.message); }
+  }
+  async function setEnabled(v: boolean) {
+    setErr(null);
+    try { await api.setRoutingTokenEnabled(token.id, v); onChanged(); }
+    catch (e: any) { setErr(e.message); }
   }
 
   return (
-    <div className="panel narrow">
+    <Modal title={`Token · ${token.name}`} onClose={onClose} width={560}
+      footer={
+        <>
+          {saved && <span className="hint" style={{ marginRight: 'auto' }}>Saved ✓</span>}
+          {token.systemPrompt && <button className="ghost" onClick={() => { setText(''); save(null); }}>Clear prompt</button>}
+          <button onClick={() => save(text.trim() || null)} disabled={!dirty}>Save</button>
+          <button className="ghost" onClick={onClose}>Close</button>
+        </>
+      }>
+      {err && <div className="err">{err}</div>}
+
       <div className="row" style={{ justifyContent: 'space-between' }}>
-        <h2 style={{ margin: 0 }}>Static system prompt</h2>
-        <Select ariaLabel="Select token" value={String(cur.id)} minWidth={160}
-          onChange={(v) => { setSel(Number(v)); setDirty(false); }}
-          options={tokens.map((t) => ({ value: String(t.id), label: t.systemPrompt ? `${t.name} ●` : t.name }))} />
+        <div>
+          <b>Enabled</b>
+          <p className="hint" style={{ margin: '2px 0 0' }}>
+            Off = clients using this token get 401 immediately, without revoking it.
+          </p>
+        </div>
+        <Switch checked={token.enabled} onChange={setEnabled} />
       </div>
-      <p className="hint" style={{ margin: '8px 0' }}>
-        Injected on every request of this token, ahead of any system prompt the API request carries. ● = prompt set.
+
+      <h3 style={{ margin: '20px 0 4px', fontSize: 14 }}>Static system prompt</h3>
+      <p className="hint" style={{ margin: '0 0 8px' }}>
+        Injected on every request of this token, ahead of any system prompt the API request carries.
       </p>
       <textarea
-        value={text} rows={5}
+        value={text} rows={6}
         onChange={(e) => { setText(e.target.value); setDirty(true); }}
         placeholder="e.g. Always answer in Russian. Never reveal internal tooling."
         style={{ width: '100%', resize: 'vertical' }}
       />
-      <div className="row" style={{ marginTop: 8, gap: 8 }}>
-        <button onClick={() => save(text.trim() || null)} disabled={!dirty}>Save</button>
-        {cur.systemPrompt && <button className="ghost" onClick={() => { setText(''); save(null); }}>Clear</button>}
-        {saved && <span className="hint">Saved ✓</span>}
-      </div>
-      {err && <div className="err">{err}</div>}
-    </div>
+    </Modal>
   );
 }

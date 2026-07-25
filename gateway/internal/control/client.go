@@ -5,6 +5,8 @@ package control
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +35,9 @@ type ResolveResp struct {
 	Candidates    []Candidate `json:"candidates"`
 	// Routing only: the token's static system prompt, to inject ahead of client system content.
 	SystemPrompt *string `json:"systemPrompt"`
+	// Client-side only: the id this resolve announced to the service, to be handed back to
+	// EndSession when the request finishes. Not part of the wire response.
+	SessionID string `json:"-"`
 }
 
 // UsageReport is one upstream attempt's outcome, posted to /internal/usage.
@@ -53,10 +58,26 @@ type UsageReport struct {
 }
 
 type resolveReq struct {
-	Token  string `json:"token"`
-	Method string `json:"method"`
-	Path   string `json:"path"`
-	Source string `json:"source,omitempty"`
+	Token     string `json:"token"`
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+	Source    string `json:"source,omitempty"`
+	RequestID string `json:"requestId,omitempty"`
+}
+
+type sessionEndReq struct {
+	RequestID string `json:"requestId"`
+}
+
+// newSessionID mints the id that ties a resolve to its EndSession. Randomness only has to avoid
+// collisions between concurrent in-flight requests; if the entropy source fails we fall back to
+// the clock, which is still unique enough for a liveness gauge.
+func newSessionID() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("t%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // Client talks to the service control API.
@@ -88,7 +109,8 @@ func (c *Client) WithSource(source string) *Client {
 // Resolve turns a proxy token + request line into an ordered candidate list. The returned int
 // is the HTTP status so the caller can map 401/403 straight to the client.
 func (c *Client) Resolve(ctx context.Context, token, method, path string) (*ResolveResp, int, error) {
-	body, _ := json.Marshal(resolveReq{Token: token, Method: method, Path: path, Source: c.source})
+	sessionID := newSessionID()
+	body, _ := json.Marshal(resolveReq{Token: token, Method: method, Path: path, Source: c.source, RequestID: sessionID})
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.serviceURL+"/internal/resolve", bytes.NewReader(body))
@@ -111,7 +133,34 @@ func (c *Client) Resolve(ctx context.Context, token, method, path string) (*Reso
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("decode resolve: %w", err)
 	}
+	out.SessionID = sessionID
 	return &out, resp.StatusCode, nil
+}
+
+// EndSession tells the service this request is done, closing the "active now" entry the resolve
+// opened. Fire-and-forget and single-shot: a lost close only leaves an entry to age out server
+// side, which is not worth retrying (or ever blocking the response path) for.
+func (c *Client) EndSession(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	body, _ := json.Marshal(sessionEndReq{RequestID: sessionID})
+	go func() {
+		rc, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(rc, http.MethodPost, c.serviceURL+"/internal/session-end", bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Token", c.internalToken)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 }
 
 // ReportUsage posts an attempt outcome fire-and-forget: it runs in a goroutine with a couple of

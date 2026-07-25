@@ -77,6 +77,23 @@ function HeadroomCard({ label, s }: { label: ReactNode; s: PoolStats }) {
   );
 }
 
+/**
+ * Requests streaming from Anthropic *right now*, split by datapath. Pool-wide on the Dashboard
+ * (everyone), own on "My Accounts". Replaces the all-time request counter, which said nothing
+ * about what the proxy is doing at this moment — and is still available per account in the table.
+ */
+function ActiveSessionsCard({ s, scope }: { s: PoolStats; scope: Scope }) {
+  const total = s.activeProxySessions + s.activeRoutingSessions;
+  return (
+    <div className="card">
+      <div className="label">{scope === 'personal' ? 'My active sessions' : 'Active sessions'}</div>
+      <div className="value">{total}</div>
+      <div className="hint">{s.activeProxySessions} proxy · {s.activeRoutingSessions} routing</div>
+      <div className="hint">{total === 0 ? 'nothing streaming' : 'streaming from Anthropic now'}</div>
+    </div>
+  );
+}
+
 export function PoolCards({ stats, scope, shared }: { stats: PoolStats; scope: Scope; shared?: PoolStats | null }) {
   const activeName = stats.activeAccountId ? stats.accounts.find((a) => a.id === stats.activeAccountId)?.name ?? `#${stats.activeAccountId}` : '—';
   return (
@@ -84,7 +101,7 @@ export function PoolCards({ stats, scope, shared }: { stats: PoolStats; scope: S
       <div className="card"><div className="label">{scope === 'personal' ? 'My accounts healthy' : 'Accounts healthy'}</div><div className="value">{stats.healthyAccounts}/{stats.totalAccounts}</div></div>
       <div className="card"><div className="label">Active now</div><div className="value" style={{ fontSize: 20 }}>{activeName}</div></div>
       <HeadroomCard label="Pool headroom" s={stats} />
-      <div className="card"><div className="label">Total requests</div><div className="value">{stats.totalRequests.toLocaleString()}</div></div>
+      <ActiveSessionsCard s={stats} scope={scope} />
       <div className="card">
         <div className="label">Total cost</div>
         <div className="value">{fmtUsd(stats.totalCost)}</div>

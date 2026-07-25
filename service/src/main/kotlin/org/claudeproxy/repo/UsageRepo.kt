@@ -13,6 +13,7 @@ import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 
 @Serializable
@@ -175,15 +176,18 @@ object UsageRepo {
                    else UsageEvents.selectAll().filter { it[UsageEvents.accountId] !in personal })
     }
 
-    /** Daily (account, day) buckets in [start, end), bucketed by UTC date. Excludes personal accounts. */
-    fun dailyBuckets(start: Instant, end: Instant): List<DailyBucketDto> = transaction {
+    /**
+     * Daily (account, day) buckets in [start, end), bucketed by date in [zone]. Excludes personal
+     * accounts. [zone] is the viewer's local timezone, so a "day" matches what they see on a clock.
+     */
+    fun dailyBuckets(start: Instant, end: Instant, zone: ZoneId = ZoneOffset.UTC): List<DailyBucketDto> = transaction {
         val personal = personalAccountIds()
         val acc = HashMap<Pair<Int, String>, DoubleArray>() // (accountId, date) -> [cost, requests, tokens]
         UsageEvents.selectAll()
             .where { (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
             .forEach { row ->
                 if (row[UsageEvents.accountId] in personal) return@forEach
-                val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
+                val date = row[UsageEvents.ts].atZone(zone).toLocalDate().toString()
                 val a = acc.getOrPut(row[UsageEvents.accountId] to date) { DoubleArray(3) }
                 a[0] += row[UsageEvents.cost]
                 a[1] += 1
@@ -193,13 +197,15 @@ object UsageRepo {
     }
 
     /** Daily (account, day) buckets for one user's own usage in [start, end), across ALL accounts (incl. personal). */
-    fun dailyBucketsForUser(userId: Int, start: Instant, end: Instant, source: String? = null): List<DailyBucketDto> = transaction {
+    fun dailyBucketsForUser(
+        userId: Int, start: Instant, end: Instant, source: String? = null, zone: ZoneId = ZoneOffset.UTC,
+    ): List<DailyBucketDto> = transaction {
         val acc = HashMap<Pair<Int, String>, DoubleArray>() // (accountId, date) -> [cost, requests, tokens]
         UsageEvents.selectAll()
             .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
             .forEach { row ->
                 if (source != null && row[UsageEvents.sourceCol] != source) return@forEach
-                val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
+                val date = row[UsageEvents.ts].atZone(zone).toLocalDate().toString()
                 val a = acc.getOrPut(row[UsageEvents.accountId] to date) { DoubleArray(3) }
                 a[0] += row[UsageEvents.cost]
                 a[1] += 1
@@ -209,13 +215,15 @@ object UsageRepo {
     }
 
     /** Daily (account, model, day) token buckets for one user's own usage in [start, end), across ALL accounts (incl. personal). */
-    fun tokenBucketsForUser(userId: Int, start: Instant, end: Instant, source: String? = null): List<TokenBucketDto> = transaction {
+    fun tokenBucketsForUser(
+        userId: Int, start: Instant, end: Instant, source: String? = null, zone: ZoneId = ZoneOffset.UTC,
+    ): List<TokenBucketDto> = transaction {
         val acc = HashMap<Triple<Int, String?, String>, LongArray>() // (accountId, model, date) -> [in, out, cacheRead, cacheWrite]
         UsageEvents.selectAll()
             .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
             .forEach { row ->
                 if (source != null && row[UsageEvents.sourceCol] != source) return@forEach
-                val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
+                val date = row[UsageEvents.ts].atZone(zone).toLocalDate().toString()
                 val a = acc.getOrPut(Triple(row[UsageEvents.accountId], row[UsageEvents.model], date)) { LongArray(4) }
                 a[0] += row[UsageEvents.inputTokens]
                 a[1] += row[UsageEvents.outputTokens]
@@ -227,16 +235,18 @@ object UsageRepo {
 
     /**
      * Daily (inbound token, day) buckets of one user's usage on one datapath ("proxy" | "routing")
-     * in [start, end), bucketed by UTC date. All accounts count (incl. personal) — this feeds the
-     * user's own per-token view. tokenId null groups pre-migration/unattributed rows.
+     * in [start, end), bucketed by date in [zone]. All accounts count (incl. personal) — this feeds
+     * the user's own per-token view. tokenId null groups pre-migration/unattributed rows.
      */
-    fun tokenDailyBucketsForUser(userId: Int, source: String, start: Instant, end: Instant): List<TokenIdDailyBucketDto> = transaction {
+    fun tokenDailyBucketsForUser(
+        userId: Int, source: String, start: Instant, end: Instant, zone: ZoneId = ZoneOffset.UTC,
+    ): List<TokenIdDailyBucketDto> = transaction {
         val acc = HashMap<Pair<Int?, String>, DoubleArray>() // (tokenId, date) -> [cost, requests, tokens]
         UsageEvents.selectAll()
             .where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
             .forEach { row ->
                 if (row[UsageEvents.sourceCol] != source) return@forEach
-                val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
+                val date = row[UsageEvents.ts].atZone(zone).toLocalDate().toString()
                 val a = acc.getOrPut(row[UsageEvents.tokenId] to date) { DoubleArray(3) }
                 a[0] += row[UsageEvents.cost]
                 a[1] += 1
@@ -255,15 +265,15 @@ object UsageRepo {
         acc.mapValues { (_, rows) -> accumulate(rows) }
     }
 
-    /** Daily (account, model, day) token buckets in [start, end), bucketed by UTC date, kinds kept apart. Excludes personal accounts. */
-    fun tokenBuckets(start: Instant, end: Instant): List<TokenBucketDto> = transaction {
+    /** Daily (account, model, day) token buckets in [start, end), bucketed by date in [zone], kinds kept apart. Excludes personal accounts. */
+    fun tokenBuckets(start: Instant, end: Instant, zone: ZoneId = ZoneOffset.UTC): List<TokenBucketDto> = transaction {
         val personal = personalAccountIds()
         val acc = HashMap<Triple<Int, String?, String>, LongArray>() // (accountId, model, date) -> [in, out, cacheRead, cacheWrite]
         UsageEvents.selectAll()
             .where { (UsageEvents.ts greaterEq start) and (UsageEvents.ts less end) }
             .forEach { row ->
                 if (row[UsageEvents.accountId] in personal) return@forEach
-                val date = row[UsageEvents.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
+                val date = row[UsageEvents.ts].atZone(zone).toLocalDate().toString()
                 val a = acc.getOrPut(Triple(row[UsageEvents.accountId], row[UsageEvents.model], date)) { LongArray(4) }
                 a[0] += row[UsageEvents.inputTokens]
                 a[1] += row[UsageEvents.outputTokens]

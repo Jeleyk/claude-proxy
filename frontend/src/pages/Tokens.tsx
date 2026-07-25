@@ -31,6 +31,11 @@ export function Tokens() {
     if (!confirm('Delete this token? Clients using it stop working.')) return;
     await api.deleteToken(id); load();
   }
+  async function toggle(id: number, enabled: boolean) {
+    setErr(null);
+    try { setTokens(await api.setTokenEnabled(id, enabled)); }
+    catch (e: any) { setErr(e.message); }
+  }
 
   const tok = revealed?.token;
 
@@ -57,17 +62,16 @@ export function Tokens() {
         </div>
       )}
 
+      {/* Create + connect in one card: the snippets below already carry the token you just made,
+          so there is nothing to swap in by hand. Before that they show a placeholder. */}
       <div className="panel narrow">
         <h2 style={{ marginTop: 0 }}>Connect Claude Code</h2>
-        <p className="hint">Pick your OS, then paste into your terminal (swap in a token you create below):</p>
-        <ConnectScripts base={base} token="<your-proxy-token>" />
-      </div>
-
-      <div className="panel narrow">
-        <h2 style={{ marginTop: 0 }}>Create token</h2>
+        <p className="hint" style={{ marginTop: -6 }}>
+          Create a token, then paste one of the snippets below — they're filled in with it automatically.
+        </p>
         <div className="row">
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="token name (e.g. laptop)" onKeyDown={(e) => e.key === 'Enter' && create()} />
-          <button onClick={create}>Create</button>
+          <button onClick={create}>Create token</button>
         </div>
         {err && <div className="err">{err}</div>}
         {tok && (
@@ -76,14 +80,15 @@ export function Tokens() {
               <b>New token — copy it now, it won't be shown again</b>
               <Copy text={tok} label="Copy token" />
             </div>
-            <div className="mono" style={{ margin: '8px 0', wordBreak: 'break-all' }}>{tok}</div>
-
-            <ConnectScripts base={base} token={tok} wrapper />
+            <div className="mono" style={{ marginTop: 8, wordBreak: 'break-all' }}>{tok}</div>
           </div>
         )}
+        <div style={{ marginTop: 14 }}>
+          <ConnectScripts base={base} token={tok ?? '<your-proxy-token>'} wrapper />
+        </div>
       </div>
 
-      <TokenUsageSection source="proxy" tokens={tokens} onDelete={del} emptyHint="No tokens yet." />
+      <TokenUsageSection source="proxy" tokens={tokens} onDelete={del} onToggle={toggle} emptyHint="No tokens yet." />
     </div>
   );
 }

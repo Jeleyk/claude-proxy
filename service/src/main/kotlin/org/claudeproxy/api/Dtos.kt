@@ -110,6 +110,14 @@ data class CreateProxyTokenRequest(val name: String, val systemPrompt: String? =
 @Serializable
 data class UpdateRoutingTokenRequest(val systemPrompt: String? = null)
 
+/**
+ * PATCH body for the `…/{id}/enabled` sub-resource of both token kinds. A dedicated sub-resource
+ * rather than a field on [UpdateRoutingTokenRequest], which can't tell "prompt omitted" from
+ * "clear the prompt".
+ */
+@Serializable
+data class UpdateTokenEnabledRequest(val enabled: Boolean)
+
 @Serializable
 data class RolesPayload(val roles: List<org.claudeproxy.repo.RoleDto>, val allPermissions: List<String>)
 
@@ -133,6 +141,9 @@ data class MyStatsPayload(
     val proxyTodayCost: Double = 0.0,           // spend counted against dailyCostLimit today
     val dailyRoutingCostLimit: Double? = null,
     val routingTodayCost: Double = 0.0,         // spend counted against dailyRoutingCostLimit today
+    // this user's requests streaming from Anthropic right now, by datapath
+    val activeProxySessions: Int = 0,
+    val activeRoutingSessions: Int = 0,
     val perModel: List<org.claudeproxy.repo.ModelUsageDto>,        // all-time, per model (source-filtered)
     val perModelToday: List<org.claudeproxy.repo.ModelUsageDto>,   // since start of the UTC day (source-filtered)
     val recent: List<org.claudeproxy.repo.UsageEventDto>,
@@ -265,6 +276,31 @@ data class WindowStatsPayload(
     val totalFiveHourWeighted: List<Double?>,  // Σ coefficient × 5h utilization across accounts
     val totalWeeklyWeighted: List<Double?>,
     val perAccount: List<WindowSeriesDto>,     // empty if the viewer can't see accounts
+    val canViewAccounts: Boolean,
+)
+
+@Serializable
+data class WindowDailySeriesDto(
+    val accountId: Int,
+    val accountName: String?,
+    // Window budget burned per day, in window-fractions: 1.0 = one whole window consumed.
+    // A day with three fully-spent 5h windows reads 3.0, which is exactly the point — the
+    // utilization gauge itself can never exceed 1.0 because it resets.
+    val fiveHour: List<Double>,
+    val weekly: List<Double>,
+)
+
+/**
+ * Per-day window burn (5h + weekly), summed from the positive steps of the utilization series so
+ * that mid-day limit resets are counted rather than swallowed. Days are labelled in the viewer's
+ * timezone, oldest→newest.
+ */
+@Serializable
+data class WindowDailyPayload(
+    val days: List<String>,
+    val totalFiveHour: List<Double>,           // Σ across accounts
+    val totalWeekly: List<Double>,
+    val perAccount: List<WindowDailySeriesDto>, // empty if the viewer can't see accounts
     val canViewAccounts: Boolean,
 )
 

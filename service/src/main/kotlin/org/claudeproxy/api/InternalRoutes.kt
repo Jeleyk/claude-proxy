@@ -25,7 +25,7 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
         post("/resolve") {
             if (!call.authorized()) return@post call.respond(HttpStatusCode.Unauthorized)
             val req = call.receive<ResolveRequest>()
-            val r = datapath.resolve(req.token, req.method, req.path, req.source)
+            val r = datapath.resolve(req.token, req.method, req.path, req.source, req.requestId)
             when (r.error) {
                 ResolveError.BAD_TOKEN -> call.respond(HttpStatusCode.Unauthorized)
                 ResolveError.NO_PERMISSION -> call.respond(HttpStatusCode.Forbidden)
@@ -46,6 +46,13 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
             if (!call.authorized()) return@post call.respond(HttpStatusCode.Unauthorized)
             val report = call.receive<UsageReport>()
             datapath.applyOutcome(report)
+            call.respond(HttpStatusCode.NoContent)
+        }
+        // The gateway reports a request finished (streamed to the end, failed, or client gone),
+        // closing its "active session". Missing this only leaves a stale entry that ages out.
+        post("/session-end") {
+            if (!call.authorized()) return@post call.respond(HttpStatusCode.Unauthorized)
+            org.claudeproxy.datapath.ActiveSessions.end(call.receive<SessionEndRequest>().requestId)
             call.respond(HttpStatusCode.NoContent)
         }
     }

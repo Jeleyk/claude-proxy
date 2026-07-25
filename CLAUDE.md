@@ -159,7 +159,29 @@ overrides in the `service` `environment:` block — **do not remove them**:
   block in the shared `UserStatsView`. Proxy datapath only (routing gateways don't report it).
 - **Proxy tokens:** `cxp_...` (Claude Code datapath); **routing tokens:** `cxr_...` (OpenAI/Anthropic
   gateways) — distinct namespaces (a `cxp_` never authenticates routing and vice versa), both stored
-  as SHA-256 and presented inbound via `Authorization: Bearer` or `x-api-key`.
+  as SHA-256 and presented inbound via `Authorization: Bearer` or `x-api-key`. Both kinds carry
+  an `enabled` flag (default true, `PATCH /api/{proxy,routing}-tokens/{id}/enabled`, own tokens
+  only): a disabled token is filtered out in `loadByHash`, so it resolves like an unknown token
+  (401) on every datapath at once; the switch evicts the resolve cache, so it applies instantly.
+  A routing token's settings (enable switch + static system prompt) live in one Edit dialog on
+  the API Routing page; creation only takes a name.
+- **Viewer-local days:** every time-series endpoint takes an IANA `tz` query param
+  (`rangeParams()` in `AdminRoutes`); the frontend sends `Intl…resolvedOptions().timeZone` on
+  every stats request, so days are sliced on the viewer's clock. Missing/unparseable `tz` falls
+  back to UTC — the pre-existing behaviour. The per-user **daily USD limits stay on UTC days**
+  (`UserRepo.startOfUtcDay`, enforced in `DatapathService`/`ProxyRoutes`), so the limit card in
+  the UI is deliberately labelled with its own 00:00 UTC countdown.
+- **Window burn per day** (`/stats/window-daily`, `/stats/mine/…`, `/users/{id}/…`): how much of
+  each limit window was *consumed* per day, in window-fractions (1.0 = one full window). Computed
+  in `aggregateWindowDaily` as the sum of positive steps of the utilization series — a drop means
+  the window reset, so the fresh reading counts in full, which is why a day with several 5h resets
+  reads well past 100%. Samples are fetched with a 24h lookback so the first day continues the
+  previous series; the first sample of a series is a baseline, never spend.
+- **Active sessions:** `datapath/ActiveSessions` counts requests streaming from Anthropic right
+  now. The Go gateway mints a session id per request (`control.Client.Resolve`), the service opens
+  the entry on a successful resolve and closes it on `/internal/session-end` (fire-and-forget from
+  the gateway's `defer`); the Kotlin datapath wraps its own handler. Entries expire after 30 min so
+  a lost close can't pin the gauge. In-process and unpersisted — a restart correctly reads zero.
 - **Permissions** (`model/Models.kt`, ordered least→most): `PROXY_USE`, `ROUTING_USE` (use the
   OpenAI/Anthropic routing gateways + manage `cxr_` tokens), `STATS_VIEW_OWN`, `STATS_RESET_OWN`,
   `ACCOUNTS_OWN_MANAGE` (manage own personal accounts + "My Accounts" page), `ACCOUNTS_ORDER_TOGGLE`

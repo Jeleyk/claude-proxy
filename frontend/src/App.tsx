@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { api, has, UserDto } from './api';
 import { Icon, IconButton, Modal, ThemeToggle } from './ui';
+import { SkeletonLine } from './Skeleton';
 import { Login } from './pages/Login';
 import { Dashboard } from './pages/Dashboard';
 import { MyAccounts } from './pages/MyAccounts';
@@ -48,7 +49,18 @@ export function App() {
     api.me().then(setUser).catch(() => setUser(null)).finally(() => setLoading(false));
   }, []);
 
-  if (loading) return <div className="login-wrap">Loading…</div>;
+  // session probe: neutral card placeholder — we don't yet know whether this lands on the
+  // login form or the app shell, so don't pre-draw either one
+  if (loading) return (
+    <div className="login-wrap">
+      <div className="panel login-card" style={{ display: 'grid', gap: 14 }}>
+        <SkeletonLine width={132} height={18} />
+        <SkeletonLine height={34} />
+        <SkeletonLine height={34} />
+        <SkeletonLine width={104} height={34} />
+      </div>
+    </div>
+  );
   if (!user) return <Login onLogin={setUser} />;
 
   return (

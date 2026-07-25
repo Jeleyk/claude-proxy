@@ -77,6 +77,9 @@ export interface PoolStats {
   totalRequests: number;
   nextFiveHourReset: string | null;
   nextWeeklyReset: string | null;
+  // requests streaming from Anthropic right now — pool-wide on /api/accounts, own on /api/my/accounts
+  activeProxySessions: number;
+  activeRoutingSessions: number;
   accounts: AccountDto[];
 }
 
@@ -96,6 +99,8 @@ export interface ProxyTokenDto {
   token?: string | null;
   // routing tokens only: static system prompt injected ahead of client system content
   systemPrompt?: string | null;
+  // off = the token stops authenticating (clients get 401) without being deleted
+  enabled: boolean;
 }
 
 export interface RoleDto {
@@ -117,6 +122,15 @@ function qs(params: Record<string, string | number | undefined>): string {
     .filter(([, v]) => v !== undefined && v !== '')
     .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`);
   return parts.length ? `?${parts.join('&')}` : '';
+}
+
+/**
+ * The viewer's IANA timezone, sent with every time-series request so the server slices days on
+ * their clock instead of UTC. Falls back to UTC when the browser won't say (the server does the
+ * same for a missing/unparseable value, so behaviour matches).
+ */
+export function localTz(): string {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
 }
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -188,12 +202,17 @@ export const api = {
   tokens: () => req<ProxyTokenDto[]>('GET', '/api/proxy-tokens'),
   createToken: (name: string) => req<ProxyTokenDto>('POST', '/api/proxy-tokens', { name }),
   deleteToken: (id: number) => req<unknown>('DELETE', `/api/proxy-tokens/${id}`),
+  // Disable/enable a token without revoking it; returns the refreshed list.
+  setTokenEnabled: (id: number, enabled: boolean) =>
+    req<ProxyTokenDto[]>('PATCH', `/api/proxy-tokens/${id}/enabled`, { enabled }),
 
   // Routing tokens (cxr_...) for the OpenAI/Anthropic API gateways. Same shape as proxy tokens.
   routingTokens: () => req<ProxyTokenDto[]>('GET', '/api/routing-tokens'),
   createRoutingToken: (name: string, systemPrompt?: string) =>
     req<ProxyTokenDto>('POST', '/api/routing-tokens', { name, systemPrompt: systemPrompt || null }),
   deleteRoutingToken: (id: number) => req<unknown>('DELETE', `/api/routing-tokens/${id}`),
+  setRoutingTokenEnabled: (id: number, enabled: boolean) =>
+    req<ProxyTokenDto[]>('PATCH', `/api/routing-tokens/${id}/enabled`, { enabled }),
   // Set (non-blank) or clear (null) a routing token's static system prompt.
   updateRoutingTokenPrompt: (id: number, systemPrompt: string | null) =>
     req<ProxyTokenDto[]>('PATCH', `/api/routing-tokens/${id}`, { systemPrompt }),
@@ -201,29 +220,34 @@ export const api = {
   statsSummary: () => req<UsageSummary[]>('GET', '/api/stats/summary'),
   statsRecent: () => req<UsageEvent[]>('GET', '/api/stats/recent'),
   statsModels: () => req<ModelBreakdown>('GET', '/api/stats/models'),
-  statsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/daily?days=${days}${end ? `&end=${end}` : ''}`),
-  statsWindows: (days: number, end?: string) => req<WindowStats>('GET', `/api/stats/windows?days=${days}${end ? `&end=${end}` : ''}`),
-  statsTokens: (days: number, end?: string) => req<TokenStats>('GET', `/api/stats/tokens?days=${days}${end ? `&end=${end}` : ''}`),
+  statsDaily: (days: number, end?: string) => req<DailyStats>('GET', `/api/stats/daily${qs({ days, end, tz: localTz() })}`),
+  statsWindows: (days: number, end?: string) => req<WindowStats>('GET', `/api/stats/windows${qs({ days, end, tz: localTz() })}`),
+  statsTokens: (days: number, end?: string) => req<TokenStats>('GET', `/api/stats/tokens${qs({ days, end, tz: localTz() })}`),
+  // Per-day window burn (5h + weekly), reset-aware: how much of each window was spent per day.
+  statsWindowDaily: (days: number, end?: string) =>
+    req<WindowDaily>('GET', `/api/stats/window-daily${qs({ days, end, tz: localTz() })}`),
   // Per-user statistics: uid=null → the caller's own ("My Stats"), a number → admin view of that
   // user (USERS_MANAGE). `source` filters to one datapath ('proxy' | 'routing'); undefined = both.
   userStats: (uid: number | null, source?: StatsSource) =>
     req<MyStats>('GET', `${statsBase(uid)}${qs({ source })}`),
   userStatsDaily: (uid: number | null, days: number, end?: string, source?: StatsSource) =>
-    req<DailyStats>('GET', `${statsBase(uid)}/daily${qs({ days, end, source })}`),
+    req<DailyStats>('GET', `${statsBase(uid)}/daily${qs({ days, end, source, tz: localTz() })}`),
   userStatsWindows: (uid: number | null, days: number, end?: string) =>
-    req<WindowStats>('GET', `${statsBase(uid)}/windows${qs({ days, end })}`),
+    req<WindowStats>('GET', `${statsBase(uid)}/windows${qs({ days, end, tz: localTz() })}`),
+  userStatsWindowDaily: (uid: number | null, days: number, end?: string) =>
+    req<WindowDaily>('GET', `${statsBase(uid)}/window-daily${qs({ days, end, tz: localTz() })}`),
   userStatsTokens: (uid: number | null, days: number, end?: string, source?: StatsSource) =>
-    req<TokenStats>('GET', `${statsBase(uid)}/tokens${qs({ days, end, source })}`),
+    req<TokenStats>('GET', `${statsBase(uid)}/tokens${qs({ days, end, source, tz: localTz() })}`),
   // Per-inbound-token usage (Tokens / API Routing pages + the stats views): all-time totals + daily series.
   userTokenUsage: (uid: number | null, source: 'proxy' | 'routing', days: number, end?: string) =>
-    req<TokenUsage>('GET', `${statsBase(uid)}/token-usage${qs({ source, days, end })}`),
+    req<TokenUsage>('GET', `${statsBase(uid)}/token-usage${qs({ source, days, end, tz: localTz() })}`),
   // Per-MCP-tool call counts (Claude Code datapath): daily series + range totals per tool.
   userMcpUsage: (uid: number | null, days: number, end?: string) =>
-    req<McpUsage>('GET', `${statsBase(uid)}/mcp${qs({ days, end })}`),
+    req<McpUsage>('GET', `${statsBase(uid)}/mcp${qs({ days, end, tz: localTz() })}`),
   usersOverview: () => req<UserStatsOverview[]>('GET', '/api/users/stats/overview'),
   myStats: () => req<MyStats>('GET', '/api/stats/mine'),
   tokenUsage: (source: 'proxy' | 'routing', days: number, end?: string) =>
-    req<TokenUsage>('GET', `/api/stats/mine/token-usage?source=${source}&days=${days}${end ? `&end=${end}` : ''}`),
+    req<TokenUsage>('GET', `/api/stats/mine/token-usage${qs({ source, days, end, tz: localTz() })}`),
   setAccountOrder: (preferGlobalPool: boolean) => req<UserDto>('PATCH', '/api/my/account-order', { preferGlobalPool }),
   resetAllStats: () => req<{ message: string }>('POST', '/api/stats/reset'),
   resetUserStats: (id: number) => req<{ message: string }>('POST', `/api/users/${id}/stats/reset`),
@@ -241,6 +265,8 @@ export interface MyStats {
   proxyTodayCost: number;             // spend counted against dailyCostLimit today
   dailyRoutingCostLimit: number | null;
   routingTodayCost: number;           // spend counted against dailyRoutingCostLimit today
+  activeProxySessions: number;        // this user's in-flight requests, by datapath
+  activeRoutingSessions: number;
   perModel: ModelUsage[]; perModelToday: ModelUsage[]; recent: UsageEvent[];
 }
 export interface UserStatsOverview {
@@ -276,6 +302,19 @@ export interface WindowStats {
   totalFiveHourWeighted: (number | null)[];  // Σ coefficient × utilization across accounts
   totalWeeklyWeighted: (number | null)[];
   perAccount: WindowSeries[];
+  canViewAccounts: boolean;
+}
+
+export interface WindowDailySeries {
+  accountId: number; accountName: string | null;
+  // window-fractions burned that day: 1.0 = one whole window. Several resets in a day stack past 1.
+  fiveHour: number[]; weekly: number[];
+}
+export interface WindowDaily {
+  days: string[];
+  totalFiveHour: number[];
+  totalWeekly: number[];
+  perAccount: WindowDailySeries[];
   canViewAccounts: boolean;
 }
 
@@ -326,6 +365,27 @@ export function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+/** Window burn as a percentage of one window: 2.78 → "278%". */
+export function fmtWindowPct(n: number): string {
+  if (n === 0) return '0%';
+  if (n < 0.01) return `${(n * 100).toFixed(2)}%`;
+  if (n < 0.1) return `${(n * 100).toFixed(1)}%`;
+  return `${Math.round(n * 100)}%`;
+}
+
+/**
+ * Time left until the daily-cost limit rolls over. The limit is enforced on UTC days (see
+ * DatapathService), so this counts down to the next 00:00 UTC regardless of the viewer's zone —
+ * which is the whole reason it's spelled out in the UI.
+ */
+export function fmtUntilUtcMidnight(now: Date = new Date()): string {
+  const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  const diff = next - now.getTime();
+  const h = Math.floor(diff / 3_600_000);
+  const m = Math.floor((diff % 3_600_000) / 60_000);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
 export function fmtReset(iso: string | null): string {

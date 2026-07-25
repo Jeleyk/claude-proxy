@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, fmtTokens, fmtUsd, ProxyTokenDto, TokenUsage, TokenUsageSeries } from '../api';
 import { ChartMode, SERIES_COLORS, StackedChart } from '../Chart';
-import { Legend, RangeControls, todayUtc } from './statsShared';
+import { Legend, RangeControls, todayLocal } from './statsShared';
 
 export function seriesLabel(s: TokenUsageSeries): string {
   if (s.tokenId == null) return 'unattributed';
@@ -18,45 +18,52 @@ export function usageItems(data: TokenUsage | null) {
     .map((s, i) => ({ key: String(s.tokenId ?? 'none'), label: seriesLabel(s), color: SERIES_COLORS[i % SERIES_COLORS.length], s }));
 }
 
-/** The Spend/Tokens per-day stacked chart pair for one datapath's per-token series. */
+/** The Spend/Tokens/Requests per-day stacked charts for one datapath's per-token series. */
 export function TokenUsageChartsRow({ data, mode }: { data: TokenUsage; mode: ChartMode }) {
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const items = useMemo(() => usageItems(data), [data]);
   const visible = items.filter((it) => !hidden.has(it.key));
-  const costTotal = visible.reduce((t, it) => t + it.s.cost.reduce((a, b) => a + b, 0), 0);
-  const tokTotal = visible.reduce((t, it) => t + it.s.tokens.reduce((a, b) => a + b, 0), 0);
+  const sum = (pick: (s: TokenUsageSeries) => number[]) =>
+    visible.reduce((t, it) => t + pick(it.s).reduce((a, b) => a + b, 0), 0);
 
   function toggle(k: string) {
     setHidden((h) => { const n = new Set(h); if (n.has(k)) n.delete(k); else n.add(k); return n; });
   }
 
+  const charts: { title: string; pick: (s: TokenUsageSeries) => number[]; fmt: (n: number) => string }[] = [
+    { title: 'Spend per day', pick: (s) => s.cost, fmt: fmtUsd },
+    { title: 'Tokens per day', pick: (s) => s.tokens, fmt: fmtTokens },
+    { title: 'Requests per day', pick: (s) => s.requests, fmt: (n) => n.toLocaleString() },
+  ];
+
   return (
     <div className="chart-row">
-      <div className="panel">
-        <div className="chart-card-head"><span className="t">Spend per day</span><span className="v">{fmtUsd(costTotal)}</span></div>
-        <StackedChart days={data.days} height={190} fmt={fmtUsd} mode={mode}
-          series={visible.map((it) => ({ name: it.label, color: it.color, values: it.s.cost }))} />
-        <Legend items={items} hidden={hidden} onToggle={toggle} />
-      </div>
-      <div className="panel">
-        <div className="chart-card-head"><span className="t">Tokens per day</span><span className="v">{fmtTokens(tokTotal)}</span></div>
-        <StackedChart days={data.days} height={190} fmt={fmtTokens} mode={mode}
-          series={visible.map((it) => ({ name: it.label, color: it.color, values: it.s.tokens }))} />
-        <Legend items={items} hidden={hidden} onToggle={toggle} />
-      </div>
+      {charts.map((c) => (
+        <div className="panel" key={c.title}>
+          <div className="chart-card-head"><span className="t">{c.title}</span><span className="v">{c.fmt(sum(c.pick))}</span></div>
+          <StackedChart days={data.days} height={190} fmt={c.fmt} mode={mode}
+            series={visible.map((it) => ({ name: it.label, color: it.color, values: c.pick(it.s) }))} />
+          <Legend items={items} hidden={hidden} onToggle={toggle} />
+        </div>
+      ))}
     </div>
   );
 }
 
-export function TokenUsageSection({ source, tokens, onDelete, emptyHint }: {
+export function TokenUsageSection({ source, tokens, onDelete, onToggle, onEdit, emptyHint }: {
   source: 'proxy' | 'routing';
   tokens: ProxyTokenDto[];
   onDelete: (id: number) => void;
+  // Disable/enable the token: reversible, so no confirmation — unlike delete.
+  onToggle: (id: number, enabled: boolean) => void;
+  // When supplied, the row offers "Edit" (a settings dialog) instead of an inline enable toggle —
+  // routing tokens have more than one setting, so they get a dialog.
+  onEdit?: (t: ProxyTokenDto) => void;
   emptyHint: string;
 }) {
   const [data, setData] = useState<TokenUsage | null>(null);
   const [days, setDays] = useState(7);
-  const [endDate, setEndDate] = useState(todayUtc());
+  const [endDate, setEndDate] = useState(todayLocal());
   const [mode, setMode] = useState<ChartMode>('bars');
 
   useEffect(() => {
@@ -86,12 +93,27 @@ export function TokenUsageSection({ source, tokens, onDelete, emptyHint }: {
               const u = totals.get(t.id);
               return (
                 <tr key={t.id}>
-                  <td>{t.name}</td>
+                  <td>
+                    <span className={t.enabled ? undefined : 'hint'}>{t.name}</span>
+                    {!t.enabled && <span className="badge muted" style={{ marginLeft: 8 }}>disabled</span>}
+                    {t.systemPrompt && <span className="badge accent" style={{ marginLeft: 8 }} title={t.systemPrompt}>prompt</span>}
+                  </td>
                   <td className="hint">{new Date(t.createdAt).toLocaleString()}</td>
                   <td className="hint">{t.lastUsedAt ? new Date(t.lastUsedAt).toLocaleString() : 'never'}</td>
                   <td>{u ? fmtTokens(u.totalTokens) : '—'}</td>
                   <td>{u ? fmtUsd(u.totalCost) : '—'}</td>
-                  <td><button className="sm danger" onClick={() => onDelete(t.id)}>Delete</button></td>
+                  <td>
+                    <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                      {onEdit
+                        ? <button className="sm ghost" onClick={() => onEdit(t)}>Edit</button>
+                        : (
+                          <button className="sm ghost" onClick={() => onToggle(t.id, !t.enabled)}>
+                            {t.enabled ? 'Disable' : 'Enable'}
+                          </button>
+                        )}
+                      <button className="sm danger" onClick={() => onDelete(t.id)}>Delete</button>
+                    </div>
+                  </td>
                 </tr>
               );
             })}

@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   api, DailyStats, fmtTokens, fmtUsd, has, ModelBreakdown, TokenKindSeries, TokenStats,
-  UsageEvent, UsageSummary, UserDto, WindowStats,
+  UsageEvent, UsageSummary, UserDto, WindowDaily, WindowStats,
 } from '../api';
 import { LineChart, Series, SERIES_COLORS, StackedChart } from '../Chart';
-import { Legend, RangeControls, sumKinds, todayUtc, tokenSeries, TOKEN_KINDS, W5H, WWK } from './statsShared';
+import {
+  Legend, RangeControls, sumKinds, todayLocal, tokenSeries, TOKEN_KINDS, W5H, WindowBurnCharts, WWK,
+} from './statsShared';
 import { Segmented, Select, useChartMode } from '../ui';
+import { SkeletonChartRow, SkeletonControls, SkeletonTable } from '../Skeleton';
 
 export function Stats({ user }: { user: UserDto }) {
   const canStats = has(user, 'STATS_VIEW');
@@ -14,12 +17,13 @@ export function Stats({ user }: { user: UserDto }) {
 
   const [daily, setDaily] = useState<DailyStats | null>(null);
   const [windows, setWindows] = useState<WindowStats | null>(null);
+  const [winDaily, setWinDaily] = useState<WindowDaily | null>(null);
   const [tokens, setTokens] = useState<TokenStats | null>(null);
   const [summary, setSummary] = useState<UsageSummary[]>([]);
-  const [recent, setRecent] = useState<UsageEvent[]>([]);
+  const [recent, setRecent] = useState<UsageEvent[] | null>(null);
   const [models, setModels] = useState<ModelBreakdown | null>(null);
   const [modelPeriod, setModelPeriod] = useState<'today' | 'all'>('all');
-  const [endDate, setEndDate] = useState(todayUtc());
+  const [endDate, setEndDate] = useState(todayLocal());
   const [days, setDays] = useState(7);
   const [mode, setMode] = useChartMode();
   // window-utilization display: raw API utilization vs coefficient-weighted (both summed across accounts)
@@ -33,11 +37,12 @@ export function Stats({ user }: { user: UserDto }) {
   async function load() {
     try {
       if (canStats) {
-        const [d, w, t, s, m] = await Promise.all([
+        const [d, w, wd, t, s, m] = await Promise.all([
           api.statsDaily(days, endDate), api.statsWindows(days, endDate),
+          api.statsWindowDaily(days, endDate),
           api.statsTokens(days, endDate), api.statsSummary(), api.statsModels(),
         ]);
-        setDaily(d); setWindows(w); setTokens(t); setSummary(s); setModels(m);
+        setDaily(d); setWindows(w); setWinDaily(wd); setTokens(t); setSummary(s); setModels(m);
       }
       if (canRecent) setRecent(await api.statsRecent());
       setErr(null);
@@ -104,6 +109,16 @@ export function Stats({ user }: { user: UserDto }) {
         {canStats && <button className="ghost" onClick={async () => { if (confirm('Reset usage statistics for ALL users?')) { await api.resetAllStats(); load(); } }}>Reset all stats</button>}
       </div>
 
+      {/* first load only — the 10s poll must never flip live numbers back to placeholders */}
+      {canStats && !daily && (
+        <>
+          <SkeletonControls />
+          <SkeletonChartRow />
+          <SkeletonChartRow n={2} />
+          <SkeletonTable rows={4} cols={4} />
+        </>
+      )}
+
       {canStats && daily && (
         <>
           {/* control bar — drives every chart at once */}
@@ -146,6 +161,15 @@ export function Stats({ user }: { user: UserDto }) {
               </div>
             )}
           </div>
+
+          {/* how much of each limit window was actually spent per day (resets included) */}
+          {winDaily && (
+            <>
+              <h2>Window spend per day</h2>
+              <WindowBurnCharts data={winDaily} mode={mode}
+                hint="Share of a limit window consumed per day, stacked per account. 100% = one full window; the 5-hour bar passes 100% on days the window reset and was spent again." />
+            </>
+          )}
 
           {/* per-account — pick one account, see its three charts */}
           {canAccounts && accountList.length > 0 && (
@@ -240,7 +264,9 @@ export function Stats({ user }: { user: UserDto }) {
         </>
       )}
 
-      {canRecent && (
+      {canRecent && !recent && (<><h2>Recent requests</h2><SkeletonTable rows={6} cols={6} /></>)}
+
+      {canRecent && recent && (
         <>
           <h2>Recent requests</h2>
           <div className="tablewrap">

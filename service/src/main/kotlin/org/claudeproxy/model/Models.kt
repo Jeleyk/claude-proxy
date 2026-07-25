@@ -140,6 +140,8 @@ data class ProxyTokenDto(
     val token: String? = null,
     // static system prompt (routing tokens only; null for proxy tokens / unset)
     val systemPrompt: String? = null,
+    // off = the token no longer authenticates, without being revoked
+    val enabled: Boolean = true,
 )
 
 @Serializable
@@ -162,6 +164,10 @@ data class PoolStatsDto(
     // nearest reset times across the pool, per window
     val nextFiveHourReset: String?,
     val nextWeeklyReset: String?,
+    // requests being streamed from Anthropic right now, by datapath. Scoped like the rest of the
+    // payload: pool-wide view = everyone, personal view = that user's own.
+    val activeProxySessions: Int = 0,
+    val activeRoutingSessions: Int = 0,
     val accounts: List<AccountDto>,
 )
 

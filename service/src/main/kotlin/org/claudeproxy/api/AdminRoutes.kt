@@ -90,6 +90,8 @@ private suspend fun buildPoolStats(pool: AccountPool): PoolStatsDto =
         activeAccountId = pool.activeAccountId,
         nextFiveHourReset = pool.nextReset(WindowKind.FIVE_HOUR)?.toString(),
         nextWeeklyReset = pool.nextReset(WindowKind.WEEKLY)?.toString(),
+        // pool-wide view: everyone's in-flight requests
+        active = org.claudeproxy.datapath.ActiveSessions.counts(),
     )
 
 /** Stats for one user's personal accounts (the "My Accounts" view + admin oversight). */
@@ -108,6 +110,8 @@ private suspend fun buildOwnedStats(pool: AccountPool, userId: Int): PoolStatsDt
         activeAccountId = pool.activeAccountId.takeIf { it in ids },
         nextFiveHourReset = pool.nextResetOwned(userId, WindowKind.FIVE_HOUR)?.toString(),
         nextWeeklyReset = pool.nextResetOwned(userId, WindowKind.WEEKLY)?.toString(),
+        // personal view: only this user's own in-flight requests
+        active = org.claudeproxy.datapath.ActiveSessions.countsForUser(userId),
     )
 }
 
@@ -118,6 +122,7 @@ private fun assembleStats(
     activeAccountId: Int?,
     nextFiveHourReset: String?,
     nextWeeklyReset: String?,
+    active: org.claudeproxy.datapath.ActiveSessions.Counts,
 ): PoolStatsDto {
     val createdAt = AccountRepo.createdAtMap()
     val accounts = runtimes.map { rt ->
@@ -149,6 +154,8 @@ private fun assembleStats(
         totalCost = poolWide.cost,
         nextFiveHourReset = nextFiveHourReset,
         nextWeeklyReset = nextWeeklyReset,
+        activeProxySessions = active.proxy,
+        activeRoutingSessions = active.routing,
         accounts = accounts,
     )
 }
@@ -530,6 +537,16 @@ private fun Route.proxyTokenRoutes() {
         val req = call.receive<CreateProxyTokenRequest>()
         call.respond(ProxyTokenRepo.create(user.id, req.name))
     }
+    // Turn a token off/on without revoking it: a disabled token stops authenticating (401).
+    patch("/proxy-tokens/{id}/enabled") {
+        val user = call.requireUser()
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val req = call.receive<UpdateTokenEnabledRequest>()
+        val ok = ProxyTokenRepo.setEnabled(id, user.id, req.enabled)
+        if (ok) call.respond(ProxyTokenRepo.listForUser(user.id))
+        else call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+    }
     delete("/proxy-tokens/{id}") {
         val user = call.requireUser()
         val id = call.parameters["id"]?.toIntOrNull()
@@ -561,6 +578,15 @@ private fun Route.routingTokenRoutes() {
         if (ok) call.respond(RoutingTokenRepo.listForUser(user.id))
         else call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
     }
+    patch("/routing-tokens/{id}/enabled") {
+        val user = call.requireUser()
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val req = call.receive<UpdateTokenEnabledRequest>()
+        val ok = RoutingTokenRepo.setEnabled(id, user.id, req.enabled)
+        if (ok) call.respond(RoutingTokenRepo.listForUser(user.id))
+        else call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+    }
     delete("/routing-tokens/{id}") {
         val user = call.requireUser()
         val id = call.parameters["id"]?.toIntOrNull()
@@ -580,19 +606,21 @@ private fun org.claudeproxy.repo.UserAuth.canOwn() =
     Permission.STATS_VIEW_OWN in permissions || Permission.STATS_VIEW in permissions
 
 /**
- * Build the daily-cost time series for a window of [days] ending at [endDate] (UTC).
+ * Build the daily-cost time series for a window of [days] ending at [endDate] in [zone].
  * [fetch] supplies the buckets (pool-wide or one user's); [accountFilter], when set, limits the
  * per-account series to those account ids (the total always reflects every bucket returned).
  */
 private fun buildDaily(
     days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean,
+    zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
     accountFilter: Set<Int>? = null,
-    fetch: (java.time.Instant, java.time.Instant) -> List<org.claudeproxy.repo.DailyBucketDto> = UsageRepo::dailyBuckets,
+    fetch: (java.time.Instant, java.time.Instant) -> List<org.claudeproxy.repo.DailyBucketDto> =
+        { s, e -> UsageRepo.dailyBuckets(s, e, zone) },
 ): DailyStatsPayload {
     val n = days.coerceIn(1, 90)
     val startDate = endDate.minusDays((n - 1).toLong())
-    val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
-    val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val start = startDate.atStartOfDay(zone).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(zone).toInstant()
     val dayLabels = (0 until n).map { startDate.plusDays(it.toLong()).toString() }
     val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
     val totalCost = DoubleArray(n); val totalReq = LongArray(n)
@@ -613,19 +641,21 @@ private fun buildDaily(
 }
 
 /**
- * Build per-day token breakdowns (by model + account) for a window of [days] ending at [endDate] (UTC).
+ * Build per-day token breakdowns (by model + account) for a window of [days] ending at [endDate] in [zone].
  * [fetch] supplies the buckets (pool-wide or one user's); [accountFilter], when set, limits the
  * per-account series to those account ids (total + per-model always reflect every bucket returned).
  */
 private fun buildTokens(
     days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean,
+    zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
     accountFilter: Set<Int>? = null,
-    fetch: (java.time.Instant, java.time.Instant) -> List<org.claudeproxy.repo.TokenBucketDto> = UsageRepo::tokenBuckets,
+    fetch: (java.time.Instant, java.time.Instant) -> List<org.claudeproxy.repo.TokenBucketDto> =
+        { s, e -> UsageRepo.tokenBuckets(s, e, zone) },
 ): TokenStatsPayload {
     val n = days.coerceIn(1, 90)
     val startDate = endDate.minusDays((n - 1).toLong())
-    val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
-    val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val start = startDate.atStartOfDay(zone).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(zone).toInstant()
     val dayLabels = (0 until n).map { startDate.plusDays(it.toLong()).toString() }
     val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
 
@@ -668,16 +698,19 @@ private fun buildTokens(
  * range-aligned daily cost/token/request series per token, plus all-time totals per token.
  * Deleted tokens keep their series with name=null; tokenId=null groups unattributed rows.
  */
-private fun buildTokenUsage(userId: Int, source: String, days: Int, endDate: java.time.LocalDate): TokenUsagePayload {
+private fun buildTokenUsage(
+    userId: Int, source: String, days: Int, endDate: java.time.LocalDate,
+    zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
+): TokenUsagePayload {
     val n = days.coerceIn(1, 90)
     val startDate = endDate.minusDays((n - 1).toLong())
-    val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
-    val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val start = startDate.atStartOfDay(zone).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(zone).toInstant()
     val dayLabels = (0 until n).map { startDate.plusDays(it.toLong()).toString() }
     val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
 
     val perToken = HashMap<Int?, Triple<DoubleArray, LongArray, LongArray>>() // tokenId -> (cost, tokens, requests)
-    UsageRepo.tokenDailyBucketsForUser(userId, source, start, end).forEach { b ->
+    UsageRepo.tokenDailyBucketsForUser(userId, source, start, end, zone).forEach { b ->
         val i = idx[b.date] ?: return@forEach
         val (c, t, r) = perToken.getOrPut(b.tokenId) { Triple(DoubleArray(n), LongArray(n), LongArray(n)) }
         c[i] += b.cost; t[i] += b.tokens; r[i] += b.requests
@@ -705,16 +738,18 @@ private fun buildTokenUsage(userId: Int, source: String, days: Int, endDate: jav
  * plus range totals, sorted by total calls desc. Claude Code datapath only — the gateway
  * reports MCP tool_use blocks solely for `source="proxy"` traffic.
  */
-private fun buildMcpUsage(userId: Int, days: Int, endDate: java.time.LocalDate): McpUsagePayload {
+private fun buildMcpUsage(
+    userId: Int, days: Int, endDate: java.time.LocalDate, zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
+): McpUsagePayload {
     val n = days.coerceIn(1, 90)
     val startDate = endDate.minusDays((n - 1).toLong())
-    val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
-    val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val start = startDate.atStartOfDay(zone).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(zone).toInstant()
     val dayLabels = (0 until n).map { startDate.plusDays(it.toLong()).toString() }
     val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
 
     val perTool = HashMap<String, LongArray>() // tool -> per-day calls
-    McpUsageRepo.dailyBucketsForUser(userId, start, end).forEach { b ->
+    McpUsageRepo.dailyBucketsForUser(userId, start, end, zone).forEach { b ->
         val i = idx[b.date] ?: return@forEach
         perTool.getOrPut(b.toolName) { LongArray(n) }[i] += b.calls
     }
@@ -731,6 +766,7 @@ private fun buildMcpUsage(userId: Int, days: Int, endDate: java.time.LocalDate):
  */
 private fun buildUserStats(userId: Int, source: String?, canAccounts: Boolean): MyStatsPayload {
     val startOfDay = UserRepo.startOfUtcDay()
+    val active = org.claudeproxy.datapath.ActiveSessions.countsForUser(userId)
     val today = UsageRepo.userTotals(userId, startOfDay, source = source)
     val total = UsageRepo.userTotals(userId, source = source)
     val recent = UsageRepo.recentForUser(userId, 20, source)
@@ -741,6 +777,8 @@ private fun buildUserStats(userId: Int, source: String?, canAccounts: Boolean): 
         proxyTodayCost = UsageRepo.userTotals(userId, startOfDay, globalOnly = true, source = "proxy").cost,
         dailyRoutingCostLimit = UserRepo.dailyRoutingLimitOf(userId),
         routingTodayCost = UsageRepo.userTotals(userId, startOfDay, globalOnly = true, source = "routing").cost,
+        activeProxySessions = active.proxy,
+        activeRoutingSessions = active.routing,
         perModel = UsageRepo.userPerModel(userId, source = source),
         perModelToday = UsageRepo.userPerModel(userId, startOfDay, source),
         recent = if (canAccounts) recent else recent.map { it.copy(accountName = null, accountId = 0) },
@@ -758,12 +796,13 @@ private fun io.ktor.server.application.ApplicationCall.sourceParam(): String? =
  */
 private fun buildWindows(
     days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean,
+    zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
     keep: ((Int) -> Boolean)? = null,
 ): WindowStatsPayload {
     val n = days.coerceIn(1, 30)
     val startDate = endDate.minusDays((n - 1).toLong())
-    val start = startDate.atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
-    val end = endDate.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toInstant()
+    val start = startDate.atStartOfDay(zone).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(zone).toInstant()
     // 30-min bins: the limit probe samples each account every ~30 min, so half-hour
     // buckets are the finest resolution the data actually supports. Capped at 336
     // (= 7 days of 30-min bins); longer ranges coarsen to keep the payload sane.
@@ -771,7 +810,7 @@ private fun buildWindows(
     val widthMs = (end.toEpochMilli() - start.toEpochMilli()).toDouble() / buckets
     val labels = (0 until buckets).map {
         java.time.Instant.ofEpochMilli(start.toEpochMilli() + (it * widthMs).toLong())
-            .atZone(java.time.ZoneOffset.UTC).toLocalDateTime().toString().substring(5, 16)
+            .atZone(zone).toLocalDateTime().toString().substring(5, 16)
     }
     // Default keep: exclude personal accounts (pool-wide view).
     val includeAccount = keep ?: AccountRepo.personalIds().let { personal -> { id: Int -> id !in personal } }
@@ -843,15 +882,104 @@ internal fun aggregateWindows(
     )
 }
 
+/**
+ * Build the per-day window-burn series (5h + weekly) for a range, in the viewer's [zone].
+ * [keep] decides which account ids contribute, exactly as in [buildWindows].
+ *
+ * Samples are fetched with a 24h lookback before the range so the first day of the range continues
+ * the previous day's series instead of restarting from zero.
+ */
+private fun buildWindowDaily(
+    days: Int, endDate: java.time.LocalDate, includeAccounts: Boolean,
+    zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
+    keep: ((Int) -> Boolean)? = null,
+): WindowDailyPayload {
+    val n = days.coerceIn(1, 90)
+    val startDate = endDate.minusDays((n - 1).toLong())
+    val start = startDate.atStartOfDay(zone).toInstant()
+    val end = endDate.plusDays(1).atStartOfDay(zone).toInstant()
+    val dayLabels = (0 until n).map { startDate.plusDays(it.toLong()).toString() }
+    val includeAccount = keep ?: AccountRepo.personalIds().let { personal -> { id: Int -> id !in personal } }
+    val samples = org.claudeproxy.repo.WindowSnapshotRepo
+        .fetch(start.minus(java.time.Duration.ofHours(24)), end)
+        .filter { includeAccount(it.accountId) }
+    return aggregateWindowDaily(samples, zone, dayLabels, includeAccounts, AccountRepo.namesMap())
+}
+
+/**
+ * Pure per-day window-burn aggregation — split out of [buildWindowDaily] so the reset detection is
+ * unit-testable without a DB.
+ *
+ * Anthropic reports each window as *utilization* (0..1) that climbs while the window is spent and
+ * drops back when the window rolls over, so "how much did this account burn today" is the sum of
+ * the series' positive steps, not the last value. A drop means the window reset, and whatever the
+ * gauge reads right after a reset was already spent in the *new* window — so the new value counts
+ * in full. The first sample of an account's series is a baseline (there is nothing to diff it
+ * against), which is why [buildWindowDaily] fetches a lookback window: without it the first day of
+ * a range would silently lose its opening step.
+ *
+ * Resolution is bounded by the sampling rate (~30 min): spend between the last pre-reset sample and
+ * the reset is attributed to whatever the pre-reset sample showed, so bursts straddling a rollover
+ * are slightly under-counted. Days are keyed in [zone], so a reset mid-day lands in the right day.
+ */
+internal fun aggregateWindowDaily(
+    samples: List<org.claudeproxy.repo.WindowSample>,
+    zone: java.time.ZoneId,
+    dayLabels: List<String>,
+    includeAccounts: Boolean,
+    names: Map<Int, String>,
+): WindowDailyPayload {
+    val n = dayLabels.size
+    val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
+    val eps = 1e-9
+    // accountId -> [5h per-day burn, 7d per-day burn]
+    val perAcc = HashMap<Int, Array<DoubleArray>>()
+
+    samples.groupBy { it.accountId to it.kind }.forEach { (key, list) ->
+        val (accountId, kind) = key
+        val lane = when (kind) { "5h" -> 0; "7d" -> 1; else -> return@forEach }
+        val arr = perAcc.getOrPut(accountId) { arrayOf(DoubleArray(n), DoubleArray(n)) }[lane]
+        var prev: Double? = null
+        list.sortedBy { it.ts }.forEach { s ->
+            val p = prev
+            // reset (value dropped) → the whole new reading is fresh burn in the new window
+            val delta = if (p == null) 0.0 else if (s.util < p - eps) s.util else s.util - p
+            prev = s.util
+            if (delta > eps) {
+                val i = idx[s.ts.atZone(zone).toLocalDate().toString()] ?: return@forEach
+                arr[i] += delta
+            }
+        }
+    }
+
+    val zeros = List(n) { 0.0 }
+    fun total(lane: Int): List<Double> =
+        if (perAcc.isEmpty()) zeros
+        else (0 until n).map { i -> perAcc.values.sumOf { it[lane][i] } }
+
+    val perAccount = if (includeAccounts)
+        perAcc.entries
+            .sortedByDescending { it.value[0].sum() + it.value[1].sum() }
+            .map { (aid, k) -> WindowDailySeriesDto(aid, names[aid], k[0].toList(), k[1].toList()) }
+    else emptyList()
+
+    return WindowDailyPayload(dayLabels, total(0), total(1), perAccount, includeAccounts)
+}
+
 private fun Route.statsRoutes() {
     // Window-utilization (5h + weekly) trend over time.
     get("/stats/windows") {
         call.requirePermission(Permission.STATS_VIEW)
         val user = call.requireUser()
-        val days = call.parameters["days"]?.toIntOrNull() ?: 7
-        val endDate = call.parameters["end"]?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
-            ?: java.time.LocalDate.now(java.time.ZoneOffset.UTC)
-        call.respond(buildWindows(days, endDate, user.canAccounts()))
+        val (days, endDate, zone) = call.rangeParams()
+        call.respond(buildWindows(days, endDate, user.canAccounts(), zone))
+    }
+    // Per-day window burn (5h + weekly), reset-aware — how much of each window was spent per day.
+    get("/stats/window-daily") {
+        call.requirePermission(Permission.STATS_VIEW)
+        val user = call.requireUser()
+        val (days, endDate, zone) = call.rangeParams()
+        call.respond(buildWindowDaily(days, endDate, user.canAccounts(), zone))
     }
     // Per-account summary over the last N hours (full stats).
     get("/stats/summary") {
@@ -871,23 +999,19 @@ private fun Route.statsRoutes() {
         call.requirePermission(Permission.STATS_VIEW)
         call.respond(ModelBreakdownPayload(today = UsageRepo.perModel(UserRepo.startOfUtcDay()), allTime = UsageRepo.perModel()))
     }
-    // Daily cost time series (graphs). Default: last 7 days ending today (UTC).
+    // Daily cost time series (graphs). Default: last 7 days ending today in the caller's timezone.
     get("/stats/daily") {
         call.requirePermission(Permission.STATS_VIEW)
         val user = call.requireUser()
-        val days = call.parameters["days"]?.toIntOrNull() ?: 7
-        val endDate = call.parameters["end"]?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
-            ?: java.time.LocalDate.now(java.time.ZoneOffset.UTC)
-        call.respond(buildDaily(days, endDate, user.canAccounts()))
+        val (days, endDate, zone) = call.rangeParams()
+        call.respond(buildDaily(days, endDate, user.canAccounts(), zone))
     }
-    // Per-day token breakdown (by model + account) for the token charts. Default: last 7 days ending today (UTC).
+    // Per-day token breakdown (by model + account) for the token charts. Default: last 7 days.
     get("/stats/tokens") {
         call.requirePermission(Permission.STATS_VIEW)
         val user = call.requireUser()
-        val days = call.parameters["days"]?.toIntOrNull() ?: 7
-        val endDate = call.parameters["end"]?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
-            ?: java.time.LocalDate.now(java.time.ZoneOffset.UTC)
-        call.respond(buildTokens(days, endDate, user.canAccounts()))
+        val (days, endDate, zone) = call.rangeParams()
+        call.respond(buildTokens(days, endDate, user.canAccounts(), zone))
     }
     post("/stats/reset") {
         call.requirePermission(Permission.STATS_VIEW)
@@ -919,20 +1043,20 @@ private fun Route.statsRoutes() {
     get("/stats/mine/daily") {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
-        val (days, endDate) = call.rangeParams()
+        val (days, endDate, zone) = call.rangeParams()
         val source = call.sourceParam()
-        call.respond(buildDaily(days, endDate, includeAccounts = true,
+        call.respond(buildDaily(days, endDate, includeAccounts = true, zone = zone,
             accountFilter = AccountRepo.personalIdsOf(user.id),
-            fetch = { s, e -> UsageRepo.dailyBucketsForUser(user.id, s, e, source) }))
+            fetch = { s, e -> UsageRepo.dailyBucketsForUser(user.id, s, e, source, zone) }))
     }
     get("/stats/mine/tokens") {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
-        val (days, endDate) = call.rangeParams()
+        val (days, endDate, zone) = call.rangeParams()
         val source = call.sourceParam()
-        call.respond(buildTokens(days, endDate, includeAccounts = true,
+        call.respond(buildTokens(days, endDate, includeAccounts = true, zone = zone,
             accountFilter = AccountRepo.personalIdsOf(user.id),
-            fetch = { s, e -> UsageRepo.tokenBucketsForUser(user.id, s, e, source) }))
+            fetch = { s, e -> UsageRepo.tokenBucketsForUser(user.id, s, e, source, zone) }))
     }
     // Per-inbound-token usage for the caller's Tokens / API Routing pages: all-time totals per
     // token (table summary) + daily cost/token series for the charts. Strictly the caller's own
@@ -940,22 +1064,29 @@ private fun Route.statsRoutes() {
     get("/stats/mine/token-usage") {
         val user = call.requireUser()
         val source = if (call.parameters["source"] == "routing") "routing" else "proxy"
-        val (days, endDate) = call.rangeParams()
-        call.respond(buildTokenUsage(user.id, source, days, endDate))
+        val (days, endDate, zone) = call.rangeParams()
+        call.respond(buildTokenUsage(user.id, source, days, endDate, zone))
     }
     // Per-MCP-tool call counts for the caller (Claude Code datapath): daily series + range totals.
     get("/stats/mine/mcp") {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
-        val (days, endDate) = call.rangeParams()
-        call.respond(buildMcpUsage(user.id, days, endDate))
+        val (days, endDate, zone) = call.rangeParams()
+        call.respond(buildMcpUsage(user.id, days, endDate, zone))
     }
     get("/stats/mine/windows") {
         val user = call.requireUser()
         if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
-        val (days, endDate) = call.rangeParams()
+        val (days, endDate, zone) = call.rangeParams()
         val mine = AccountRepo.personalIdsOf(user.id)
-        call.respond(buildWindows(days, endDate, includeAccounts = true, keep = { it in mine }))
+        call.respond(buildWindows(days, endDate, includeAccounts = true, zone = zone, keep = { it in mine }))
+    }
+    get("/stats/mine/window-daily") {
+        val user = call.requireUser()
+        if (!user.canOwn()) throw org.claudeproxy.auth.ForbiddenException("Missing permission STATS_VIEW_OWN")
+        val (days, endDate, zone) = call.rangeParams()
+        val mine = AccountRepo.personalIdsOf(user.id)
+        call.respond(buildWindowDaily(days, endDate, includeAccounts = true, zone = zone, keep = { it in mine }))
     }
 
     // ---- admin per-user statistics (users.manage): the same views as "My Stats", for any user ----
@@ -993,51 +1124,66 @@ private fun Route.statsRoutes() {
         call.requirePermission(Permission.USERS_MANAGE)
         val uid = call.parameters["id"]?.toIntOrNull()
             ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
-        val (days, endDate) = call.rangeParams()
+        val (days, endDate, zone) = call.rangeParams()
         val source = call.sourceParam()
-        call.respond(buildDaily(days, endDate, includeAccounts = true,
+        call.respond(buildDaily(days, endDate, includeAccounts = true, zone = zone,
             accountFilter = AccountRepo.personalIdsOf(uid),
-            fetch = { s, e -> UsageRepo.dailyBucketsForUser(uid, s, e, source) }))
+            fetch = { s, e -> UsageRepo.dailyBucketsForUser(uid, s, e, source, zone) }))
     }
     get("/users/{id}/stats/tokens") {
         call.requirePermission(Permission.USERS_MANAGE)
         val uid = call.parameters["id"]?.toIntOrNull()
             ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
-        val (days, endDate) = call.rangeParams()
+        val (days, endDate, zone) = call.rangeParams()
         val source = call.sourceParam()
-        call.respond(buildTokens(days, endDate, includeAccounts = true,
+        call.respond(buildTokens(days, endDate, includeAccounts = true, zone = zone,
             accountFilter = AccountRepo.personalIdsOf(uid),
-            fetch = { s, e -> UsageRepo.tokenBucketsForUser(uid, s, e, source) }))
+            fetch = { s, e -> UsageRepo.tokenBucketsForUser(uid, s, e, source, zone) }))
     }
     get("/users/{id}/stats/token-usage") {
         call.requirePermission(Permission.USERS_MANAGE)
         val uid = call.parameters["id"]?.toIntOrNull()
             ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val source = if (call.parameters["source"] == "routing") "routing" else "proxy"
-        val (days, endDate) = call.rangeParams()
-        call.respond(buildTokenUsage(uid, source, days, endDate))
+        val (days, endDate, zone) = call.rangeParams()
+        call.respond(buildTokenUsage(uid, source, days, endDate, zone))
     }
     get("/users/{id}/stats/mcp") {
         call.requirePermission(Permission.USERS_MANAGE)
         val uid = call.parameters["id"]?.toIntOrNull()
             ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
-        val (days, endDate) = call.rangeParams()
-        call.respond(buildMcpUsage(uid, days, endDate))
+        val (days, endDate, zone) = call.rangeParams()
+        call.respond(buildMcpUsage(uid, days, endDate, zone))
     }
     get("/users/{id}/stats/windows") {
         call.requirePermission(Permission.USERS_MANAGE)
         val uid = call.parameters["id"]?.toIntOrNull()
             ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
-        val (days, endDate) = call.rangeParams()
+        val (days, endDate, zone) = call.rangeParams()
         val theirs = AccountRepo.personalIdsOf(uid)
-        call.respond(buildWindows(days, endDate, includeAccounts = true, keep = { it in theirs }))
+        call.respond(buildWindows(days, endDate, includeAccounts = true, zone = zone, keep = { it in theirs }))
+    }
+    get("/users/{id}/stats/window-daily") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+            ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val (days, endDate, zone) = call.rangeParams()
+        val theirs = AccountRepo.personalIdsOf(uid)
+        call.respond(buildWindowDaily(days, endDate, includeAccounts = true, zone = zone, keep = { it in theirs }))
     }
 }
 
-/** Parse the shared `days` + `end` (UTC) query params used by every time-series endpoint. */
-private fun io.ktor.server.application.ApplicationCall.rangeParams(): Pair<Int, java.time.LocalDate> {
+/**
+ * Parse the shared `days` + `end` + `tz` query params used by every time-series endpoint.
+ *
+ * `tz` is an IANA zone id from the browser; anything unparseable (or absent — old clients, curl)
+ * falls back to UTC, which is exactly the behaviour these endpoints had before. `end` is read as a
+ * date *in that zone*, so "today" means the caller's today.
+ */
+private fun io.ktor.server.application.ApplicationCall.rangeParams(): Triple<Int, java.time.LocalDate, java.time.ZoneId> {
     val days = parameters["days"]?.toIntOrNull() ?: 7
+    val zone = parameters["tz"]?.let { runCatching { java.time.ZoneId.of(it) }.getOrNull() } ?: java.time.ZoneOffset.UTC
     val endDate = parameters["end"]?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
-        ?: java.time.LocalDate.now(java.time.ZoneOffset.UTC)
-    return days to endDate
+        ?: java.time.LocalDate.now(zone)
+    return Triple(days, endDate, zone)
 }

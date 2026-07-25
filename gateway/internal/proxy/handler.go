@@ -73,6 +73,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeProxyError(w, http.StatusBadGateway, "api_error", "control API error")
 		return
 	}
+	// The resolve opened an "active now" entry for this request; close it however we leave.
+	defer h.ctrl.EndSession(resp.SessionID)
 
 	if len(resp.Candidates) == 0 {
 		if resp.OverLimit {

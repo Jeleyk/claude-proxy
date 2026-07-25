@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AccountDto, api, GroupDto, has, PoolStats, UserDto } from '../api';
 import { AccountEditModal, AccountsTable, AddAccountModal, globalAccountApi, GroupsModal, PoolCards } from '../accounts';
+import { SkeletonCards, SkeletonTable } from '../Skeleton';
 
 export function Dashboard({ user }: { user: UserDto }) {
   const [stats, setStats] = useState<PoolStats | null>(null);
@@ -44,7 +45,7 @@ export function Dashboard({ user }: { user: UserDto }) {
         </div>
       </div>
 
-      {!stats ? (<div className="hint">Loading pool…</div>) : (
+      {!stats ? (<><SkeletonCards n={4} /><h2>Accounts by priority</h2><SkeletonTable rows={5} cols={6} /></>) : (
         <>
           <PoolCards stats={stats} scope="global" />
           <h2>Accounts by priority</h2>

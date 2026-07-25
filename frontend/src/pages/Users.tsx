@@ -3,10 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import { AccountDto, api, fmtTokens, fmtUsd, GroupDto, PoolStats, RoleDto, UserDto } from '../api';
 import { AccountEditModal } from '../accounts';
 import { Check, Modal, NumberInput, Switch } from '../ui';
+import { SkeletonLine, SkeletonTable } from '../Skeleton';
 
 export function Users({ isAdmin }: { isAdmin: boolean }) {
   const navigate = useNavigate();
-  const [users, setUsers] = useState<UserDto[]>([]);
+  const [users, setUsers] = useState<UserDto[] | null>(null);
   const [roles, setRoles] = useState<RoleDto[]>([]);
   const [groups, setGroups] = useState<GroupDto[]>([]);
   const [allPerms, setAllPerms] = useState<string[]>([]);
@@ -36,6 +37,7 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
       </div>
 
       <h2>Users</h2>
+      {!users ? <SkeletonTable rows={4} cols={6} /> : (
       <div className="tablewrap">
         <table>
           <thead><tr><th>Username</th><th>Roles</th><th>Group access</th><th>Spent today</th><th>Daily limit</th><th>On</th><th></th></tr></thead>
@@ -66,10 +68,20 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
           </tbody>
         </table>
       </div>
+      )}
 
       <h2>Roles</h2>
-      {roles.map((r) => <RoleRow key={r.id} r={r} allPerms={allPerms} onChange={load} />)}
-      <CreateRole allPerms={allPerms} onDone={load} />
+      {!users ? (
+        <div className="panel" style={{ display: 'grid', gap: 10 }}>
+          <SkeletonLine width={140} height={13} />
+          <SkeletonLine width="60%" height={11} />
+        </div>
+      ) : (
+        <>
+          {roles.map((r) => <RoleRow key={r.id} r={r} allPerms={allPerms} onChange={load} />)}
+          <CreateRole allPerms={allPerms} onDone={load} />
+        </>
+      )}
 
       {editing && (
         <UserModal user={editing === 'new' ? null : editing} roles={roles} groups={groups}
@@ -97,7 +109,7 @@ function UserAccountsModal({ user, onClose }: { user: UserDto; onClose: () => vo
     <Modal title={`${user.username} · personal accounts`} onClose={onClose} width={640}
       footer={<button className="ghost" onClick={onClose}>Close</button>}>
       {err && <div className="err">{err}</div>}
-      {!stats ? <div className="hint">Loading…</div>
+      {!stats ? <SkeletonTable rows={3} cols={5} />
         : stats.accounts.length === 0 ? <p className="hint">This user has no personal accounts.</p> : (
           <div className="tablewrap">
             <table>

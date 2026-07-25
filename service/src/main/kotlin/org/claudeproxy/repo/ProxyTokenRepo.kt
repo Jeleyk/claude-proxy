@@ -33,6 +33,10 @@ object ProxyTokenRepo {
      * cached in-process (`cp:tok:<hash>`, TTL 60s) with a DB fallback. `last_used_at` is bumped
      * on cache misses (~once per 60s per token) rather than every request — this avoids a DB
      * write on the hot path.
+     *
+     * A disabled token resolves to null, i.e. the datapath rejects it exactly like an unknown
+     * token (401). Disabled tokens are never cached, so each attempt costs one SELECT — the
+     * same as any bad token.
      */
     fun resolveAuth(rawToken: String): TokenAuth? {
         val hash = Crypto.sha256Hex(rawToken)
@@ -40,8 +44,9 @@ object ProxyTokenRepo {
     }
 
     private fun loadByHash(hash: String): String? = transaction {
-        val row = ProxyTokens.selectAll().where { ProxyTokens.tokenHash eq hash }.firstOrNull()
-            ?: return@transaction null
+        val row = ProxyTokens.selectAll()
+            .where { (ProxyTokens.tokenHash eq hash) and (ProxyTokens.enabled eq true) }
+            .firstOrNull() ?: return@transaction null
         ProxyTokens.update({ ProxyTokens.tokenHash eq hash }) { it[lastUsedAt] = Instant.now() }
         "${row[ProxyTokens.userId]}:${row[ProxyTokens.id]}"
     }
@@ -73,8 +78,27 @@ object ProxyTokenRepo {
                 userId = row[ProxyTokens.userId],
                 createdAt = row[ProxyTokens.createdAt].toString(),
                 lastUsedAt = row[ProxyTokens.lastUsedAt]?.toString(),
+                enabled = row[ProxyTokens.enabled],
             )
         }
+    }
+
+    /**
+     * Turn a token on/off (own tokens only). Evicts the resolve cache so the switch takes effect
+     * immediately rather than after the 60s TTL.
+     */
+    fun setEnabled(id: Int, userId: Int, enabled: Boolean): Boolean {
+        val (updated, hash) = transaction {
+            val h = ProxyTokens.selectAll()
+                .where { (ProxyTokens.id eq id) and (ProxyTokens.userId eq userId) }
+                .firstOrNull()?.get(ProxyTokens.tokenHash)
+            val n = ProxyTokens.update({ (ProxyTokens.id eq id) and (ProxyTokens.userId eq userId) }) {
+                it[ProxyTokens.enabled] = enabled
+            }
+            (n > 0) to h
+        }
+        if (updated && hash != null) MemoryCache.evict("cp:tok:$hash")
+        return updated
     }
 
     fun delete(id: Int, userId: Int): Boolean {

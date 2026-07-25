@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, ModelPrice } from '../api';
 import { NumberInput } from '../ui';
+import { SkeletonTable } from '../Skeleton';
 
 const KINDS: { key: keyof Omit<ModelPrice, 'pattern'>; label: string; hint: string }[] = [
   { key: 'inputPrice', label: 'Input', hint: 'prompt tokens' },
@@ -10,7 +11,7 @@ const KINDS: { key: keyof Omit<ModelPrice, 'pattern'>; label: string; hint: stri
 ];
 
 export function ModelPricing() {
-  const [prices, setPrices] = useState<ModelPrice[]>([]);
+  const [prices, setPrices] = useState<ModelPrice[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [np, setNp] = useState('');
   const [nv, setNv] = useState<Record<string, number>>({ inputPrice: 0, outputPrice: 0, cacheReadPrice: 0, cacheWritePrice: 0 });
@@ -39,19 +40,21 @@ export function ModelPricing() {
           Matched by substring of the model id (longest match wins). Cost = input×in + output×out + cache_read×cr + cache_write×cw, per 1M tokens.
           Example: <span className="mono">opus</span> matches <span className="mono">claude-opus-4-8</span>. Unknown models cost $0.
         </p>
-        <div className="tablewrap">
-          <table>
-            <thead><tr><th>Model</th><th className="num">Input</th><th className="num">Output</th><th className="num">Cache read</th><th className="num">Cache write</th><th></th></tr></thead>
-            <tbody>
-              {prices.map((p) => (
-                <PriceRow key={p.pattern} p={p}
-                  onSave={async (np2) => setPrices(await api.setModelPrice(np2))}
-                  onDelete={async (pat) => setPrices(await api.deleteModelPrice(pat))} />
-              ))}
-              {prices.length === 0 && <tr><td colSpan={6} className="hint">No pricing rules — everything costs $0.</td></tr>}
-            </tbody>
-          </table>
-        </div>
+        {!prices ? <SkeletonTable rows={4} cols={6} /> : (
+          <div className="tablewrap">
+            <table>
+              <thead><tr><th>Model</th><th className="num">Input</th><th className="num">Output</th><th className="num">Cache read</th><th className="num">Cache write</th><th></th></tr></thead>
+              <tbody>
+                {prices.map((p) => (
+                  <PriceRow key={p.pattern} p={p}
+                    onSave={async (np2) => setPrices(await api.setModelPrice(np2))}
+                    onDelete={async (pat) => setPrices(await api.deleteModelPrice(pat))} />
+                ))}
+                {prices.length === 0 && <tr><td colSpan={6} className="hint">No pricing rules — everything costs $0.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <div className="panel narrow">
@@ -67,7 +70,7 @@ export function ModelPricing() {
             </label>
           ))}
         </div>
-        <button onClick={add} disabled={!np.trim()}>{prices.some((p) => p.pattern === np.trim().toLowerCase()) ? 'Update price' : 'Add price'}</button>
+        <button onClick={add} disabled={!np.trim()}>{prices?.some((p) => p.pattern === np.trim().toLowerCase()) ? 'Update price' : 'Add price'}</button>
       </div>
     </div>
   );

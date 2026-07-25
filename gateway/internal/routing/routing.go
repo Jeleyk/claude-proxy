@@ -138,6 +138,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.tr.WriteError(w, http.StatusBadGateway, "api_error", "control API error")
 		return
 	}
+	// The resolve opened an "active now" entry for this request; close it however we leave.
+	defer h.ctrl.EndSession(resp.SessionID)
 
 	// Endpoints served locally (model listing) — authenticated, no upstream, no usage.
 	if h.tr.HandleLocal(w, r.Method, r.URL.Path) {

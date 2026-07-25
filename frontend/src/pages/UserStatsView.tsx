@@ -3,14 +3,17 @@
 // (proxy | routing | both). Rendered as "My Stats" (userId=null) and as the admin per-user view.
 import { useEffect, useMemo, useState } from 'react';
 import {
-  api, DailyStats, fmtTokens, fmtUsd, McpUsage, MyStats as MyStatsDto, StatsSource,
-  TokenKindSeries, TokenStats, TokenUsage, WindowStats,
+  api, DailyStats, fmtTokens, fmtUntilUtcMidnight, fmtUsd, McpUsage, MyStats as MyStatsDto,
+  StatsSource, TokenKindSeries, TokenStats, TokenUsage, WindowDaily, WindowStats,
 } from '../api';
 import { LineChart, SERIES_COLORS, StackedChart } from '../Chart';
-import { Legend, RangeControls, sumKinds, todayUtc, tokenSeries, TOKEN_KINDS, W5H, WWK } from './statsShared';
+import {
+  Legend, RangeControls, sumKinds, todayLocal, tokenSeries, TOKEN_KINDS, W5H, WindowBurnCharts, WWK,
+} from './statsShared';
 import { Segmented, Select, useChartMode } from '../ui';
 import { TokenUsageChartsRow, usageItems } from './tokenUsage';
 import { ChartMode } from '../Chart';
+import { SkeletonChartRow, SkeletonControls, SkeletonStatsPage } from '../Skeleton';
 
 type SourceSel = 'all' | 'proxy' | 'routing';
 const SOURCE_OPTIONS: { value: SourceSel; label: string }[] = [
@@ -36,8 +39,9 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
   const [daily, setDaily] = useState<DailyStats | null>(null);
   const [tokens, setTokens] = useState<TokenStats | null>(null);
   const [windows, setWindows] = useState<WindowStats | null>(null);
+  const [winDaily, setWinDaily] = useState<WindowDaily | null>(null);
   const [days, setDays] = useState(7);
-  const [endDate, setEndDate] = useState(todayUtc());
+  const [endDate, setEndDate] = useState(todayLocal());
   const [mode, setMode] = useChartMode();
   // window-utilization display: raw API utilization vs coefficient-weighted (both summed across accounts)
   const [winMode, setWinMode] = useState<'api' | 'coef'>('api');
@@ -52,12 +56,13 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
 
   async function loadCharts() {
     try {
-      const [d, t, w] = await Promise.all([
+      const [d, t, w, wd] = await Promise.all([
         api.userStatsDaily(userId, days, endDate, source),
         api.userStatsTokens(userId, days, endDate, source),
         api.userStatsWindows(userId, days, endDate),
+        api.userStatsWindowDaily(userId, days, endDate),
       ]);
-      setDaily(d); setTokens(t); setWindows(w);
+      setDaily(d); setTokens(t); setWindows(w); setWinDaily(wd);
     } catch (e: any) { setErr(e.message); }
   }
   useEffect(() => { loadCharts(); /* eslint-disable-next-line */ }, [userId, days, endDate, sourceSel]);
@@ -79,7 +84,8 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
   }, [accountKey]);
 
   if (err) return <div className="err">{err}</div>;
-  if (!s) return <div className="hint">Loading…</div>;
+  // first load only — the polls below refresh in place rather than falling back to placeholders
+  if (!s) return <SkeletonStatsPage />;
 
   function statusBadge(st: number) {
     const cls = st >= 200 && st < 300 ? 'ok' : st === 429 ? 'warn' : 'bad';
@@ -130,10 +136,23 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
           <div className="label">Daily limits</div>
           <LimitRow label="proxy" used={s.proxyTodayCost} limit={s.dailyCostLimit} />
           <LimitRow label="routing" used={s.routingTodayCost} limit={s.dailyRoutingCostLimit} />
+          {/* the limit is enforced on UTC days, so spell out when it actually rolls over —
+              the charts above are on local days and the two boundaries rarely coincide */}
+          <div className="hint" style={{ marginTop: 8 }}>resets in {fmtUntilUtcMidnight()} · 00:00 UTC</div>
         </div>
         <div className="card"><div className="label">Requests today{srcHint}</div><div className="value">{s.todayRequests.toLocaleString()}</div><div className="hint">{s.totalRequests.toLocaleString()} all-time</div></div>
+        {/* in-flight right now, not a daily total — the source filter doesn't apply, both
+            datapaths are always broken out and summed */}
+        <div className="card">
+          <div className="label">Active sessions</div>
+          <div className="value">{s.activeProxySessions + s.activeRoutingSessions}</div>
+          <div className="hint">{s.activeProxySessions} proxy · {s.activeRoutingSessions} routing</div>
+          <div className="hint">{s.activeProxySessions + s.activeRoutingSessions === 0 ? 'nothing streaming' : 'streaming from Claude now'}</div>
+        </div>
         <div className="card"><div className="label">Tokens today{srcHint}</div><div className="value" style={{ fontSize: 22 }}>{fmtTokens(s.todayClean)}</div><div className="hint">{fmtTokens(s.totalClean)} all-time</div></div>
       </div>
+
+      {!daily && (<><SkeletonControls /><SkeletonChartRow /></>)}
 
       {daily && (
         <>
@@ -177,6 +196,15 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
               </div>
             )}
           </div>
+
+          {/* how much of each limit window the personal accounts burned per day (resets included) */}
+          {hasAccounts && winDaily && (
+            <>
+              <h2>Window spend per day</h2>
+              <WindowBurnCharts data={winDaily} mode={mode}
+                hint="Personal accounts. Share of a limit window consumed per day; 100% = one full window, and the 5-hour bar passes 100% on days the window reset and was spent again." />
+            </>
+          )}
 
           {/* per-inbound-token breakdowns — one block per datapath, following the source filter */}
           {(sourceSel === 'all' || sourceSel === 'proxy') && (

@@ -11,9 +11,10 @@ import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 
-/** One (tool, day) bucket of a user's MCP calls, bucketed by UTC date. */
+/** One (tool, day) bucket of a user's MCP calls, bucketed by the viewer's local date. */
 @Serializable
 data class McpDailyBucketDto(val toolName: String, val date: String, val calls: Long)
 
@@ -39,13 +40,15 @@ object McpUsageRepo {
         }
     }
 
-    /** Daily (tool, day) call buckets for one user in [start, end), bucketed by UTC date. */
-    fun dailyBucketsForUser(userId: Int, start: Instant, end: Instant): List<McpDailyBucketDto> = transaction {
+    /** Daily (tool, day) call buckets for one user in [start, end), bucketed by date in [zone]. */
+    fun dailyBucketsForUser(
+        userId: Int, start: Instant, end: Instant, zone: ZoneId = ZoneOffset.UTC,
+    ): List<McpDailyBucketDto> = transaction {
         val acc = HashMap<Pair<String, String>, Long>() // (tool, date) -> calls
         McpToolCalls.selectAll()
             .where { (McpToolCalls.userId eq userId) and (McpToolCalls.ts greaterEq start) and (McpToolCalls.ts less end) }
             .forEach { row ->
-                val date = row[McpToolCalls.ts].atZone(ZoneOffset.UTC).toLocalDate().toString()
+                val date = row[McpToolCalls.ts].atZone(zone).toLocalDate().toString()
                 val key = row[McpToolCalls.toolName] to date
                 acc[key] = (acc[key] ?: 0L) + row[McpToolCalls.calls]
             }

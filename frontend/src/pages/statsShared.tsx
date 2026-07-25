@@ -1,8 +1,8 @@
 // Shared chart helpers for the Statistics + My Stats pages: token-kind palette, series
-// builders, UTC date math and the interactive legend chip row.
+// builders, date math and the interactive legend chip row.
 import { ReactNode, useState } from 'react';
-import { ChartMode, Series } from '../Chart';
-import { TokenKindSeries } from '../api';
+import { ChartMode, Series, SERIES_COLORS, StackedChart } from '../Chart';
+import { fmtWindowPct, TokenKindSeries, WindowDaily } from '../api';
 import { Icon, NumberInput, Segmented } from '../ui';
 
 export const W5H = '#5a7fb0';
@@ -15,8 +15,14 @@ export const TOKEN_KINDS: { key: keyof TokenKindSeries; label: string; color: st
   { key: 'cacheWrite', label: 'Cache write', color: '#c08a2e' },
 ];
 
-export function todayUtc(): string { return new Date().toISOString().slice(0, 10); }
+/** Today on the viewer's clock (not UTC) — every chart range is expressed in their local days. */
+export function todayLocal(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 
+/** Calendar-date arithmetic on a YYYY-MM-DD label; zone-independent by construction. */
 export function shiftDate(d: string, days: number): string {
   const dt = new Date(d + 'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate() + days); return dt.toISOString().slice(0, 10);
 }
@@ -41,7 +47,7 @@ export function RangeControls({ days, onDays, endDate, onEndDate, mode, onMode, 
 }) {
   const PRESETS = [7, 30, 90];
   const [showCustom, setShowCustom] = useState(!PRESETS.includes(days));
-  const atToday = endDate >= todayUtc();
+  const atToday = endDate >= todayLocal();
   const rangeStart = shiftDate(endDate, -(days - 1));
   return (
     <div className="controlbar">
@@ -73,6 +79,56 @@ export function RangeControls({ days, onDays, endDate, onEndDate, mode, onMode, 
     </div>
   );
 }
+
+/**
+ * "Window burn per day": how much of the 5-hour and the weekly limit each account actually spent
+ * on each day, stacked per account so the stack height is the pool total.
+ *
+ * Read in window-fractions — 100% is one whole window. The 5h chart routinely passes 100% because
+ * the window resets up to ~5 times a day and each fresh window is spent again; that's the number
+ * the plain utilization gauge structurally cannot show, since it drops back to 0 on every reset.
+ */
+export function WindowBurnCharts({ data, mode, hint, height = 190 }: {
+  data: WindowDaily; mode: ChartMode; hint?: string; height?: number;
+}) {
+  const perAcct = data.canViewAccounts && data.perAccount.length > 0;
+  const items = perAcct
+    ? data.perAccount.map((a, i) => ({
+        key: String(a.accountId),
+        label: a.accountName ?? `#${a.accountId}`,
+        color: SERIES_COLORS[i % SERIES_COLORS.length],
+        a,
+      }))
+    : [];
+  const series = (pick: (a: WindowDaily['perAccount'][number]) => number[], total: number[]): Series[] =>
+    perAcct
+      ? items.map((it) => ({ name: it.label, color: it.color, values: pick(it.a) }))
+      : [{ name: 'Total', color: SERIES_COLORS[0], values: total }];
+
+  const sum = (v: number[]) => v.reduce((a, b) => a + b, 0);
+  const legend = items.map((it) => ({ key: it.key, label: it.label, color: it.color }));
+
+  return (
+    <div className="chart-row two">
+      {([
+        { title: '5-hour window burned', total: data.totalFiveHour, pick: (a: WindowDailySrc) => a.fiveHour },
+        { title: 'Weekly window burned', total: data.totalWeekly, pick: (a: WindowDailySrc) => a.weekly },
+      ] as const).map((c) => (
+        <div className="panel" key={c.title}>
+          <div className="chart-card-head">
+            <span className="t">{c.title}</span>
+            <span className="v">{fmtWindowPct(sum(c.total))}</span>
+          </div>
+          <StackedChart days={data.days} series={series(c.pick, c.total)} height={height} fmt={fmtWindowPct} mode={mode} />
+          {legend.length > 1 && <Legend items={legend} />}
+        </div>
+      ))}
+      {hint && <p className="hint" style={{ gridColumn: '1 / -1', margin: 0 }}>{hint}</p>}
+    </div>
+  );
+}
+
+type WindowDailySrc = WindowDaily['perAccount'][number];
 
 /** Legend chips; interactive (toggles series) when `onToggle` is supplied. */
 export function Legend({ items, hidden, onToggle }: {

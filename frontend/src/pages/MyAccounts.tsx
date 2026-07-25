@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { AccountDto, api, has, PoolStats, UserDto } from '../api';
 import { AccountEditModal, AccountsTable, AddAccountModal, PoolCards, personalAccountApi } from '../accounts';
 import { Segmented } from '../ui';
+import { SkeletonCards, SkeletonTable } from '../Skeleton';
 
 export function MyAccounts({ user, onUserChange }: { user: UserDto; onUserChange: (u: UserDto) => void }) {
   const [stats, setStats] = useState<PoolStats | null>(null);
@@ -65,7 +66,7 @@ export function MyAccounts({ user, onUserChange }: { user: UserDto; onUserChange
         </div>
       </div>
 
-      {!stats ? (<div className="hint">Loading…</div>) : (
+      {!stats ? (<><SkeletonCards n={3} /><h2>Accounts by priority</h2><SkeletonTable rows={3} cols={6} /></>) : (
         <>
           <PoolCards stats={stats} scope="personal" shared={canUseGlobal ? globalStats : null} />
           <h2>Accounts by priority</h2>

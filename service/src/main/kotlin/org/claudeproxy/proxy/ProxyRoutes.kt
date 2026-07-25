@@ -10,6 +10,7 @@ import io.ktor.server.routing.Route
 import io.ktor.server.routing.route
 import kotlinx.serialization.Serializable
 import org.claudeproxy.accounts.AccountPool
+import org.claudeproxy.datapath.ActiveSessions
 import org.claudeproxy.model.Permission
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.SettingsRepo
@@ -32,7 +33,22 @@ class ProxyEngine(
 ) {
     private val log = LoggerFactory.getLogger("ProxyEngine")
 
+    /**
+     * Wraps [serve] so the "active now" gauge sees this datapath too. The Kotlin datapath is the
+     * rollback path for the Go gateway; without this the counters would read zero whenever the
+     * rollback is in effect.
+     */
     suspend fun handle(call: ApplicationCall) {
+        val sessionId = java.util.UUID.randomUUID().toString()
+        var opened = false
+        try {
+            serve(call) { userId -> ActiveSessions.begin(sessionId, userId, routing = false); opened = true }
+        } finally {
+            if (opened) ActiveSessions.end(sessionId)
+        }
+    }
+
+    private suspend fun serve(call: ApplicationCall, onAuthenticated: (Int) -> Unit) {
         log.info("IN {} {} clen={} te={} expect={}", call.request.httpMethod.value, call.request.uri,
             call.request.headers["content-length"], call.request.headers["transfer-encoding"], call.request.headers["expect"])
         // Inbound auth: proxy token from Authorization: Bearer, or x-api-key.
@@ -53,6 +69,7 @@ class ProxyEngine(
             call.respond(HttpStatusCode.Forbidden, ProxyError(ProxyErrorBody("permission_error", "Token lacks proxy.use")))
             return
         }
+        onAuthenticated(userId)
 
         // Admins may use any account; others are scoped to their granted groups
         // (ungrouped accounts are always available).

@@ -416,6 +416,44 @@ td.totalcell { cursor: default; }
 .grouprow .gr-count { color: var(--faint); font-size: 12px; white-space: nowrap; }
 .grouprow input { flex: 1; }
 
+/* ============================ skeletons ============================
+   Loading placeholders that mirror the real layout (cards, chart panels, table rows) so the
+   page doesn't jump when data lands. One shimmer sweep travels across every block on the page
+   from the same shared animation clock. */
+.sk {
+  position: relative; overflow: hidden; border-radius: 6px;
+  background: var(--panel-3);
+}
+.sk::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--panel) 70%, transparent) 45%,
+    color-mix(in srgb, var(--panel) 70%, transparent) 55%,
+    transparent 100%);
+  transform: translateX(-100%);
+  animation: sk-sweep 1.5s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+@keyframes sk-sweep { to { transform: translateX(100%); } }
+
+.sk-text { height: 11px; }
+.sk-title { height: 13px; border-radius: 5px; }
+/* Chart body: a baseline plus columns of varied height — reads as a chart, not a grey slab. */
+.sk-chart { display: flex; align-items: flex-end; gap: 6px; padding-left: 34px; position: relative; }
+.sk-chart::before {
+  content: ''; position: absolute; left: 34px; right: 0; bottom: 0;
+  border-bottom: 1px solid var(--border);
+}
+.sk-chart .sk-axis { position: absolute; left: 0; top: 0; bottom: 0; width: 26px; display: flex; flex-direction: column; justify-content: space-between; padding: 2px 0 6px; }
+.sk-chart .sk-axis .sk { height: 8px; }
+.sk-chart .sk-col { flex: 1; min-width: 0; border-radius: 3px 3px 0 0; }
+.sk-legend { display: flex; gap: 12px; margin-top: 11px; }
+.sk-legend .sk { height: 10px; width: 62px; }
+/* Rows sit inside the real .tablewrap, so borders and padding match the loaded table. */
+.sk-row { display: flex; gap: 14px; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--border); }
+.sk-row:last-child { border-bottom: none; }
+.sk-row .sk { height: 11px; flex: 1; }
+
 /* ============================ responsive ============================ */
 @media (max-width: 900px) {
   .app { }
@@ -454,4 +492,7 @@ td.totalcell { cursor: default; }
 
 @media (prefers-reduced-motion: reduce) {
   * { transition-duration: 0.001ms !important; animation-duration: 0.001ms !important; }
+  /* a near-zero duration on an infinite sweep would strobe — drop the shimmer outright and
+     leave the (still informative) static placeholder shapes */
+  .sk::after { display: none; }
 }

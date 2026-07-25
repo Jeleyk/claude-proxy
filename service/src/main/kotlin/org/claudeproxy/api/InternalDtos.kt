@@ -15,7 +15,15 @@ data class ResolveRequest(
     val path: String,
     // datapath: "proxy" (Claude Code, default) or "routing" (OpenAI/Anthropic gateways).
     val source: String = "proxy",
+    // Gateway-generated id for this inbound request. When present, the resolve opens an
+    // active-session entry that /internal/session-end closes. Absent = no liveness tracking
+    // (older gateways), which costs nothing but the "active now" gauge.
+    val requestId: String? = null,
 )
+
+/** Closes the active session opened by a resolve carrying the same [requestId]. */
+@Serializable
+data class SessionEndRequest(val requestId: String)
 
 /**
  * One try-list entry: an account already ordered by the pool, carrying the *decrypted*

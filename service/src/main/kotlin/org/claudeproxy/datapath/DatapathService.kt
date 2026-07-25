@@ -59,8 +59,13 @@ class DatapathService(private val pool: AccountPool) {
      * gateways). Routing resolves the token in the routing-token namespace, requires
      * `ROUTING_USE`, and meters spend against the separate per-user routing daily limit. Account
      * selection (personal-first, group scope, global-pool gating) is identical for both.
+     *
+     * [requestId], when the caller supplies one, opens an [ActiveSessions] entry for the "active
+     * now" gauges; the caller closes it when the request finishes.
      */
-    suspend fun resolve(token: String, method: String, path: String, source: String = "proxy"): ResolveResult {
+    suspend fun resolve(
+        token: String, method: String, path: String, source: String = "proxy", requestId: String? = null,
+    ): ResolveResult {
         val routing = source == "routing"
         val auth = (if (routing) RoutingTokenRepo.resolveAuth(token) else ProxyTokenRepo.resolveAuth(token))
             ?: return ResolveResult(null, null, ResolveError.BAD_TOKEN, false, null, null, emptyList())
@@ -71,6 +76,9 @@ class DatapathService(private val pool: AccountPool) {
         if (required !in perms) {
             return ResolveResult(userId, tokenId, ResolveError.NO_PERMISSION, false, null, null, emptyList())
         }
+        // Only a resolve the caller can act on opens a session — a rejected one never gets a
+        // matching close, and would sit in the map until it aged out.
+        if (requestId != null) ActiveSessions.begin(requestId, userId, routing)
 
         // Admins may use any account; others are scoped to their granted groups.
         val allowedGroups: Set<Int>? = if (Permission.ADMIN in perms) null else UserRepo.allowedGroupsOf(userId)
