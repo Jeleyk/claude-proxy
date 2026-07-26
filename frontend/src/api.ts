@@ -310,11 +310,14 @@ export interface WindowDailySeries {
   accountId: number; accountName: string | null;
   // window-fractions burned that day: 1.0 = one whole window. Several resets in a day stack past 1.
   fiveHour: number[]; weekly: number[];
+  // the 5h burn restated in base-subscription windows (each step ×the account's coefficient)
+  fiveHourWeighted: number[];
 }
 export interface WindowDaily {
   days: string[];
   totalFiveHour: number[];
   totalWeekly: number[];
+  totalFiveHourWeighted: number[];
   perAccount: WindowDailySeries[];
   canViewAccounts: boolean;
 }

@@ -8,7 +8,7 @@ An nginx router (in `docker-compose`) fronts three components on one origin:
   `service:8787` reverts it.
 - **API routing** — `/routing/openai/{...}` and `/routing/anthropic/{...}` expose the standard
   OpenAI and Anthropic contracts to arbitrary clients, served from the same account pool by the
-  Go **gateway-openai** / **gateway-anthropic** binaries. Usage is tagged `source="routing"` and
+  same Go **gateway** binary, mounted under those path prefixes. Usage is tagged `source="routing"` and
   metered against a separate per-user daily limit.
 - **Management API** — `/api/*` REST endpoints on the Kotlin **service**.
 - **SPA** — the React admin UI, static files served at `/` (react-router).

@@ -1,15 +1,15 @@
 # gateway (Go)
 
-The thin Go data plane. One module, three binaries:
+The thin Go data plane. One module, **one binary, one port** — the three surfaces are split by path prefix in `newMux`:
 
-| Binary | Port | Serves |
+| Path | Port | Serves |
 |--------|------|--------|
-| `.` (`main.go`) | 9000 | The Claude Code datapath behind `/gateway`, `/v1` (nginx strips the `/gateway` prefix) — this document. |
-| `cmd/openai` | 9100 | OpenAI Chat Completions (`/routing/openai`), translated to/from Anthropic. |
-| `cmd/anthropic` | 9200 | Native Anthropic Messages (`/routing/anthropic`), with the Claude Code system prompt injected. |
+| `/v1/…` | 9000 | The Claude Code datapath behind `/gateway`, `/v1` (nginx strips the `/gateway` prefix). |
+| `/routing/openai/…` | 9000 | OpenAI Chat Completions, translated to/from Anthropic. |
+| `/routing/anthropic/…` | 9000 | Native Anthropic Messages, with the Claude Code system prompt injected. |
 
-All state lives in the **service** (Kotlin/Postgres); the gateways are stateless and never touch
-the database. The two routing binaries share `internal/` with the datapath and resolve through the
+All state lives in the **service** (Kotlin/Postgres); the gateway is stateless and never touches
+the database. The routing surfaces share `internal/` with the datapath and resolve through the
 same control API, tagging their usage `source="routing"`.
 
 ## Flow (per request)

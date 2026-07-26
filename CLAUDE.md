@@ -22,8 +22,8 @@ listening on `127.0.0.1:8080`). A host reverse proxy terminates TLS and proxies 
 | `/`           | **frontend** (SPA)   | React admin UI, static, served by nginx (React Router)   |
 | `/api/…`      | **service** (Kotlin) | Management REST API                                      |
 | `/gateway/…`  | **gateway** (Go)     | Anthropic datapath (`/gateway/v1/…`), served by the Go **gateway** (Spec B). It resolves each request against the service's private `/internal/*` control API, forwards to Anthropic, relays SSE, and reports usage back. The Kotlin datapath (`service:8787`) stays running as an instant rollback (revert the two nginx `proxy_pass` targets). |
-| `/routing/openai/…`    | **gateway-openai** (Go)    | OpenAI Chat Completions API emulated over Claude Code subscriptions. Translates OpenAI↔Anthropic (streaming + tool calls), resolves via the control API with `source="routing"`. base_url = `<origin>/routing/openai/v1`. |
-| `/routing/anthropic/…` | **gateway-anthropic** (Go) | Native Anthropic Messages API served from Claude Code subscriptions (injects the Claude Code system prompt), `source="routing"`. base_url = `<origin>/routing/anthropic`. |
+| `/routing/openai/…`    | **gateway** (Go, same container) | OpenAI Chat Completions API emulated over Claude Code subscriptions. Translates OpenAI↔Anthropic (streaming + tool calls), resolves via the control API with `source="routing"`. base_url = `<origin>/routing/openai/v1`. |
+| `/routing/anthropic/…` | **gateway** (Go, same container) | Native Anthropic Messages API served from Claude Code subscriptions (injects the Claude Code system prompt), `source="routing"`. base_url = `<origin>/routing/anthropic`. |
 
 The routing gateways expose standard OpenAI/Anthropic API contracts to arbitrary clients but serve
 them through the same account pool as the Claude Code proxy. They authenticate with **routing
@@ -38,9 +38,10 @@ are one Go module (`gateway/`, binaries under `cmd/`); they never touch Postgres
 
 Top-level dirs: `frontend/` (React) · `service/` (Kotlin business logic + control API + Kotlin
 datapath/rollback) · `gateway/` (Go — one module: the Claude Code datapath at `gateway/main.go`
-plus `cmd/openai` + `cmd/anthropic` routing gateways, shared `internal/`) · `deploy/` (nginx config
+serving all three paths off one port, split by prefix in `newMux`) · `deploy/` (nginx config
 + Dockerfiles).
-Containers: `claude-proxy-{nginx,front,service,gateway,gateway-openai,gateway-anthropic,db}`.
+Containers: `claude-proxy-{nginx,front,service,gateway,db}` — the whole Go data plane is one
+image and one container.
 `docker-compose.yml`, `.env.example`, `.dockerignore` stay at the repo root (compose sits next
 to server runtime state). See `docs/superpowers/specs/2026-07-12-repo-restructure-nginx-routing-design.md`.
 
@@ -89,9 +90,8 @@ cd frontend && pnpm dev        # Vite HMR on :5173, proxies /api /gateway /v1 /h
 cd service && ./gradlew fatJar # service fat jar (UI NOT baked in) -> service/build/libs/claude-proxy-<v>-all.jar
 cd service && ./gradlew test   # JUnit
 cd gateway && go test ./...    # Go gateway unit tests (go vet ./... too)
-cd gateway && go run .            # Claude Code datapath gateway on :9000 (needs SERVICE_URL + INTERNAL_TOKEN)
-cd gateway && go run ./cmd/openai    # OpenAI routing gateway on :9100 (SERVICE_URL + INTERNAL_TOKEN; DEFAULT_MODEL opt.)
-cd gateway && go run ./cmd/anthropic # Anthropic routing gateway on :9200
+cd gateway && go run .         # whole data plane on :9000 — /v1 datapath + /routing/{openai,anthropic}
+                               # (needs SERVICE_URL + INTERNAL_TOKEN; DEFAULT_MODEL optional)
 docker-compose up -d --build   # nginx (:8080) + front + service + gateway(+openai/anthropic) + postgres
 ```
 

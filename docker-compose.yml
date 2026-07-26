@@ -55,9 +55,11 @@ services:
       timeout: 3s
       retries: 10
 
-  # Gateway: the Go datapath (Spec B). Thin data plane — resolves each request against the
-  # service's /internal/* control API, forwards to Anthropic, relays SSE, reports usage back.
-  # Never touches Postgres directly. nginx flips /gateway,/v1 here in Task D3.
+  # Gateway: the whole Go data plane in one image and one container. The Claude Code datapath and
+  # both API routing gateways are one codebase, so they are now one process on one port, split by
+  # path (see gateway/main.go): /v1/… is the datapath, /routing/openai/… and /routing/anthropic/…
+  # are the routing gateways. Thin — resolves each request against the service's /internal/*
+  # control API, forwards to Anthropic, relays SSE, reports usage back. Never touches Postgres.
   gateway:
     build:
       context: .
@@ -75,62 +77,10 @@ services:
       SERVICE_URL: "http://service:8787"
       INTERNAL_TOKEN: ${INTERNAL_TOKEN}
       UPSTREAM_BASE_URL: "https://api.anthropic.com"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-
-  # Routing gateway (OpenAI): exposes the OpenAI Chat Completions API but serves each request
-  # from a Claude Code subscription via the control API (source="routing"). Same Go module as
-  # `gateway`; never touches Postgres. nginx fronts it at /routing/openai/.
-  gateway-openai:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.gateway-openai
-    image: claude-proxy-gateway-openai:latest
-    container_name: claude-proxy-gateway-openai
-    restart: unless-stopped
-    depends_on:
-      service:
-        condition: service_healthy
-    expose:
-      - "9100"
-    environment:
-      PORT: "9100"
-      SERVICE_URL: "http://service:8787"
-      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
-      UPSTREAM_BASE_URL: "https://api.anthropic.com"
       # Claude model for unmapped OpenAI model names (see gateway/internal/openaigw).
       DEFAULT_MODEL: "claude-sonnet-5"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9100/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-
-  # Routing gateway (Anthropic): exposes the native Anthropic Messages API to any client, served
-  # from Claude Code subscriptions (injects the Claude Code system prompt). nginx fronts it at
-  # /routing/anthropic/.
-  gateway-anthropic:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.gateway-anthropic
-    image: claude-proxy-gateway-anthropic:latest
-    container_name: claude-proxy-gateway-anthropic
-    restart: unless-stopped
-    depends_on:
-      service:
-        condition: service_healthy
-    expose:
-      - "9200"
-    environment:
-      PORT: "9200"
-      SERVICE_URL: "http://service:8787"
-      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
-      UPSTREAM_BASE_URL: "https://api.anthropic.com"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9200/healthz"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/healthz"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -161,21 +111,17 @@ services:
     image: claude-proxy-nginx:latest
     container_name: claude-proxy-nginx
     restart: unless-stopped
-    # service + front gate startup (SPA + /api + control plane must be up). The Go gateways only
-    # need to be STARTED (so their DNS names resolve for proxy_pass) — NOT healthy: a broken/opt-in
-    # routing gateway must degrade to a 502 on /routing/* only, never block the whole edge router
-    # (and never block the datapath rollback, which just reverts the /gateway,/v1 proxy_pass to
-    # service:8787). nginx re-resolves upstreams on restart if a container's IP changes.
+    # service + front gate startup (SPA + /api + control plane must be up). The Go gateway only
+    # needs to be STARTED (so its DNS name resolves for proxy_pass) — NOT healthy: a broken data
+    # plane must degrade to a 502 on its own routes, never block the whole edge router (and never
+    # block the datapath rollback, which just reverts the /gateway,/v1 proxy_pass to service:8787).
+    # nginx re-resolves upstreams on restart if a container's IP changes.
     depends_on:
       service:
         condition: service_healthy
       front:
         condition: service_healthy
       gateway:
-        condition: service_started
-      gateway-openai:
-        condition: service_started
-      gateway-anthropic:
         condition: service_started
     ports:
       - "127.0.0.1:8080:8080"

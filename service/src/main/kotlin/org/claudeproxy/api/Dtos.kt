@@ -288,6 +288,11 @@ data class WindowDailySeriesDto(
     // utilization gauge itself can never exceed 1.0 because it resets.
     val fiveHour: List<Double>,
     val weekly: List<Double>,
+    // The same 5-hour burn expressed in *base-subscription* windows: each step is scaled by the
+    // account's capacity coefficient, so a ×5 account spending its whole window reads 5.0. Lets a
+    // mixed pool be compared on one scale. No weekly counterpart: the weekly window is the same
+    // size on every plan, so the multiplier does not apply to it.
+    val fiveHourWeighted: List<Double>,
 )
 
 /**
@@ -300,6 +305,7 @@ data class WindowDailyPayload(
     val days: List<String>,
     val totalFiveHour: List<Double>,           // Σ across accounts
     val totalWeekly: List<Double>,
+    val totalFiveHourWeighted: List<Double>,   // Σ across accounts, in base-subscription windows
     val perAccount: List<WindowDailySeriesDto>, // empty if the viewer can't see accounts
     val canViewAccounts: Boolean,
 )

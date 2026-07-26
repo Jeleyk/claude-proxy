@@ -16,9 +16,7 @@ Claude Code / browser
        → compose nginx router (host 127.0.0.1:8080) — serves the SPA (front) and routes
          /api, /gateway, /v1, /routing/*
          → claude-proxy-service (service:8787)            # /api + /internal control API + Kotlin datapath (rollback)
-         → claude-proxy-gateway (gateway:9000)            # /gateway(→/v1), /v1 — Go datapath
-         → claude-proxy-gateway-openai (…:9100)           # /routing/openai
-         → claude-proxy-gateway-anthropic (…:9200)        # /routing/anthropic
+         → claude-proxy-gateway (gateway:9000)            # /v1 datapath + /routing/{openai,anthropic}
            → the service's /internal/resolve + /internal/usage (crypto, pool, usage)
              → Postgres claude-proxy-db (./pgdata)
 ```
@@ -45,10 +43,8 @@ choose SSE-safe: buffering **off**, long read timeouts.
   `claude-proxy-gateway`, reachable as `gateway:9000`. Calls the service's `/internal/*` control
   API (shared `INTERNAL_TOKEN`), forwards to Anthropic. `depends_on: service (healthy)`;
   `wget /healthz` healthcheck.
-- **gateway-openai / gateway-anthropic** — the API routing gateways (same Go module,
-  `cmd/openai` + `cmd/anthropic`), on `:9100` / `:9200`. nginx fronts them at `/routing/openai/`
-  and `/routing/anthropic/`. They are opt-in: if you don't need them, they simply receive no
-  traffic.
+  The API routing gateways live in this **same** container and port, mounted at `/routing/openai/`
+  and `/routing/anthropic/`; nginx forwards those prefixes verbatim and the gateway strips them.
 - **nginx** — edge router, built from `deploy/Dockerfile.nginx`. Publishes `127.0.0.1:8080:8080`.
   `depends_on: service, front (healthy)` + the gateways (started). Config in `deploy/nginx/` —
   `/gateway/` and `/v1/` `proxy_pass` to `gateway:9000` (revert to `service:8787` to roll the

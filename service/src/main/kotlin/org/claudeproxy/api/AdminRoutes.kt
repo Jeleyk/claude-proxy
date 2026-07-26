@@ -1012,13 +1012,13 @@ internal fun aggregateWindowDaily(
     val n = dayLabels.size
     val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
     val eps = 1e-9
-    // accountId -> [5h per-day burn, 7d per-day burn]
+    // accountId -> [5h per-day burn, 7d per-day burn, 5h per-day burn ×coefficient]
     val perAcc = HashMap<Int, Array<DoubleArray>>()
 
     samples.groupBy { it.accountId to it.kind }.forEach { (key, list) ->
         val (accountId, kind) = key
         val lane = when (kind) { "5h" -> 0; "7d" -> 1; else -> return@forEach }
-        val arr = perAcc.getOrPut(accountId) { arrayOf(DoubleArray(n), DoubleArray(n)) }[lane]
+        val lanes = perAcc.getOrPut(accountId) { arrayOf(DoubleArray(n), DoubleArray(n), DoubleArray(n)) }
         var prev: Double? = null
         list.sortedBy { it.ts }.forEach { s ->
             val p = prev
@@ -1027,7 +1027,12 @@ internal fun aggregateWindowDaily(
             prev = s.util
             if (delta > eps) {
                 val i = idx[s.ts.atZone(zone).toLocalDate().toString()] ?: return@forEach
-                arr[i] += delta
+                lanes[lane][i] += delta
+                // Each step is a fraction of *this account's* window; scaling by the coefficient
+                // frozen on the sample restates it in base-subscription windows, so a ×5 and a ×1
+                // account become comparable. 5-hour only — the weekly window does not scale with
+                // the plan, so weighting it would invent capacity that isn't there.
+                if (lane == 0) lanes[2][i] += delta * s.coef
             }
         }
     }
@@ -1040,10 +1045,10 @@ internal fun aggregateWindowDaily(
     val perAccount = if (includeAccounts)
         perAcc.entries
             .sortedByDescending { it.value[0].sum() + it.value[1].sum() }
-            .map { (aid, k) -> WindowDailySeriesDto(aid, names[aid], k[0].toList(), k[1].toList()) }
+            .map { (aid, k) -> WindowDailySeriesDto(aid, names[aid], k[0].toList(), k[1].toList(), k[2].toList()) }
     else emptyList()
 
-    return WindowDailyPayload(dayLabels, total(0), total(1), perAccount, includeAccounts)
+    return WindowDailyPayload(dayLabels, total(0), total(1), total(2), perAccount, includeAccounts)
 }
 
 private fun Route.statsRoutes(pool: AccountPool) {

@@ -71,8 +71,8 @@ One nginx router fronts every component on a single origin:
 | `/`                    | **frontend**               | React SPA (admin UI), static |
 | `/api/…`               | **service** (Kotlin/Ktor)  | Management REST API |
 | `/gateway/…`           | **gateway** (Go)           | The Claude Code datapath |
-| `/routing/openai/…`    | **gateway-openai** (Go)    | OpenAI Chat Completions over your pool |
-| `/routing/anthropic/…` | **gateway-anthropic** (Go) | Anthropic Messages over your pool |
+| `/routing/openai/…`    | **gateway** (same container) | OpenAI Chat Completions over your pool |
+| `/routing/anthropic/…` | **gateway** (same container) | Anthropic Messages over your pool |
 
 The Go gateways are a stateless data plane: they resolve each request against the service's
 private `/internal/*` control API (which owns selection, crypto and bookkeeping), forward to
@@ -80,8 +80,8 @@ Anthropic, relay SSE, and report usage back. They never touch the database. The 
 also still contains a complete datapath, kept as an instant rollback target — flipping one nginx
 `proxy_pass` reverts to it.
 
-Layout: `frontend/` (React) · `service/` (Kotlin) · `gateway/` (Go, one module with `cmd/openai`
-+ `cmd/anthropic`) · `deploy/` (nginx config + Dockerfiles) · `docs/`.
+Layout: `frontend/` (React) · `service/` (Kotlin) · `gateway/` (Go — one module, one binary,
+all three paths on one port) · `deploy/` (nginx config + Dockerfiles) · `docs/`.
 
 Depth: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -143,13 +143,13 @@ cd service && ./gradlew run
 cd frontend && pnpm install && pnpm dev
 ```
 
-The Go gateways run standalone against a running service:
+The Go gateway runs standalone against a running service. One process serves all three surfaces
+on one port — `/v1/…` is the datapath, `/routing/openai/…` and `/routing/anthropic/…` the routing
+gateways:
 
 ```bash
 cd gateway
-SERVICE_URL=http://localhost:8787 INTERNAL_TOKEN=devtok go run .              # datapath        :9000
-SERVICE_URL=http://localhost:8787 INTERNAL_TOKEN=devtok go run ./cmd/openai    # OpenAI routing  :9100
-SERVICE_URL=http://localhost:8787 INTERNAL_TOKEN=devtok go run ./cmd/anthropic # Anthropic route :9200
+SERVICE_URL=http://localhost:8787 INTERNAL_TOKEN=devtok go run .   # :9000
 ```
 
 Tests:

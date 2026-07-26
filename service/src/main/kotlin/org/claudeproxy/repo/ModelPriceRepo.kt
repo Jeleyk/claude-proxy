@@ -42,13 +42,20 @@ object ModelPriceRepo {
                 // Fable / Mythos
                 Quad("claude-fable-5", 10.0, 50.0, 1.0, 12.5),
                 Quad("claude-mythos-5", 10.0, 50.0, 1.0, 12.5),
+                // Opus 5 — current flagship. Priced identically to Opus 4.8, but spelled out
+                // rather than left to the bare `opus` fallback: the fallback is only correct by
+                // coincidence, and a future edit to it would silently misprice the flagship.
+                Quad("claude-opus-5", 5.0, 25.0, 0.5, 6.25),
                 // Opus 4.x current ($5 tier)
                 Quad("claude-opus-4-8", 5.0, 25.0, 0.5, 6.25),
                 Quad("claude-opus-4-7", 5.0, 25.0, 0.5, 6.25),
                 Quad("claude-opus-4-6", 5.0, 25.0, 0.5, 6.25),
                 Quad("claude-opus-4-5", 5.0, 25.0, 0.5, 6.25),
-                // Opus 4.1 (deprecated, $15 tier)
+                // Opus 4.1 / 4.0 (deprecated, $15 tier). 4.0 is listed explicitly because the
+                // bare `opus` fallback prices it at the $5 tier — a silent 3× under-charge on
+                // any traffic that still names it.
                 Quad("claude-opus-4-1", 15.0, 75.0, 1.5, 18.75),
+                Quad("claude-opus-4-0", 15.0, 75.0, 1.5, 18.75),
                 // Sonnet 5 introductory pricing, in effect through 2026-08-31.
                 // Reverts to standard 3.0 / 15.0 / 0.3 / 3.75 on 2026-09-01 — bump then (or via the UI).
                 Quad("claude-sonnet-5", 2.0, 10.0, 0.2, 2.5),
@@ -62,6 +69,7 @@ object ModelPriceRepo {
                 Quad("haiku", 1.0, 5.0, 0.1, 1.25),
                 Quad("sonnet", 3.0, 15.0, 0.3, 3.75),
                 Quad("opus", 5.0, 25.0, 0.5, 6.25),
+                Quad("fable", 10.0, 50.0, 1.0, 12.5),
             ).forEach { p ->
                 ModelPrices.insertIgnore {
                     it[pattern] = p.pattern

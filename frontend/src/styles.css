@@ -300,6 +300,8 @@ select:hover { border-color: var(--accent); }
 .segmented.disabled .seg { cursor: default; }
 .segmented.disabled .seg:hover { color: var(--muted); }
 .segmented.disabled .seg.active:hover { color: var(--accent-ink); }
+/* compact variant for toggles that sit inside a chart header next to the title */
+.segmented.sm .seg { padding: 3px 9px; font-size: 11px; }
 .segmented.theme .seg { padding: 5px 10px; }
 .segmented.theme .seg svg { width: 15px; height: 15px; }
 /* in the sidebar footer the toggle fills the width and the 3 options split evenly, so the
