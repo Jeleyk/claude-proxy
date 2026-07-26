@@ -2,7 +2,7 @@
 // builders, date math and the interactive legend chip row.
 import { ReactNode, useState } from 'react';
 import { ChartMode, Series, SERIES_COLORS, StackedChart } from '../Chart';
-import { fmtWindowPct, TokenKindSeries, WindowDaily } from '../api';
+import { fmtWindowPct, TokenKindSeries, UsageEvent, WindowDaily } from '../api';
 import { Icon, NumberInput, Segmented } from '../ui';
 
 export const W5H = '#5a7fb0';
@@ -37,6 +37,41 @@ export function fmtEventTs(ts: string): string {
   return olderThan23h
     ? d.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
     : d.toLocaleTimeString();
+}
+
+/**
+ * Cache-write cell for the recent-requests tables. Anthropic prices the 1-hour TTL at ~1.6× the
+ * default 5-minute one, and Claude Code writes its main-loop prefix at 1h — so a bare total hides
+ * which rate the row was actually charged at. The split rides along as a hint + tooltip.
+ */
+export function CacheWriteCell({ e }: { e: UsageEvent }) {
+  const total = e.cacheWriteTokens;
+  const oneHour = e.cacheWrite1hTokens ?? 0;
+  if (!oneHour) return <>{total}</>;
+  return (
+    <span title={`1h TTL: ${oneHour.toLocaleString()} · 5m TTL: ${(total - oneHour).toLocaleString()}\nThe 1h tier costs ~1.6× the 5m one.`}>
+      {total} <span className="hint">·1h {oneHour}</span>
+    </span>
+  );
+}
+
+/**
+ * The premium charges that don't show up in any token column: fast mode (a higher price tier on
+ * the same model) and server-side web searches (billed per call). Rendered next to the model so
+ * an unusually expensive row explains itself.
+ */
+export function PremiumMarks({ e }: { e: UsageEvent }) {
+  if (!e.fast && !e.webSearchRequests) return null;
+  return (
+    <>
+      {e.fast && <span className="badge warn" title="Served in fast mode — a premium price tier on the same model.">fast</span>}
+      {e.webSearchRequests > 0 && (
+        <span className="badge muted" title={`${e.webSearchRequests} server-side web search${e.webSearchRequests === 1 ? '' : 'es'}, billed per call on top of the tokens.`}>
+          🔍{e.webSearchRequests}
+        </span>
+      )}
+    </>
+  );
 }
 
 /** Calendar-date arithmetic on a YYYY-MM-DD label; zone-independent by construction. */

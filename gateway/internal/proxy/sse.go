@@ -16,7 +16,7 @@ const keepAliveInterval = 15 * time.Second
 
 // sseResult is the outcome of relaying one SSE response.
 type sseResult struct {
-	scan   usageScan
+	usage  anthropic.Usage
 	mcp    map[string]int64
 	status int
 	// retry means the upstream failed with a retryable error (overloaded / rate-limited) before
@@ -59,8 +59,7 @@ func relaySSEInterval(
 		}
 	}
 
-	var scan usageScan
-	var mcp mcpScan
+	var scan streamScan
 	var errs anthropic.ErrScan
 	recorded := status
 	// Whether any upstream bytes reached the client. Keep-alive comments don't count: SSE
@@ -99,7 +98,6 @@ func relaySSEInterval(
 		select {
 		case b := <-dataCh:
 			scan.Feed(b)
-			mcp.Feed(b)
 			errs.Feed(b)
 			if errs.Retryable() != "" {
 				// A limit/overload (typically `overloaded_error`) surfaced *inside* the stream.
@@ -107,7 +105,7 @@ func relaySSEInterval(
 				// request up on this same open stream and nothing about the swap is observable —
 				// so do that rather than failing a request another account could serve.
 				if !wroteData && canRetry {
-					return sseResult{scan: scan, mcp: mcp.calls, status: recorded, retry: true}
+					return sseResult{usage: scan.Usage(), mcp: scan.mcp.calls, status: recorded, retry: true}
 				}
 				// Content is already out (or there's no account left): mid-stream is too late for
 				// a transparent swap. Don't relay the raw error frame; hand the client a
@@ -120,7 +118,7 @@ func relaySSEInterval(
 					}
 				}
 				recorded = rs
-				return sseResult{scan: scan, mcp: mcp.calls, status: recorded}
+				return sseResult{usage: scan.Usage(), mcp: scan.mcp.calls, status: recorded}
 			}
 			_, _ = w.Write(b)
 			wroteData = true
@@ -135,7 +133,7 @@ func relaySSEInterval(
 			}
 		case <-errCh:
 			// Upstream closed (EOF or error); usage already scanned.
-			return sseResult{scan: scan, mcp: mcp.calls, status: recorded}
+			return sseResult{usage: scan.Usage(), mcp: scan.mcp.calls, status: recorded}
 		}
 	}
 }

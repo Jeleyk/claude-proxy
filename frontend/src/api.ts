@@ -22,7 +22,14 @@ export interface ModelPrice {
   inputPrice: number;
   outputPrice: number;
   cacheReadPrice: number;
+  // cache writes at the default 5-minute TTL
   cacheWritePrice: number;
+  // cache writes at the 1-hour TTL — a higher tier (2× input vs the 5m tier's 1.25×)
+  cacheWrite1hPrice: number;
+  // × applied to every token price when a response is served in fast mode
+  fastMultiplier: number;
+  // USD per server-side web search (billed per invocation, not per token)
+  webSearchPrice: number;
 }
 
 export interface WindowLimitDto {
@@ -32,6 +39,32 @@ export interface WindowLimitDto {
   resetAt: string | null;
   status: string | null;
   updatedAt: string | null;
+}
+
+/**
+ * Paid usage credits ("extra usage"): once the subscription window is spent, requests keep
+ * working and the overflow is charged against a monthly credit budget — real money.
+ */
+export interface OverageDto {
+  // "allowed" when credits are usable, "rejected" when they are not
+  status: string | null;
+  inUse: boolean;
+  // 0..1 of the credit allowance consumed — the figure live traffic carries
+  utilization: number | null;
+  // 0..1 of the monthly credit budget, reported only on some accounts
+  monthlyUtilization: number | null;
+  channelUtilization: number | null;
+  resetAt: string | null;
+  disabledReason: string | null;
+  // weekly utilization *including* credits: what's really left when 7d already reads 100%
+  weeklyWithOverage: number | null;
+}
+
+/** Free grace allowance on top of a saturated window. */
+export interface GraceDto {
+  status: string | null;
+  fiveHourUtilization: number | null;
+  weeklyUtilization: number | null;
 }
 
 export interface AccountDto {
@@ -48,6 +81,8 @@ export interface AccountDto {
   health: string;
   fiveHour: WindowLimitDto | null;
   weekly: WindowLimitDto | null;
+  overage: OverageDto | null;
+  grace: GraceDto | null;
   usageFraction: number | null;
   rateLimitedUntil: string | null;
   effectiveRemaining: number | null;
@@ -256,7 +291,14 @@ export const api = {
 };
 
 export interface UsageSummary { accountId: number; accountName: string | null; requests: number; inputTokens: number; outputTokens: number; cost: number; }
-export interface UsageEvent { id: number; accountId: number; accountName: string | null; ts: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; cost: number; httpStatus: number; model: string | null; source: string; }
+export interface UsageEvent {
+  id: number; accountId: number; accountName: string | null; ts: string;
+  inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number;
+  cost: number; httpStatus: number; model: string | null; source: string;
+  // The parts of the bill the token columns don't show: the 1h slice of the cache writes
+  // (priced ~1.6× the 5m rate), server-side web searches (billed per call), and fast mode.
+  cacheWrite1hTokens: number; webSearchRequests: number; fast: boolean;
+}
 export interface ModelUsage { model: string | null; requests: number; cleanTokens: number; cost: number; }
 export interface ModelBreakdown { today: ModelUsage[]; allTime: ModelUsage[]; }
 export interface MyStats {

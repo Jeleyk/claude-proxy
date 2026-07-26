@@ -10,6 +10,10 @@ import org.claudeproxy.model.LimitState
 import org.claudeproxy.model.LimitStatus
 import org.claudeproxy.model.WindowKind
 import org.claudeproxy.model.WindowLimit
+import org.claudeproxy.model.GraceDto
+import org.claudeproxy.model.GraceState
+import org.claudeproxy.model.OverageDto
+import org.claudeproxy.model.OverageState
 import org.claudeproxy.model.WindowLimitDto
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.and
@@ -56,6 +60,8 @@ data class AccountRuntime(
             health = health.name,
             fiveHour = limit.window(WindowKind.FIVE_HOUR)?.toDto(),
             weekly = limit.window(WindowKind.WEEKLY)?.toDto(),
+            overage = limit.overage?.toDto(),
+            grace = limit.grace?.takeIf { !it.isEmpty() }?.toDto(),
             usageFraction = usage,
             rateLimitedUntil = limit.rateLimitedUntil?.toString(),
             effectiveRemaining = effRemaining,
@@ -70,6 +76,23 @@ data class AccountRuntime(
         )
     }
 }
+
+private fun OverageState.toDto() = OverageDto(
+    status = status,
+    inUse = inUse,
+    utilization = utilization,
+    monthlyUtilization = monthlyUtilization,
+    channelUtilization = channelUtilization,
+    resetAt = resetAt?.toString(),
+    disabledReason = disabledReason,
+    weeklyWithOverage = weeklyWithOverage,
+)
+
+private fun GraceState.toDto() = GraceDto(
+    status = status,
+    fiveHourUtilization = fiveHourUtilization,
+    weeklyUtilization = weeklyUtilization,
+)
 
 private fun WindowLimit.toDto() = WindowLimitDto(
     usageFraction = usageFraction(),

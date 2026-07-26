@@ -83,6 +83,76 @@ class DatapathServiceTest {
     fun `free path count_tokens resolves an any-account candidate ignoring limits`() = runBlocking {
         val r = DatapathService(pool).resolve(seededToken, "POST", "/v1/messages/count_tokens")
         assertTrue(r.candidates.isNotEmpty())
+        assertTrue(r.free, "count_tokens must be flagged free so its zero-token result stays out of stats")
+    }
+
+    /**
+     * Claude Code counts tokens on every turn. Those attempts consume nothing, so recording them
+     * would pad the request counters and the recent-requests list with zero-token noise — while a
+     * *failed* one is exactly the thing an operator needs to see.
+     */
+    @Test
+    fun `successful free-path attempts are not recorded, failures are`() = runBlocking {
+        val accId = org.jetbrains.exposed.sql.transactions.transaction {
+            org.claudeproxy.db.Accounts.selectAll().first()[org.claudeproxy.db.Accounts.id]
+        }
+        val svc = DatapathService(pool)
+        fun rows() = org.jetbrains.exposed.sql.transactions.transaction {
+            org.claudeproxy.db.UsageEvents.selectAll().count()
+        }
+
+        svc.applyOutcome(org.claudeproxy.api.UsageReport(accountId = accId, userId = adminId, status = 200, free = true))
+        assertEquals(0L, rows(), "a successful token count is not a usage event")
+
+        svc.applyOutcome(org.claudeproxy.api.UsageReport(accountId = accId, userId = adminId, status = 401, free = true))
+        assertEquals(1L, rows(), "a failed token count must stay visible")
+
+        // A metered request is always recorded, even with zero tokens (an empty error response).
+        svc.applyOutcome(org.claudeproxy.api.UsageReport(accountId = accId, userId = adminId, status = 200))
+        assertEquals(2L, rows())
+    }
+
+    /**
+     * The daily limit and the statistics must spend the same dollars: [DatapathService] meters
+     * the value [org.claudeproxy.repo.UsageRepo.record] persisted, and both come from one
+     * pricing call over the full breakdown (per-TTL cache writes, fast mode, web searches).
+     */
+    @Test
+    fun `recorded cost covers 1h cache writes, fast mode and web searches`() = runBlocking {
+        val accId = org.jetbrains.exposed.sql.transactions.transaction {
+            org.claudeproxy.db.Accounts.selectAll().first()[org.claudeproxy.db.Accounts.id]
+        }
+        val report = org.claudeproxy.api.UsageReport(
+            accountId = accId, userId = adminId, status = 200, model = "claude-opus-5",
+            input = 1_000_000, output = 0, cacheWrite = 1_000_000, cacheWrite1h = 1_000_000,
+            webSearchRequests = 4, fast = true,
+        )
+        DatapathService(pool).applyOutcome(report)
+
+        val row = org.jetbrains.exposed.sql.transactions.transaction {
+            org.claudeproxy.db.UsageEvents.selectAll().last()
+        }
+        // (input 5 + 1h write 10) × fast 2 + 4 searches × $0.01
+        assertEquals(30.04, row[org.claudeproxy.db.UsageEvents.cost], 1e-9)
+        assertEquals(1_000_000L, row[org.claudeproxy.db.UsageEvents.cacheWrite1hTokens])
+        assertEquals(4L, row[org.claudeproxy.db.UsageEvents.webSearchRequests])
+        assertTrue(row[org.claudeproxy.db.UsageEvents.fast])
+        // …and the exact same number is what the pricing call gives the daily-limit counter.
+        assertEquals(
+            org.claudeproxy.repo.ModelPriceRepo.costOf(report.model, report.billed()),
+            row[org.claudeproxy.db.UsageEvents.cost],
+            1e-9,
+        )
+    }
+
+    /** A malformed report must never price a 1h slice larger than the writes it belongs to. */
+    @Test
+    fun `an oversized 1h slice is clamped to the total`() {
+        val billed = org.claudeproxy.api.UsageReport(
+            accountId = 1, status = 200, cacheWrite = 100, cacheWrite1h = 900,
+        ).billed()
+        assertEquals(100L, billed.cacheWrite1h)
+        assertEquals(0L, billed.cacheWrite5m)
     }
 
     /**

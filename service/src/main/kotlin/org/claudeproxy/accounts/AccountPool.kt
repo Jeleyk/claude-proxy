@@ -77,13 +77,23 @@ class AccountPool {
      * accounts are preferred. Used for requests that don't consume subscription quota
      * (token counting, model list).
      */
-    suspend fun selectAny(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true): AccountRuntime? = mutex.withLock {
+    suspend fun selectAny(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true): AccountRuntime? =
+        selectAnyOrder(userId, allowedGroups, personalFirst, allowGlobal).firstOrNull()
+
+    /**
+     * Every enabled+healthy account in scope, in the order [selectAny] would pick them, so a
+     * quota-free request can fall through to the next account instead of failing on the first
+     * one that happens to be broken. Threshold and rate-limit are ignored for the same reason
+     * they are in [selectAny]: these requests consume no subscription usage.
+     */
+    suspend fun selectAnyOrder(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true): List<AccountRuntime> = mutex.withLock {
         val usable = accounts.values.filter { it.enabled && it.health == AccountHealth.OK }
         val personal = if (userId == null) emptyList() else usable.filter { it.ownerId == userId }
         val global = if (!allowGlobal) emptyList() else usable.filter { it.ownerId == null && canUseGlobal(it, allowedGroups) }
-        (if (personalFirst) personal.ifEmpty { global } else global.ifEmpty { personal })
-            .minWithOrNull(compareBy({ it.priority }, { it.id }))
-            ?.also { activeAccountId = it.id }
+        val byPriority = compareBy<AccountRuntime>({ it.priority }, { it.id })
+        val ordered = if (personalFirst) personal.sortedWith(byPriority) + global.sortedWith(byPriority)
+        else global.sortedWith(byPriority) + personal.sortedWith(byPriority)
+        ordered.also { list -> list.firstOrNull()?.let { activeAccountId = it.id } }
     }
 
     /** Why the pool couldn't serve, for choosing a client-facing status. */

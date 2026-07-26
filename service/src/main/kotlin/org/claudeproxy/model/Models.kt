@@ -96,6 +96,27 @@ data class WindowLimitDto(
     val updatedAt: String?,
 )
 
+/** Paid usage credits ("extra usage") on an account — see [OverageState]. */
+@Serializable
+data class OverageDto(
+    val status: String?,
+    val inUse: Boolean,
+    val utilization: Double?,
+    val monthlyUtilization: Double?,
+    val channelUtilization: Double?,
+    val resetAt: String?,
+    val disabledReason: String?,
+    val weeklyWithOverage: Double?,
+)
+
+/** Grace allowance on top of a saturated window — see [GraceState]. */
+@Serializable
+data class GraceDto(
+    val status: String?,
+    val fiveHourUtilization: Double?,
+    val weeklyUtilization: Double?,
+)
+
 @Serializable
 data class AccountDto(
     val id: Int,
@@ -114,6 +135,9 @@ data class AccountDto(
     // live limit state per window (nullable when never observed)
     val fiveHour: WindowLimitDto?,
     val weekly: WindowLimitDto?,
+    // paid usage credits + grace allowance, when the upstream reports them (null = never seen)
+    val overage: OverageDto? = null,
+    val grace: GraceDto? = null,
     // usage fraction driving selection (max across windows), 0..1
     val usageFraction: Double?,
     val rateLimitedUntil: String?,
@@ -195,11 +219,64 @@ data class WindowLimit(
         utilization == null && remaining == null && limitTotal == null && resetAt == null && status == LimitStatus.UNKNOWN
 }
 
+/**
+ * Paid usage credits — Anthropic's "extra usage". With credits enabled, a subscription that has
+ * exhausted its 5h/7d window keeps serving and the overflow is charged as money against a
+ * monthly credit budget. Read-only here: the proxy reports it so an operator can see an account
+ * spending real money, and so a weekly window pinned at 100% is recognisable as "still working
+ * on credits" rather than "dead until the reset".
+ */
+data class OverageState(
+    /** raw `overage-status`: "allowed" when credits are usable, "rejected" when they are not */
+    val status: String? = null,
+    /** this response was served from credits rather than the subscription */
+    val inUse: Boolean = false,
+    /**
+     * 0..1 of the credit allowance consumed (`overage-utilization`). This is the figure live
+     * traffic actually carries; the monthly/channel pair below is reported only on some accounts.
+     */
+    val utilization: Double? = null,
+    /** 0..1 of the monthly credit budget consumed */
+    val monthlyUtilization: Double? = null,
+    /** 0..1 of the per-channel credit budget consumed */
+    val channelUtilization: Double? = null,
+    /** when the credit period rolls over */
+    val resetAt: Instant? = null,
+    /** why credits are off: "free" | "preference" | "extra_usage_disabled" | "network_error" */
+    val disabledReason: String? = null,
+    /** weekly utilization *including* credits (`7d_oi`), which can exceed the plain 7d reading */
+    val weeklyWithOverage: Double? = null,
+    val updatedAt: Instant? = null,
+) {
+    fun isEmpty(): Boolean = status == null && !inUse && utilization == null && monthlyUtilization == null &&
+        channelUtilization == null && resetAt == null && disabledReason == null && weeklyWithOverage == null
+
+    /** How much of the credit allowance is gone, from whichever figure the upstream reported. */
+    fun spentFraction(): Double? = monthlyUtilization ?: utilization
+}
+
+/**
+ * A grace allowance Anthropic grants on top of a saturated window — a soft landing rather than
+ * a hard stop. Surfaced for visibility only; unlike credits it costs nothing.
+ */
+data class GraceState(
+    val status: String? = null,
+    val fiveHourUtilization: Double? = null,
+    val weeklyUtilization: Double? = null,
+) {
+    fun isEmpty(): Boolean = status == null && fiveHourUtilization == null && weeklyUtilization == null
+
+    /** Grace is only interesting once something is actually being drawn from it. */
+    fun active(): Boolean = (fiveHourUtilization ?: 0.0) > 0.0 || (weeklyUtilization ?: 0.0) > 0.0
+}
+
 /** Immutable snapshot of an account's live limit state across all windows. */
 data class LimitState(
     val windows: Map<WindowKind, WindowLimit> = emptyMap(),
     val rateLimitedUntil: Instant? = null,
     val updatedAt: Instant? = null,
+    val overage: OverageState? = null,
+    val grace: GraceState? = null,
 ) {
     fun window(kind: WindowKind): WindowLimit? = windows[kind]
 

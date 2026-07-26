@@ -53,7 +53,10 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
             call.requirePermission(Permission.ADMIN)
             val req = call.receive<ModelPriceRequest>()
             if (req.pattern.isBlank()) return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("pattern required"))
-            ModelPriceRepo.set(req.pattern, req.inputPrice, req.outputPrice, req.cacheReadPrice, req.cacheWritePrice)
+            ModelPriceRepo.set(
+                req.pattern, req.inputPrice, req.outputPrice, req.cacheReadPrice, req.cacheWritePrice,
+                req.cacheWrite1hPrice, req.fastMultiplier, req.webSearchPrice,
+            )
             call.respond(ModelPriceRepo.list())
         }
         delete("/model-prices/{pattern}") {

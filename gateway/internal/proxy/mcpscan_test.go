@@ -11,7 +11,7 @@ import (
 )
 
 func TestMcpScanCountsOnlyMCPToolUse(t *testing.T) {
-	var s mcpScan
+	var s streamScan
 	s.Feed([]byte("event: content_block_start\n" +
 		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_1","name":"mcp__github__get_issue","input":{}}}` + "\n\n"))
 	s.Feed([]byte("event: content_block_start\n" +
@@ -19,35 +19,35 @@ func TestMcpScanCountsOnlyMCPToolUse(t *testing.T) {
 	s.Feed([]byte("event: content_block_start\n" +
 		`data: {"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"tu_3","name":"mcp__github__get_issue","input":{}}}` + "\n\n"))
 
-	if got := s.calls["mcp__github__get_issue"]; got != 2 {
+	if got := s.mcp.calls["mcp__github__get_issue"]; got != 2 {
 		t.Errorf("mcp__github__get_issue = %d, want 2", got)
 	}
-	if _, ok := s.calls["Bash"]; ok {
-		t.Errorf("non-MCP tool_use must not be counted: %v", s.calls)
+	if _, ok := s.mcp.calls["Bash"]; ok {
+		t.Errorf("non-MCP tool_use must not be counted: %v", s.mcp.calls)
 	}
 }
 
 func TestMcpScanHandlesChunkBoundaryInsideEvent(t *testing.T) {
-	var s mcpScan
+	var s streamScan
 	whole := "event: content_block_start\n" +
 		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_1","name":"mcp__ctx7__query-docs","input":{}}}` + "\n\n"
 	for i := 0; i < len(whole); i += 7 { // feed in tiny slices, splitting the event arbitrarily
 		end := min(i+7, len(whole))
 		s.Feed([]byte(whole[i:end]))
 	}
-	if got := s.calls["mcp__ctx7__query-docs"]; got != 1 {
-		t.Errorf("calls = %v, want one mcp__ctx7__query-docs", s.calls)
+	if got := s.mcp.calls["mcp__ctx7__query-docs"]; got != 1 {
+		t.Errorf("calls = %v, want one mcp__ctx7__query-docs", s.mcp.calls)
 	}
 }
 
 func TestMcpScanIgnoresTextMentioningToolUse(t *testing.T) {
-	var s mcpScan
+	var s streamScan
 	// A text delta whose *content* mentions tool_use/mcp__ must not count (the regex approach
 	// would have false-positived here).
 	s.Feed([]byte("event: content_block_delta\n" +
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"use {\"type\":\"tool_use\",\"name\":\"mcp__fake__tool\"} blocks"}}` + "\n\n"))
-	if len(s.calls) != 0 {
-		t.Errorf("text delta must not produce calls: %v", s.calls)
+	if len(s.mcp.calls) != 0 {
+		t.Errorf("text delta must not produce calls: %v", s.mcp.calls)
 	}
 }
 
@@ -75,7 +75,7 @@ func TestFillUsageFromJSONCountsMcpCalls(t *testing.T) {
 		`{"type":"tool_use","id":"tu_2","name":"Edit","input":{}}` +
 		`],"usage":{"input_tokens":5,"output_tokens":7}}`
 	var report control.UsageReport
-	fillUsageFromJSON(&report, []byte(body))
+	fillUsageFromJSON(&report, []byte(body), nil)
 
 	if report.McpCalls["mcp__github__get_issue"] != 1 || len(report.McpCalls) != 1 {
 		t.Errorf("McpCalls = %v, want only mcp__github__get_issue=1", report.McpCalls)

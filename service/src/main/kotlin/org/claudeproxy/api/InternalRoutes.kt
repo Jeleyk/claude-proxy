@@ -38,6 +38,7 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
                         usedUsd = r.usedUsd,
                         candidates = r.candidates,
                         systemPrompt = r.systemPrompt,
+                        free = r.free,
                     ),
                 )
             }

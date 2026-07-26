@@ -1,6 +1,7 @@
 package org.claudeproxy.api
 
 import kotlinx.serialization.Serializable
+import org.claudeproxy.repo.BilledUsage
 
 /**
  * Wire DTOs for the private `/internal/` control API consumed by the Go gateway.
@@ -52,6 +53,9 @@ data class ResolveResponse(
     val candidates: List<CandidateDto> = emptyList(),
     // routing only: static per-token system prompt the gateway injects ahead of client system.
     val systemPrompt: String? = null,
+    // free path (token counting, model listing): the gateway echoes this back on the usage
+    // report so a successful zero-token attempt stays out of the statistics.
+    val free: Boolean = false,
 )
 
 /**
@@ -67,12 +71,42 @@ data class UsageReport(
     val input: Long = 0,
     val output: Long = 0,
     val cacheRead: Long = 0,
+    // total cache-write tokens (both TTLs)
     val cacheWrite: Long = 0,
+    // the 1-hour-TTL slice of [cacheWrite]. Anthropic bills it at 2× input against 1.25× for the
+    // default 5-minute TTL, and Claude Code ≥2.1 writes its main-loop prefix with ttl:"1h".
+    val cacheWrite1h: Long = 0,
+    // server-side tool calls billed per invocation rather than per token (web search).
+    val webSearchRequests: Long = 0,
+    val webFetchRequests: Long = 0,
+    // response served in fast mode (`speed: "fast"`) — a premium price tier on the same model.
+    val fast: Boolean = false,
     val status: Int,
     val model: String? = null,
     val ratelimitHeaders: Map<String, String> = emptyMap(),
     // datapath that produced this attempt: "proxy" (default) or "routing".
     val source: String = "proxy",
-    // MCP tool invocations seen in the response (tool_use blocks named "mcp__…"), by tool name.
+    // the request ran on a free path (token counting, model listing) — echoed back from the
+    // resolve so a successful zero-token attempt can be left out of the stats.
+    val free: Boolean = false,
+    // MCP tool invocations seen in the response (client-side "mcp__…" tool_use blocks and
+    // server-side mcp_tool_use blocks, both keyed by "mcp__server__tool"), by tool name.
     val mcpCalls: Map<String, Long> = emptyMap(),
-)
+) {
+    /** 1h slice clamped to the total it belongs to, so pricing can never exceed the writes. */
+    private val cacheWrite1hClamped: Long get() = cacheWrite1h.coerceIn(0, cacheWrite.coerceAtLeast(0))
+
+    /** The 5-minute-TTL slice: whatever of the total the 1h slice didn't claim. */
+    private val cacheWrite5m: Long get() = (cacheWrite.coerceAtLeast(0) - cacheWrite1hClamped)
+
+    /** The priced view of this attempt. */
+    fun billed(): BilledUsage = BilledUsage(
+        input = input.coerceAtLeast(0),
+        output = output.coerceAtLeast(0),
+        cacheRead = cacheRead.coerceAtLeast(0),
+        cacheWrite5m = cacheWrite5m,
+        cacheWrite1h = cacheWrite1hClamped,
+        webSearchRequests = webSearchRequests.coerceAtLeast(0),
+        fast = fast,
+    )
+}

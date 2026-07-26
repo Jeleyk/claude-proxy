@@ -152,14 +152,44 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
 - **Windows:** `FIVE_HOUR` ("5h") + `WEEKLY` ("7d"), read from
   `anthropic-ratelimit-unified-{5h,7d}-utilization` (0..1) response headers. Subscriptions
   report **utilization**, not remaining/limit.
-- **Cost model:** per-model USD pricing (input / output / cache_read / cache_write) in
-  `ModelPrices`; per-request cost from the response usage; optional per-user daily USD limit.
-- **MCP-call accounting:** the Claude Code gateway counts MCP tool invocations — `tool_use`
-  content blocks named `mcp__server__tool` — via a structured SSE parse (`internal/proxy/mcpscan.go`,
-  riding `anthropic.SSEParser` next to the regex usage scan) and the buffered-JSON path, ships
-  them as `UsageReport.mcpCalls`, and the service writes one `mcp_tool_calls` row per
-  (request, tool). Served by `/api/stats/mine/mcp` + `/api/users/{id}/stats/mcp`; "MCP tools"
-  block in the shared `UserStatsView`. Proxy datapath only (routing gateways don't report it).
+- **Usage credits + grace** (`RateLimitHeaders` → `LimitState.overage` / `.grace`, in memory only,
+  surfaced on `AccountDto`): Anthropic's "extra usage" lets a saturated subscription keep serving
+  and bills the overflow as money — `overage-status`, `-in-use`, `-period-monthly-utilization`,
+  `-period-channel-utilization`, `-reset`, `-disabled-reason`, plus `7d_oi-utilization` (weekly
+  *including* credits) and the free `grace-{status,5h,7d}` family. Read-only: selection is
+  unchanged (an account on credits is already usable via the `over_threshold` flag), but the
+  Dashboard shows an "on credits NN%" badge and the weekly cell reveals the with-credits figure,
+  so a 100% weekly window is distinguishable from a dead account.
+- **Cost model:** per-model USD pricing in `ModelPrices` — input / output / cache_read /
+  **cache_write_5m** / **cache_write_1h** per 1M tokens, plus **`fast_multiplier`** (× on all
+  token prices when a response was served with `speed: "fast"`) and **`web_search_price`** (USD
+  per server-side search, billed per call). The 1h cache tier matters: Anthropic charges 2× input
+  for it against 1.25× for 5m, and Claude Code ≥2.1 writes its main-loop prefix with `ttl:"1h"`.
+  A single `ModelPriceRepo.costOf(model, BilledUsage)` is the only place a response becomes money;
+  `UsageRepo.record` stores what it returns and hands the same number to the daily-limit counter,
+  so stats and limits cannot drift. `usage_events` keeps the 1h slice, web search/fetch counts and
+  the fast flag alongside the totals so a stored cost stays auditable.
+- **Response-side model attribution:** the gateway prices what the *response* says answered
+  (`message_start.message.model`), falling back to the request's model. Server-side refusal
+  fallback can hand the turn to a different model mid-call, and paying the requested model's rate
+  would be wrong.
+- **MCP-call accounting:** the Claude Code gateway counts MCP tool invocations — client-side
+  `tool_use` blocks named `mcp__server__tool` *and* server-side `mcp_tool_use` blocks (the
+  `mcp_servers` connector), normalized to the same key — via one shared SSE parse
+  (`internal/proxy/usagescan.go` drives `anthropic.SSEParser`; `mcpscan.go` consumes the events
+  next to the usage fold) and the buffered-JSON path. Ships them as `UsageReport.mcpCalls`; the
+  service writes one `mcp_tool_calls` row per (request, tool). Served by `/api/stats/mine/mcp` +
+  `/api/users/{id}/stats/mcp`; "MCP tools" block in the shared `UserStatsView`. Proxy datapath
+  only (routing gateways don't report it).
+- **Free paths** (`count_tokens`, `/v1/models`): no quota, no daily limit, and the resolve returns
+  the *whole* try-list (`AccountPool.selectAnyOrder`) so one unhealthy account can't break Claude
+  Code's context indicator. `ResolveResponse.free` rides back on the usage report: a **successful
+  zero-token** free-path attempt is not recorded at all, keeping per-keystroke token counts out of
+  the request counters — failures still are, because a broken `count_tokens` must stay visible.
+- **Upstream retry statuses** (`gateway/internal/proxy/forward.go`): 429/401/**403**/500/502/503/529
+  move to the next candidate. 403 is account-scoped upstream (suspended or past-due subscription),
+  so the pool can still serve the request; it deliberately does *not* mark the account unhealthy —
+  a permission-shaped 403 would otherwise park every account in the pool at once.
 - **Proxy tokens:** `cxp_...` (Claude Code datapath); **routing tokens:** `cxr_...` (OpenAI/Anthropic
   gateways) — distinct namespaces (a `cxp_` never authenticates routing and vice versa), both stored
   as SHA-256 and presented inbound via `Authorization: Bearer` or `x-api-key`. Both kinds carry

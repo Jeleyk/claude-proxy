@@ -5,8 +5,8 @@ import {
 } from '../api';
 import { LineChart, Series, SERIES_COLORS, StackedChart } from '../Chart';
 import {
-  fmtEventTs, Legend, RangeControls, sumKinds, todayLocal, tokenSeries, TOKEN_KINDS, W5H,
-  WindowBurnCharts, WWK,
+  CacheWriteCell, fmtEventTs, Legend, PremiumMarks, RangeControls, sumKinds, todayLocal, tokenSeries,
+  TOKEN_KINDS, W5H, WindowBurnCharts, WWK,
 } from './statsShared';
 import { Segmented, Select, useChartMode } from '../ui';
 import { SkeletonChartRow, SkeletonControls, SkeletonTable } from '../Skeleton';
@@ -278,11 +278,15 @@ export function Stats({ user }: { user: UserDto }) {
                   <tr key={e.id}>
                     <td className="hint">{fmtEventTs(e.ts)}</td>
                     {canAccounts && <td>{e.accountName ?? '—'}</td>}
-                    <td className="hint">{e.model ?? '—'}</td>
+                    <td className="hint">
+                      <span className="row" style={{ gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+                        {e.model ?? '—'}<PremiumMarks e={e} />
+                      </span>
+                    </td>
                     <td className="num">{e.inputTokens}</td>
                     <td className="num">{e.outputTokens}</td>
                     <td className="num">{e.cacheReadTokens}</td>
-                    <td className="num">{e.cacheWriteTokens}</td>
+                    <td className="num"><CacheWriteCell e={e} /></td>
                     <td className="num">{fmtUsd(e.cost)}</td>
                     <td><span className={`badge ${e.httpStatus >= 200 && e.httpStatus < 300 ? 'ok' : e.httpStatus === 429 ? 'warn' : 'bad'}`}>{e.httpStatus}</span></td>
                   </tr>

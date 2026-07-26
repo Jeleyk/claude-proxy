@@ -42,6 +42,9 @@ data class ResolveResult(
     // routing only: the token's static system prompt, injected by the gateway ahead of the
     // client's own system content (but after the mandatory Claude Code block).
     val systemPrompt: String? = null,
+    // the request is on a free path (token counting, model listing): no quota, no limit, and a
+    // successful zero-token outcome is not recorded as usage.
+    val free: Boolean = false,
 )
 
 /**
@@ -90,9 +93,12 @@ class DatapathService(private val pool: AccountPool) {
         val sysPrompt = if (routing) tokenId?.let { RoutingTokenRepo.promptOf(it) } else null
 
         // Free paths (token counting, model listing) never consume quota: any account, no limits.
+        // They still get the *whole* try-list rather than a single pick — Claude Code counts
+        // tokens on every turn, and one unhealthy account shouldn't break the context indicator
+        // when the pool has others that would answer.
         if (isFreePath(path)) {
-            val account = pool.selectAny(userId, allowedGroups, personalFirst, allowGlobal)
-            return ResolveResult(userId, tokenId, null, false, null, null, listOfNotNull(account).map { it.toCandidate() }, sysPrompt)
+            val order = pool.selectAnyOrder(userId, allowedGroups, personalFirst, allowGlobal)
+            return ResolveResult(userId, tokenId, null, false, null, null, order.map { it.toCandidate() }, sysPrompt, free = true)
         }
 
         // Per-user daily USD limit is a shared-pool constraint; personal accounts are exempt.
@@ -111,17 +117,26 @@ class DatapathService(private val pool: AccountPool) {
     suspend fun applyOutcome(o: UsageReport) {
         val routing = o.source == "routing"
         val source = if (routing) "routing" else "proxy"
-        UsageRepo.record(o.accountId, o.userId, o.input, o.cacheRead, o.cacheWrite, o.output, o.status, o.model, source, o.tokenId)
+        val billed = o.billed()
+        // A free-path request (token counting, model listing) that succeeded without consuming
+        // anything is not a data point — recording it would pad the request counters and the
+        // "recent requests" list with zero-token noise for every keystroke's context estimate.
+        // Failures still land: a broken count_tokens is exactly what you want to see.
+        val silent = o.free && o.status in 200..299 && billed.isEmpty()
+        val cost = if (silent) 0.0 else {
+            UsageRepo.record(o.accountId, o.userId, billed, o.status, o.model, source, o.tokenId, o.webFetchRequests)
+        }
         if (o.mcpCalls.isNotEmpty()) McpUsageRepo.record(o.userId, o.tokenId, o.mcpCalls)
 
         // Keep the cached daily spend fresh. Only *global* (shared-pool) usage counts toward the
         // per-user daily limit; personal accounts are the user's own quota (exempt). Proxy and
         // routing spend accumulate under separate keys so each limit meters only its own datapath.
         // The increment is a no-op when the key isn't cached — the next resolve recomputes from DB.
+        // `cost` is the very number persisted on the usage row, so the limit can never drift from
+        // what the stats show.
         val ownerId = pool.get(o.accountId)?.ownerId
-        if (o.userId != null && ownerId == null) {
-            val cost = ModelPriceRepo.costOf(o.model, o.input, o.cacheRead, o.cacheWrite, o.output)
-            if (cost > 0.0) MemoryCache.incrExistingByFloat(spendKey(o.userId, routing), cost)
+        if (o.userId != null && ownerId == null && cost > 0.0) {
+            MemoryCache.incrExistingByFloat(spendKey(o.userId, routing), cost)
         }
 
         val prev = pool.get(o.accountId)?.limit ?: LimitState()

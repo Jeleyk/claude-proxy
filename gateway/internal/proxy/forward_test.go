@@ -141,6 +141,72 @@ func TestForwardRetryableStatusRetriesWhenAllowed(t *testing.T) {
 	}
 }
 
+// 403 is account-scoped upstream (suspended / past-due subscription): the pool can still serve
+// the request, so it must move to the next candidate instead of failing the client.
+func TestForward403RetriesTheNextAccount(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		_, _ = io.WriteString(w, `{"error":{"type":"permission_error"}}`)
+	}))
+	defer upstream.Close()
+
+	h := testHandler(upstream.URL)
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`))
+	cand := control.Candidate{AccountID: 1, Type: "OAUTH"}
+	res := h.forward(context.Background(), httptest.NewRecorder(), req, cand, []control.Candidate{cand, cand}, 0, nil, nil, []byte(`{}`), true, false)
+	if !res.retry {
+		t.Fatal("403 with another candidate left should retry")
+	}
+	if res.report.Status != 403 {
+		t.Errorf("report status = %d", res.report.Status)
+	}
+
+	// …and still reaches the client when there is nobody else to try.
+	rec := httptest.NewRecorder()
+	last := h.forward(context.Background(), rec, req, cand, []control.Candidate{cand}, 0, nil, nil, []byte(`{}`), false, false)
+	if last.retry || rec.Code != 403 {
+		t.Errorf("last attempt: retry=%v status=%d, want false/403", last.retry, rec.Code)
+	}
+}
+
+// Everything Anthropic prices beyond the four flat token counters has to survive the trip from
+// the stream into the usage report, or it is money the proxy never charges for.
+func TestForwardSSEReportsPricedExtras(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"model":"claude-opus-4-8","usage":{`+
+			`"input_tokens":300,"cache_creation_input_tokens":5000,`+
+			`"cache_creation":{"ephemeral_1h_input_tokens":4000,"ephemeral_5m_input_tokens":1000},`+
+			`"server_tool_use":{"web_search_requests":2,"web_fetch_requests":1},"speed":"fast"}}}`+"\n\n"+
+			"event: message_delta\n"+
+			`data: {"type":"message_delta","usage":{"output_tokens":77}}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	h := testHandler(upstream.URL)
+	// The request asked for a different model than the one that answered (refusal fallback).
+	body := `{"model":"claude-fable-5","stream":true}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	cand := control.Candidate{AccountID: 3, Type: "OAUTH"}
+	res := h.forward(context.Background(), httptest.NewRecorder(), req, cand, []control.Candidate{cand}, 0, nil, nil, []byte(body), false, false)
+
+	r := res.report
+	if r.Input != 300 || r.Output != 77 || r.CacheWrite != 5000 || r.CacheWrite1h != 4000 {
+		t.Errorf("tokens = %+v, want in 300 / out 77 / write 5000 (1h 4000)", r)
+	}
+	if r.WebSearchRequests != 2 || r.WebFetchRequests != 1 {
+		t.Errorf("server tools = %d/%d, want 2/1", r.WebSearchRequests, r.WebFetchRequests)
+	}
+	if !r.Fast {
+		t.Error("fast mode not reported — the response would be priced at the standard tier")
+	}
+	if r.Model == nil || *r.Model != "claude-opus-4-8" {
+		t.Errorf("model = %v, want the model that answered", r.Model)
+	}
+}
+
 func TestForwardRetryableStatusPassesThroughOnLastAttempt(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(529)

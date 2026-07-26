@@ -26,6 +26,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import org.claudeproxy.repo.BilledUsage
 import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.accounts.AccountRepo
 import org.claudeproxy.accounts.RateLimitHeaders
@@ -146,7 +147,7 @@ class UpstreamForwarder(
                 pool.markRateLimited(account.id, until)
                 if (canRetry) {
                     runCatching { response.readRawBytes() }
-                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null, tokenId = tokenId)
+                    UsageRepo.record(account.id, userId, BilledUsage(), status.value, null, tokenId = tokenId)
                     return@execute ForwardResult.Retry(RetryKind.RATE_LIMITED, until)
                 }
             } else if (status.value == 401) {
@@ -154,13 +155,13 @@ class UpstreamForwarder(
                 runCatching { AccountRepo.updateHealth(account.id, org.claudeproxy.model.AccountHealth.REFRESH_FAILED) }
                 if (canRetry) {
                     runCatching { response.readRawBytes() }
-                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null, tokenId = tokenId)
+                    UsageRepo.record(account.id, userId, BilledUsage(), status.value, null, tokenId = tokenId)
                     return@execute ForwardResult.Retry(RetryKind.LOST_ACCESS, null)
                 }
             } else if (status.value in intArrayOf(500, 502, 503, 529)) {
                 if (canRetry) {
                     runCatching { response.readRawBytes() }
-                    UsageRepo.record(account.id, userId, 0, 0, 0, 0, status.value, null, tokenId = tokenId)
+                    UsageRepo.record(account.id, userId, BilledUsage(), status.value, null, tokenId = tokenId)
                     return@execute ForwardResult.Retry(RetryKind.UPSTREAM_ERROR, null)
                 }
             }
@@ -247,7 +248,10 @@ class UpstreamForwarder(
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     log.warn("relay acct#{} write failed after {} bytes / {} chunks: {}", account.id, relayed, chunks, e.toString())
                 }
-                UsageRepo.record(account.id, userId, scanner.input, scanner.cacheRead, scanner.cacheCreation, scanner.output, streamErrorStatus ?: status.value, model, tokenId = tokenId)
+                UsageRepo.record(
+                    account.id, userId, scanner.billed(), streamErrorStatus ?: status.value, model,
+                    tokenId = tokenId, webFetchRequests = scanner.webFetchRequests,
+                )
             } else {
                 // Buffer JSON (single message) so we can extract token usage.
                 val bytes = response.readRawBytes()
@@ -326,6 +330,7 @@ class UpstreamForwarder(
 
     private fun recordUsageFromJson(accountId: Int, userId: Int?, tokenId: Int?, status: Int, bytes: ByteArray) {
         var input = 0L; var output = 0L; var cacheRead = 0L; var cacheCreation = 0L
+        var cacheCreation1h = 0L; var webSearch = 0L; var webFetch = 0L; var fast = false
         var model: String? = null
         try {
             val obj = json.parseToJsonElement(bytes.decodeToString()) as? JsonObject
@@ -335,9 +340,26 @@ class UpstreamForwarder(
             output = usage?.get("output_tokens")?.jsonPrimitive?.longOrNull ?: 0L
             cacheRead = usage?.get("cache_read_input_tokens")?.jsonPrimitive?.longOrNull ?: 0L
             cacheCreation = usage?.get("cache_creation_input_tokens")?.jsonPrimitive?.longOrNull ?: 0L
+            // Per-TTL split, server-side tool calls and fast mode: all priced differently from
+            // the flat counters above, all reported only in these nested fields.
+            val creation = usage?.get("cache_creation") as? JsonObject
+            cacheCreation1h = creation?.get("ephemeral_1h_input_tokens")?.jsonPrimitive?.longOrNull ?: 0L
+            if (cacheCreation == 0L && creation != null) {
+                cacheCreation = cacheCreation1h + (creation["ephemeral_5m_input_tokens"]?.jsonPrimitive?.longOrNull ?: 0L)
+            }
+            val serverTools = usage?.get("server_tool_use") as? JsonObject
+            webSearch = serverTools?.get("web_search_requests")?.jsonPrimitive?.longOrNull ?: 0L
+            webFetch = serverTools?.get("web_fetch_requests")?.jsonPrimitive?.longOrNull ?: 0L
+            fast = usage?.get("speed")?.jsonPrimitive?.contentOrNull == "fast"
         } catch (_: Exception) {
             // non-JSON error body; still record the event
         }
-        UsageRepo.record(accountId, userId, input, cacheRead, cacheCreation, output, status, model, tokenId = tokenId)
+        val write1h = cacheCreation1h.coerceIn(0, cacheCreation)
+        val billed = BilledUsage(
+            input = input, output = output, cacheRead = cacheRead,
+            cacheWrite5m = cacheCreation - write1h, cacheWrite1h = write1h,
+            webSearchRequests = webSearch, fast = fast,
+        )
+        UsageRepo.record(accountId, userId, billed, status, model, tokenId = tokenId, webFetchRequests = webFetch)
     }
 }

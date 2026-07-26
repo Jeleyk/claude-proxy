@@ -80,8 +80,8 @@ func TestRelaySSERetriesWhenContentAndOverloadShareAChunk(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "message_start") {
 		t.Errorf("the failed attempt's content must not reach the client: %q", rec.Body.String())
 	}
-	if res.scan.Input != 7 {
-		t.Errorf("scan.Input = %d, want 7 — the prompt was still processed upstream", res.scan.Input)
+	if res.usage.Input != 7 {
+		t.Errorf("usage.Input = %d, want 7 — the prompt was still processed upstream", res.usage.Input)
 	}
 }
 

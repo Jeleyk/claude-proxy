@@ -26,12 +26,10 @@ import (
 // SSE keep-alive comment. Adaptive-thinking Opus can stay silent 30s+ before the first event.
 const keepAliveInterval = 15 * time.Second
 
-// Usage is the token usage + model + recorded status scanned from an upstream response.
-type Usage struct {
-	Input, Output, CacheRead, CacheWrite int64
-	Model                                string
-	Status                               int
-}
+// Usage is the token usage + model + recorded status scanned from an upstream response. It is
+// an alias, not a copy, of the wire-level type: pricing fields (per-TTL cache writes, server
+// tool calls, fast mode) must never be dropped on the way from the parser to the usage report.
+type Usage = anthropic.Usage
 
 // Prepared is a translated, ready-to-forward upstream request.
 type Prepared struct {
@@ -361,8 +359,12 @@ func (h *Handler) relayStream(
 }
 
 func applyUsage(report *control.UsageReport, u Usage, fallbackModel string) {
+	u.Normalize()
 	report.Input, report.Output = u.Input, u.Output
 	report.CacheRead, report.CacheWrite = u.CacheRead, u.CacheWrite
+	report.CacheWrite1h = u.CacheWrite1h
+	report.WebSearchRequests, report.WebFetchRequests = u.WebSearch, u.WebFetch
+	report.Fast = u.Fast
 	model := u.Model
 	if model == "" {
 		model = fallbackModel

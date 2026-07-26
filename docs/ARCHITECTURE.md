@@ -65,9 +65,10 @@ back. They never touch the database.
 - `proxy_tokens` / `routing_tokens` (SHA-256 hash + owner + `enabled`; routing tokens also carry
   an optional static `system_prompt`). Separate namespaces: a `cxp_` never authenticates routing
   and vice versa.
-- `usage_events` (input/output/cache_read/cache_write tokens, cost, model, httpStatus, userId,
-  accountId, `source` = proxy|routing, `token_id` attributing spend to the inbound token),
-  `model_prices` (4 prices per model pattern).
+- `usage_events` (input/output/cache_read/cache_write tokens — plus the 1h-TTL slice of the cache
+  writes, web search/fetch counts and a `fast` flag — cost, model, httpStatus, userId, accountId,
+  `source` = proxy|routing, `token_id` attributing spend to the inbound token),
+  `model_prices` (5 per-1M-token prices per model pattern + `fast_multiplier` + `web_search_price`).
 - `mcp_tool_calls` — one row per (request, MCP tool) parsed out of the response stream.
 - `settings`, `oauth_add_sessions` (PKCE state for "Login with Claude").
 
@@ -77,9 +78,27 @@ Postgres in production (`DATABASE_URL` set); SQLite fallback otherwise. Use Expo
 ## Cost model
 
 Per model pattern, `model_prices` stores USD-per-million-token prices for input, output,
-cache_read, cache_write. `ModelPriceRepo.costOf(model, …)` computes each event's cost from the
-response token breakdown; per-user daily spend is summed from `usage_events` since 00:00 UTC and
-compared to the user's optional `dailyCostLimit` (and `dailyRoutingCostLimit` for the routing
+cache_read and cache_write **at each TTL** (5-minute and 1-hour), plus two charges that are not
+per token: `fast_multiplier` (fast mode is the same model on a premium tier) and
+`web_search_price` (server-side searches are billed per call).
+
+`ModelPriceRepo.costOf(model, BilledUsage)` is the **only** place a response turns into money:
+
+```
+cost = (input×in + output×out + cache_read×cr + cache_write_5m×cw5m + cache_write_1h×cw1h) / 1M
+       × (fast ? fast_multiplier : 1)
+     + web_searches × web_search_price
+```
+
+The 1h tier is not a rounding detail — Anthropic charges 2× input for it against 1.25× for 5m, and
+Claude Code ≥2.1 caches its main-loop prefix with `ttl:"1h"`, so most cache-write spend lands
+there. The gateway reports the split (`usage.cache_creation.ephemeral_1h_input_tokens`), the
+`speed` field and `server_tool_use` counts alongside the flat totals.
+
+`UsageRepo.record` persists the cost that call returns and hands the same value back to the
+daily-spend counter, so the number in the statistics and the number a limit is enforced against
+are one number by construction. Per-user daily spend is summed from `usage_events` since 00:00 UTC
+and compared to the user's optional `dailyCostLimit` (and `dailyRoutingCostLimit` for the routing
 datapath). Note the deliberate split: **limits** are enforced on UTC days, while every **displayed**
 statistic — charts and "today" counters alike — is sliced on the viewer's timezone (`tz` query
 param). Figures the UI shows against a limit are labelled UTC for that reason.

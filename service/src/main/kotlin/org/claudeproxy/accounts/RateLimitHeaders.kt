@@ -1,6 +1,8 @@
 package org.claudeproxy.accounts
 
+import org.claudeproxy.model.GraceState
 import org.claudeproxy.model.LimitState
+import org.claudeproxy.model.OverageState
 import org.claudeproxy.model.LimitStatus
 import org.claudeproxy.model.WindowKind
 import org.claudeproxy.model.WindowLimit
@@ -80,8 +82,48 @@ object RateLimitHeaders {
             )
             changed = true
         }
-        if (!changed) return prev
-        return prev.copy(windows = windows, updatedAt = Instant.now())
+        val overage = parseOverage(lower, prev.overage)
+        val grace = parseGrace(lower, prev.grace)
+        if (!changed && overage === prev.overage && grace === prev.grace) return prev
+        return prev.copy(windows = windows, updatedAt = Instant.now(), overage = overage, grace = grace)
+    }
+
+    /**
+     * Paid usage credits ("extra usage"). Anthropic reports these alongside the window headers:
+     * whether credits are available, whether *this* response was served from them, how much of
+     * the monthly/channel credit budget is gone, and — as `7d_oi` — the weekly utilization with
+     * credits included. Without them a credit-backed account reads as a flat 100% weekly window
+     * with no hint that it is still working and now costing money.
+     */
+    private fun parseOverage(h: Map<String, String>, prev: OverageState?): OverageState? {
+        val next = OverageState(
+            status = h["anthropic-ratelimit-unified-overage-status"]?.trim()?.takeIf { it.isNotEmpty() },
+            inUse = h["anthropic-ratelimit-unified-overage-in-use"]?.trim()?.equals("true", ignoreCase = true) == true,
+            // The credit allowance is its own window in Anthropic's scheme (`overage`), reported
+            // like any other: `…-overage-utilization`. Live traffic carries this one; the
+            // monthly/channel pair below shows up only on some accounts.
+            utilization = firstDouble(h, listOf("anthropic-ratelimit-unified-overage-utilization")),
+            monthlyUtilization = firstDouble(h, listOf("anthropic-ratelimit-unified-overage-period-monthly-utilization")),
+            channelUtilization = firstDouble(h, listOf("anthropic-ratelimit-unified-overage-period-channel-utilization")),
+            resetAt = firstInstant(h, listOf("anthropic-ratelimit-unified-overage-reset")),
+            disabledReason = h["anthropic-ratelimit-unified-overage-disabled-reason"]?.trim()?.takeIf { it.isNotEmpty() },
+            weeklyWithOverage = firstDouble(h, listOf("anthropic-ratelimit-unified-7d_oi-utilization")),
+            updatedAt = Instant.now(),
+        )
+        // A response that carried none of these says nothing about credits — keep what we knew.
+        if (next.isEmpty()) return prev
+        return next
+    }
+
+    /** Grace allowance on top of a saturated window (free, unlike credits). */
+    private fun parseGrace(h: Map<String, String>, prev: GraceState?): GraceState? {
+        val next = GraceState(
+            status = h["anthropic-ratelimit-unified-grace-status"]?.trim()?.takeIf { it.isNotEmpty() },
+            fiveHourUtilization = firstDouble(h, listOf("anthropic-ratelimit-unified-grace-5h-utilization")),
+            weeklyUtilization = firstDouble(h, listOf("anthropic-ratelimit-unified-grace-7d-utilization")),
+        )
+        if (next.isEmpty()) return prev
+        return next
     }
 
     private fun firstDouble(h: Map<String, String>, keys: List<String>): Double? {

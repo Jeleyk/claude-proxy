@@ -21,6 +21,10 @@ data class UsageEventDto(
     val id: Int, val accountId: Int, val accountName: String?, val userId: Int?, val ts: String,
     val inputTokens: Long, val outputTokens: Long, val cacheReadTokens: Long, val cacheWriteTokens: Long,
     val cost: Double, val httpStatus: Int, val model: String?, val source: String = "proxy",
+    // The parts of the bill that aren't visible in the token counts above: the 1h slice of the
+    // cache writes (priced ~1.6× the 5m rate), server-side web searches (billed per call) and
+    // fast mode (a premium tier on the same model).
+    val cacheWrite1hTokens: Long = 0, val webSearchRequests: Long = 0, val fast: Boolean = false,
 )
 
 @Serializable
@@ -57,11 +61,20 @@ class Totals(
 
 object UsageRepo {
 
+    /**
+     * Record one attempt and its USD cost. [usage] carries the full priced breakdown (per-TTL
+     * cache writes, web searches, fast mode) so the stored `cost` is the same number
+     * [ModelPriceRepo.costOf] gives the daily-limit counter — the two must never diverge.
+     *
+     * Returns that cost, so the caller meters the limit against the persisted value rather than
+     * a second, independently computed one.
+     */
     fun record(
-        accountId: Int, userId: Int?, input: Long, cacheRead: Long, cacheWrite: Long, output: Long,
+        accountId: Int, userId: Int?, usage: BilledUsage,
         status: Int, model: String?, source: String = "proxy", tokenId: Int? = null,
-    ) {
-        val cost = ModelPriceRepo.costOf(model, input, cacheRead, cacheWrite, output)
+        webFetchRequests: Long = 0,
+    ): Double {
+        val cost = ModelPriceRepo.costOf(model, usage)
         runCatching {
             transaction {
                 UsageEvents.insert {
@@ -69,10 +82,14 @@ object UsageRepo {
                     it[UsageEvents.userId] = userId
                     it[UsageEvents.tokenId] = tokenId
                     it[ts] = Instant.now()
-                    it[inputTokens] = input
-                    it[outputTokens] = output
-                    it[cacheReadTokens] = cacheRead
-                    it[cacheWriteTokens] = cacheWrite
+                    it[inputTokens] = usage.input
+                    it[outputTokens] = usage.output
+                    it[cacheReadTokens] = usage.cacheRead
+                    it[cacheWriteTokens] = usage.cacheWrite5m + usage.cacheWrite1h
+                    it[cacheWrite1hTokens] = usage.cacheWrite1h
+                    it[UsageEvents.webSearchRequests] = usage.webSearchRequests
+                    it[UsageEvents.webFetchRequests] = webFetchRequests
+                    it[fast] = usage.fast
                     it[UsageEvents.cost] = cost
                     it[httpStatus] = status
                     it[UsageEvents.model] = model
@@ -80,6 +97,7 @@ object UsageRepo {
                 }
             }
         }
+        return cost
     }
 
     private fun accumulate(rows: Iterable<ResultRow>): Totals {
@@ -368,6 +386,8 @@ object UsageRepo {
             userId = this[UsageEvents.userId], ts = this[UsageEvents.ts].toString(),
             inputTokens = this[UsageEvents.inputTokens], outputTokens = this[UsageEvents.outputTokens],
             cacheReadTokens = this[UsageEvents.cacheReadTokens], cacheWriteTokens = this[UsageEvents.cacheWriteTokens],
+            cacheWrite1hTokens = this[UsageEvents.cacheWrite1hTokens],
+            webSearchRequests = this[UsageEvents.webSearchRequests], fast = this[UsageEvents.fast],
             cost = this[UsageEvents.cost], httpStatus = this[UsageEvents.httpStatus], model = this[UsageEvents.model],
             source = this[UsageEvents.sourceCol],
         )

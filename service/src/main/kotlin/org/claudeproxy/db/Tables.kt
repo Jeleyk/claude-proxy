@@ -31,7 +31,18 @@ object ModelPrices : Table("model_prices") {
     val inputPrice = double("input_price").default(0.0)             // USD / 1M input tokens
     val outputPrice = double("output_price").default(0.0)          // USD / 1M output tokens
     val cacheReadPrice = double("cache_read_price").default(0.0)    // USD / 1M cache-read tokens
-    val cacheWritePrice = double("cache_write_price").default(0.0)  // USD / 1M cache-write tokens
+    // USD / 1M cache-write tokens at the default 5-minute TTL (Anthropic's "5m Cache Writes").
+    val cacheWritePrice = double("cache_write_price").default(0.0)
+    // USD / 1M cache-write tokens at the 1-hour TTL — a separate, higher tier (2× input vs the
+    // 5m tier's 1.25×). Claude Code ≥2.1 writes its main-loop prefix with ttl:"1h", so without
+    // its own price most cache-write spend on the proxy datapath is under-counted.
+    val cacheWrite1hPrice = double("cache_write_1h_price").default(0.0)
+    // Multiplier applied to every token price when the response was served in fast mode
+    // (`speed: "fast"`): same model, premium tier — Opus 5 fast is $10/$50 against $5/$25.
+    val fastMultiplier = double("fast_multiplier").default(2.0)
+    // USD per server-side web-search invocation ($10 / 1000 searches). Billed per request, not
+    // per token, so it lives outside the /1M columns.
+    val webSearchPrice = double("web_search_price").default(0.01)
     override val primaryKey = PrimaryKey(pattern)
 }
 
@@ -152,7 +163,15 @@ object UsageEvents : Table("usage_events") {
     val inputTokens = long("input_tokens").default(0)          // base (non-cache) input
     val outputTokens = long("output_tokens").default(0)
     val cacheReadTokens = long("cache_read_tokens").default(0)
-    val cacheWriteTokens = long("cache_write_tokens").default(0)
+    val cacheWriteTokens = long("cache_write_tokens").default(0)  // both TTLs
+    // The 1h-TTL slice of cacheWriteTokens, stored so the cost above stays auditable/re-derivable
+    // (it is priced at a different rate than the 5m remainder).
+    val cacheWrite1hTokens = long("cache_write_1h_tokens").default(0)
+    // Server-side tool calls billed per invocation rather than per token.
+    val webSearchRequests = long("web_search_requests").default(0)
+    val webFetchRequests = long("web_fetch_requests").default(0)
+    // Response served in fast mode (premium price tier on the same model).
+    val fast = bool("fast").default(false)
     // computed USD cost of this request from model pricing at record time
     val cost = double("cost").default(0.0)
     val httpStatus = integer("http_status").default(0)

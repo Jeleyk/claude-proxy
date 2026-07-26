@@ -3,18 +3,38 @@ import { api, ModelPrice } from '../api';
 import { NumberInput } from '../ui';
 import { SkeletonTable } from '../Skeleton';
 
-const KINDS: { key: keyof Omit<ModelPrice, 'pattern'>; label: string; hint: string }[] = [
-  { key: 'inputPrice', label: 'Input', hint: 'prompt tokens' },
-  { key: 'outputPrice', label: 'Output', hint: 'completion tokens' },
-  { key: 'cacheReadPrice', label: 'Cache read', hint: 'cache hits' },
-  { key: 'cacheWritePrice', label: 'Cache write', hint: 'cache stores' },
+type Field = { key: keyof Omit<ModelPrice, 'pattern'>; label: string; hint: string; unit: string; step: number };
+
+// Per-1M-token prices. `cacheWrite1hPrice` is its own tier, not a variant of the 5m one:
+// Anthropic charges 2× input for a 1-hour cache write against 1.25× for the default 5 minutes,
+// and Claude Code writes its main-loop prefix with ttl:"1h" — so most cache-write spend lands
+// in that column, not the one next to it.
+const TOKEN_FIELDS: Field[] = [
+  { key: 'inputPrice', label: 'Input', hint: 'prompt tokens', unit: '$ / 1M', step: 0.5 },
+  { key: 'outputPrice', label: 'Output', hint: 'completion tokens', unit: '$ / 1M', step: 0.5 },
+  { key: 'cacheReadPrice', label: 'Cache read', hint: 'cache hits', unit: '$ / 1M', step: 0.1 },
+  { key: 'cacheWritePrice', label: 'Cache write 5m', hint: 'default TTL · ≈1.25× input', unit: '$ / 1M', step: 0.5 },
+  { key: 'cacheWrite1hPrice', label: 'Cache write 1h', hint: 'extended TTL · ≈2× input', unit: '$ / 1M', step: 0.5 },
 ];
+
+// Charges that aren't per token.
+const EXTRA_FIELDS: Field[] = [
+  { key: 'fastMultiplier', label: 'Fast mode', hint: 'premium tier on the same model', unit: '× all tokens', step: 0.25 },
+  { key: 'webSearchPrice', label: 'Web search', hint: 'server-side search calls', unit: '$ / request', step: 0.01 },
+];
+
+const ALL_FIELDS = [...TOKEN_FIELDS, ...EXTRA_FIELDS];
+
+const BLANK: Record<string, number> = {
+  inputPrice: 0, outputPrice: 0, cacheReadPrice: 0, cacheWritePrice: 0,
+  cacheWrite1hPrice: 0, fastMultiplier: 2, webSearchPrice: 0.01,
+};
 
 export function ModelPricing() {
   const [prices, setPrices] = useState<ModelPrice[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [np, setNp] = useState('');
-  const [nv, setNv] = useState<Record<string, number>>({ inputPrice: 0, outputPrice: 0, cacheReadPrice: 0, cacheWritePrice: 0 });
+  const [nv, setNv] = useState<Record<string, number>>({ ...BLANK });
 
   async function load() {
     try { setPrices(await api.modelPrices()); } catch (e: any) { setErr(e.message); }
@@ -25,32 +45,51 @@ export function ModelPricing() {
     if (!np.trim()) return;
     try {
       setPrices(await api.setModelPrice({ pattern: np.trim().toLowerCase(), ...(nv as any) }));
-      setNp(''); setNv({ inputPrice: 0, outputPrice: 0, cacheReadPrice: 0, cacheWritePrice: 0 });
+      setNp(''); setNv({ ...BLANK });
     } catch (e: any) { setErr(e.message); }
   }
 
   return (
     <div className="main-inner">
       <h1>Model pricing</h1>
-      <p className="sub">USD per 1M tokens, per token kind. Used to compute each request's cost.</p>
+      <p className="sub">What each response costs: per-1M-token rates, plus the two charges that aren't per token.</p>
       {err && <div className="err">{err}</div>}
 
       <div className="panel">
         <p className="hint" style={{ marginTop: 0 }}>
-          Matched by substring of the model id (longest match wins). Cost = input×in + output×out + cache_read×cr + cache_write×cw, per 1M tokens.
-          Example: <span className="mono">opus</span> matches <span className="mono">claude-opus-4-8</span>. Unknown models cost $0.
+          Matched by substring of the model id, longest match wins — <span className="mono">opus</span> matches{' '}
+          <span className="mono">claude-opus-5</span>. Unknown models cost $0.
         </p>
-        {!prices ? <SkeletonTable rows={4} cols={6} /> : (
+        <p className="hint" style={{ marginTop: 6 }}>
+          <b>cost</b> = (input×in + output×out + cache_read×cr + cache_write_5m×cw + cache_write_1h×cw1h) ÷ 1M,
+          × the fast-mode multiplier when the response was served in fast mode, + web searches × their per-request price.
+        </p>
+        <p className="hint" style={{ marginTop: 6 }}>
+          Claude Code caches its main-loop prefix at the <b>1h</b> TTL, so that column — not “Cache write 5m” —
+          carries most of the cache spend. Leaving it at 0 would price those writes as free.
+        </p>
+        {!prices ? <SkeletonTable rows={4} cols={ALL_FIELDS.length + 2} /> : (
           <div className="tablewrap">
             <table>
-              <thead><tr><th>Model</th><th className="num">Input</th><th className="num">Output</th><th className="num">Cache read</th><th className="num">Cache write</th><th></th></tr></thead>
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  {ALL_FIELDS.map((f) => (
+                    <th key={f.key} className="num" title={`${f.hint} · ${f.unit}`}>
+                      {f.label}
+                      <div className="hint" style={{ fontWeight: 400 }}>{f.unit}</div>
+                    </th>
+                  ))}
+                  <th></th>
+                </tr>
+              </thead>
               <tbody>
                 {prices.map((p) => (
                   <PriceRow key={p.pattern} p={p}
                     onSave={async (np2) => setPrices(await api.setModelPrice(np2))}
                     onDelete={async (pat) => setPrices(await api.deleteModelPrice(pat))} />
                 ))}
-                {prices.length === 0 && <tr><td colSpan={6} className="hint">No pricing rules — everything costs $0.</td></tr>}
+                {prices.length === 0 && <tr><td colSpan={ALL_FIELDS.length + 2} className="hint">No pricing rules — everything costs $0.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -63,13 +102,16 @@ export function ModelPricing() {
           <input placeholder="e.g. opus" value={np} onChange={(e) => setNp(e.target.value)} />
         </label>
         <div className="grid2">
-          {KINDS.map((k) => (
-            <label key={k.key} className="field">
-              <span>{k.label} <span className="hint">· $ / 1M {k.hint}</span></span>
-              <NumberInput value={nv[k.key]} onChange={(v) => setNv((cur) => ({ ...cur, [k.key]: v }))} min={0} step={0.5} />
+          {ALL_FIELDS.map((f) => (
+            <label key={f.key} className="field">
+              <span>{f.label} <span className="hint">· {f.unit} · {f.hint}</span></span>
+              <NumberInput value={nv[f.key]} onChange={(v) => setNv((cur) => ({ ...cur, [f.key]: v }))} min={0} step={f.step} />
             </label>
           ))}
         </div>
+        <p className="hint">
+          Leave <b>Cache write 1h</b> at 0 to derive it as 2× input; a <b>Fast mode</b> of 0 is read as ×1 (no premium).
+        </p>
         <button onClick={add} disabled={!np.trim()}>{prices?.some((p) => p.pattern === np.trim().toLowerCase()) ? 'Update price' : 'Add price'}</button>
       </div>
     </div>
@@ -77,20 +119,19 @@ export function ModelPricing() {
 }
 
 function PriceRow({ p, onSave, onDelete }: { p: ModelPrice; onSave: (p: ModelPrice) => void; onDelete: (pat: string) => void }) {
-  const [v, setV] = useState<Record<string, number>>({
-    inputPrice: p.inputPrice, outputPrice: p.outputPrice, cacheReadPrice: p.cacheReadPrice, cacheWritePrice: p.cacheWritePrice,
-  });
+  const [v, setV] = useState<Record<string, number>>(() =>
+    Object.fromEntries(ALL_FIELDS.map((f) => [f.key, (p as any)[f.key] ?? BLANK[f.key]])));
   const [dirty, setDirty] = useState(false);
   const set = (key: string, x: number) => { setV((cur) => ({ ...cur, [key]: x })); setDirty(true); };
   return (
     <tr>
       <td><span className="mono">{p.pattern}</span></td>
-      {KINDS.map((k) => (
-        <td key={k.key} style={{ width: 110 }}><NumberInput value={v[k.key]} onChange={(x) => set(k.key, x)} min={0} step={0.5} /></td>
+      {ALL_FIELDS.map((f) => (
+        <td key={f.key} style={{ width: 104 }}><NumberInput value={v[f.key]} onChange={(x) => set(f.key, x)} min={0} step={f.step} /></td>
       ))}
       <td>
         <div className="row">
-          {dirty && <button className="sm" onClick={() => { onSave({ pattern: p.pattern, inputPrice: v.inputPrice, outputPrice: v.outputPrice, cacheReadPrice: v.cacheReadPrice, cacheWritePrice: v.cacheWritePrice }); setDirty(false); }}>Save</button>}
+          {dirty && <button className="sm" onClick={() => { onSave({ pattern: p.pattern, ...(v as any) }); setDirty(false); }}>Save</button>}
           <button className="sm danger" onClick={() => onDelete(p.pattern)}>Delete</button>
         </div>
       </td>

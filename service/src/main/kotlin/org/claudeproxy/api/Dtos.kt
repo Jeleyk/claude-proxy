@@ -91,7 +91,14 @@ data class ModelPriceRequest(
     val inputPrice: Double,
     val outputPrice: Double,
     val cacheReadPrice: Double = 0.0,
+    // cache writes at the default 5-minute TTL
     val cacheWritePrice: Double = 0.0,
+    // cache writes at the 1-hour TTL; 0 = derive from input (Anthropic's 2× relation)
+    val cacheWrite1hPrice: Double = 0.0,
+    // × applied to every token price in fast mode; 0 = no premium
+    val fastMultiplier: Double = 2.0,
+    // USD per server-side web search (billed per invocation)
+    val webSearchPrice: Double = 0.01,
 )
 
 @Serializable

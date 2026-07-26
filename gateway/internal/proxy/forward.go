@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"claudeproxy/gateway/internal/anthropic"
 	"claudeproxy/gateway/internal/control"
 )
 
@@ -28,7 +29,10 @@ var stripRequestHeaders = map[string]bool{
 }
 
 // Statuses that make a non-last attempt retry the next account instead of passing through.
-var retryableStatuses = map[int]bool{429: true, 401: true, 500: true, 502: true, 503: true, 529: true}
+// 403 is in here because upstream returns it for account-scoped problems — a suspended or
+// past-due subscription — which the *next* account is unaffected by; passing it straight through
+// would fail a request the pool could still serve.
+var retryableStatuses = map[int]bool{429: true, 401: true, 403: true, 500: true, 502: true, 503: true, 529: true}
 
 // forward performs one upstream attempt against a candidate. On a retryable status with
 // canRetry it drains the body and returns {retry:true}; otherwise it relays the response
@@ -108,14 +112,11 @@ func (h *Handler) forward(
 	}
 
 	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
-		model := modelFromRequest(outBody)
 		res := relaySSE(w, resp.Body, resp.StatusCode, contentType, headSent, canRetry, func() (string, int) {
 			return midStreamError(cands, idx)
 		})
 		report.Status = res.status
-		report.Input, report.Output = res.scan.Input, res.scan.Output
-		report.CacheRead, report.CacheWrite = res.scan.CacheRead, res.scan.CacheWrite
-		report.Model = model
+		applyUsage(&report, res.usage, modelFromRequest(outBody))
 		report.McpCalls = res.mcp
 		// The head is out from here on, whether we're retrying or done.
 		return forwardResult{retry: res.retry, headSent: true, report: report}
@@ -123,7 +124,7 @@ func (h *Handler) forward(
 
 	// Buffer the (single) JSON message so we can extract token usage.
 	buf, _ := io.ReadAll(resp.Body)
-	fillUsageFromJSON(&report, buf)
+	fillUsageFromJSON(&report, buf, modelFromRequest(outBody))
 	if headSent {
 		// An earlier attempt already opened a streamed 200 (and hit a retryable error before any
 		// content); this one answered with plain JSON, so there is no status left to send. Close
@@ -206,36 +207,38 @@ func extractRateLimitHeaders(h http.Header) map[string]string {
 }
 
 // fillUsageFromJSON pulls model + token counts + MCP tool-call counts out of a buffered JSON
-// response.
-func fillUsageFromJSON(report *control.UsageReport, body []byte) {
+// response. [requestModel] is the fallback when the body carries no model of its own.
+func fillUsageFromJSON(report *control.UsageReport, body []byte, requestModel *string) {
+	applyUsage(report, anthropic.ParseMessageJSON(body), requestModel)
 	var obj struct {
-		Model   string `json:"model"`
-		Content []struct {
-			Type string `json:"type"`
-			Name string `json:"name"`
-		} `json:"content"`
-		Usage struct {
-			Input       int64 `json:"input_tokens"`
-			Output      int64 `json:"output_tokens"`
-			CacheRead   int64 `json:"cache_read_input_tokens"`
-			CacheCreate int64 `json:"cache_creation_input_tokens"`
-		} `json:"usage"`
+		Content []contentBlockHead `json:"content"`
 	}
-	if err := json.Unmarshal(body, &obj); err != nil {
+	if json.Unmarshal(body, &obj) != nil {
 		return
 	}
-	if obj.Model != "" {
-		report.Model = &obj.Model
-	}
-	report.Input = obj.Usage.Input
-	report.Output = obj.Usage.Output
-	report.CacheRead = obj.Usage.CacheRead
-	report.CacheWrite = obj.Usage.CacheCreate
 	var mcp mcpScan
 	for _, block := range obj.Content {
-		mcp.count(block.Type, block.Name)
+		mcp.count(block)
 	}
 	report.McpCalls = mcp.calls
+}
+
+// applyUsage copies a scanned usage into the report. The model is taken from the *response*
+// whenever it names one: with server-side refusal fallback the model that answered is not the
+// one the request asked for, and pricing must follow whoever actually did the work. The request
+// model is only the fallback (error responses and count_tokens carry no model).
+func applyUsage(report *control.UsageReport, u anthropic.Usage, requestModel *string) {
+	report.Input, report.Output = u.Input, u.Output
+	report.CacheRead, report.CacheWrite = u.CacheRead, u.CacheWrite
+	report.CacheWrite1h = u.CacheWrite1h
+	report.WebSearchRequests, report.WebFetchRequests = u.WebSearch, u.WebFetch
+	report.Fast = u.Fast
+	if u.Model != "" {
+		m := u.Model
+		report.Model = &m
+		return
+	}
+	report.Model = requestModel
 }
 
 // modelFromRequest reads the "model" field from the request body.

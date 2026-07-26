@@ -2,7 +2,7 @@
 // management. Used by the Dashboard (global pool), My Accounts (personal) and the
 // admin oversight view on the Users page.
 import { ReactNode, useState } from 'react';
-import { AccountDto, api, fmtReset, fmtTokens, fmtUsd, GroupDto, PoolStats, WindowLimitDto } from './api';
+import { AccountDto, api, fmtReset, fmtTokens, fmtUsd, GroupDto, OverageDto, PoolStats, WindowLimitDto } from './api';
 import { Modal, NumberInput, Segmented, Switch } from './ui';
 
 /** The scope-specific API calls a table/modal needs. Bound to the global or personal endpoints. */
@@ -30,20 +30,31 @@ export type Scope = 'global' | 'personal';
 
 /* ---------------------------------------------------------------- cells */
 
-function WindowCell({ w, isApi }: { w: WindowLimitDto | null; isApi: boolean }) {
+function WindowCell({ w, isApi, overage }: { w: WindowLimitDto | null; isApi: boolean; overage?: OverageDto | null }) {
   if (isApi) return <span className="hint">n/a</span>;
   if (!w || (w.usageFraction == null && w.resetAt == null && w.status !== 'REJECTED')) {
     return <span className="hint">—</span>;
   }
   const hasPct = w.usageFraction != null;
   const frac = w.usageFraction ?? (w.status === 'REJECTED' ? 1 : 0);
+  // With paid credits enabled the subscription week can sit at 100% while the account keeps
+  // serving. Anthropic reports the true figure separately (7d including credits) — show it, or
+  // the row reads as "dead until the reset" when it is actually working and costing money.
+  const withCredits = overage?.weeklyWithOverage;
+  const showCredits = withCredits != null && frac >= 0.99;
   return (
     <div className="win">
       <div className="win-top">
-        <span>{hasPct ? `${Math.round(frac * 100)}%` : (w.status === 'REJECTED' ? 'limited' : '—')}</span>
+        <span>{hasPct ? fmtPct(frac) : (w.status === 'REJECTED' ? 'limited' : '—')}</span>
         <span>reset <b>{fmtReset(w.resetAt)}</b></span>
       </div>
       <div className="bar"><span style={{ width: `${Math.round(frac * 100)}%` }} /></div>
+      {showCredits && (
+        <div className="win-top" style={{ marginTop: 2 }} title="Weekly usage including paid credits: the subscription window is full, credits are covering the rest.">
+          <span className="hint">with credits</span>
+          <b className="hint">{fmtPct(withCredits!)}</b>
+        </div>
+      )}
     </div>
   );
 }
@@ -52,6 +63,67 @@ function healthBadge(a: AccountDto) {
   const cls = !a.enabled ? 'muted' : a.health === 'OK' ? 'ok' : a.health === 'REFRESH_FAILED' ? 'warn' : 'bad';
   const label = !a.enabled ? 'disabled' : a.rateLimitedUntil && new Date(a.rateLimitedUntil) > new Date() ? 'limited' : a.health.toLowerCase().replace('_', ' ');
   return <span className={`badge ${cls}`}>{label}</span>;
+}
+
+/** Why Anthropic says paid credits are unavailable, in words an operator can act on. */
+const CREDIT_REASON: Record<string, string> = {
+  free: 'plan has no usage credits',
+  preference: 'turned off for this account',
+  extra_usage_disabled: 'disabled by the organization',
+  org_level_disabled: 'disabled at the organization level',
+  network_error: 'Anthropic could not report credit state',
+};
+
+/**
+ * Paid usage credits ("extra usage") on an account. Only shown once there is something to say:
+ * credits actually serving traffic, or budget already spent. A plain subscription stays quiet.
+ */
+function creditsBadge(a: AccountDto) {
+  const o = a.overage;
+  if (!o) return null;
+  // Anthropic reports the credit allowance either as its own window (`overage-utilization`,
+  // what live traffic carries) or as a monthly budget; prefer the more specific one.
+  const monthly = o.monthlyUtilization ?? o.utilization;
+  const budget = monthly != null ? `\nCredit allowance spent: ${fmtPct(monthly)}` : '';
+  const channel = o.channelUtilization != null ? `\nThis channel: ${fmtPct(o.channelUtilization)}` : '';
+  const reset = o.resetAt ? `\nBudget resets ${fmtReset(o.resetAt)}` : '';
+  // Credits keep the upstream serving, but the pool still drops an account past its threshold
+  // unless it opted into fallback — so say so, or the account looks unusable for no reason.
+  const skipped = !a.overThreshold && (a.usageFraction ?? 0) >= a.threshold
+    ? '\n\nThe pool is skipping this account: it is over its threshold and not opted into fallback. Turn on "use past threshold" in Edit to keep routing to it (on credits).'
+    : '';
+  if (o.inUse) {
+    return (
+      <span className="badge warn" title={`Subscription window is spent — requests are being served from paid credits, at API rates.${budget}${channel}${reset}${skipped}`}>
+        on credits{monthly != null ? ` ${fmtPct(monthly)}` : ''}
+      </span>
+    );
+  }
+  if (monthly != null && monthly > 0) {
+    return (
+      <span className="badge muted" title={`Paid credits available, partly spent this period.${budget}${channel}${reset}`}>
+        credits {fmtPct(monthly)}
+      </span>
+    );
+  }
+  const reason = o.disabledReason ? CREDIT_REASON[o.disabledReason] ?? o.disabledReason : null;
+  if (reason) {
+    return <span className="badge muted" title={`No paid credits: ${reason}. The account stops at its subscription limit.`}>no credits</span>;
+  }
+  return null;
+}
+
+/** Free grace allowance on top of a saturated window — shown only while it is being drawn on. */
+function graceBadge(a: AccountDto) {
+  const g = a.grace;
+  if (!g) return null;
+  const active = (g.fiveHourUtilization ?? 0) > 0 || (g.weeklyUtilization ?? 0) > 0;
+  if (!active) return null;
+  const parts = [
+    g.fiveHourUtilization != null ? `5h: ${fmtPct(g.fiveHourUtilization)}` : null,
+    g.weeklyUtilization != null ? `7d: ${fmtPct(g.weeklyUtilization)}` : null,
+  ].filter(Boolean).join(' · ');
+  return <span className="badge muted" title={`Running on Anthropic's grace allowance past the window limit (free, unlike credits).\n${parts}`}>grace</span>;
 }
 
 /* ---------------------------------------------------------------- summary cards */
@@ -189,7 +261,7 @@ export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onT
               {showGroup && <td>{a.groupId ? <span className="grouptag">{groupName(a.groupId) ?? `#${a.groupId}`}</span> : <span className="hint">—</span>}</td>}
               <td><span className="badge muted">{a.type.toLowerCase()}</span></td>
               <td><WindowCell w={a.fiveHour} isApi={a.type === 'API_KEY'} /></td>
-              <td><WindowCell w={a.weekly} isApi={a.type === 'API_KEY'} /></td>
+              <td><WindowCell w={a.weekly} isApi={a.type === 'API_KEY'} overage={a.overage} /></td>
               <td className="num">×{a.coefficient}</td>
               <td className="num totalcell"
                 onMouseEnter={(e) => setHover({ a, x: e.clientX, y: e.clientY })}
@@ -197,7 +269,11 @@ export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onT
                 onMouseLeave={() => setHover((h) => (h?.a.id === a.id ? null : h))}>
                 {fmtTokens(total)}
               </td>
-              <td>{healthBadge(a)}</td>
+              <td>
+                <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+                  {healthBadge(a)}{creditsBadge(a)}{graceBadge(a)}
+                </div>
+              </td>
               {canManage && (
                 <td>
                   <div className="row" style={{ alignItems: 'center' }}>

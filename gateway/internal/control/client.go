@@ -35,6 +35,9 @@ type ResolveResp struct {
 	Candidates    []Candidate `json:"candidates"`
 	// Routing only: the token's static system prompt, to inject ahead of client system content.
 	SystemPrompt *string `json:"systemPrompt"`
+	// Free marks a path that consumes no subscription quota (token counting, model listing).
+	// Echoed back on the usage report so the service can keep zero-token successes out of stats.
+	Free bool `json:"free"`
 	// Client-side only: the id this resolve announced to the service, to be handed back to
 	// EndSession when the request finishes. Not part of the wire response.
 	SessionID string `json:"-"`
@@ -42,18 +45,30 @@ type ResolveResp struct {
 
 // UsageReport is one upstream attempt's outcome, posted to /internal/usage.
 type UsageReport struct {
-	AccountID        int               `json:"accountId"`
-	UserID           *int              `json:"userId"`
-	TokenID          *int              `json:"tokenId,omitempty"`
-	Input            int64             `json:"input"`
-	Output           int64             `json:"output"`
-	CacheRead        int64             `json:"cacheRead"`
-	CacheWrite       int64             `json:"cacheWrite"`
+	AccountID  int    `json:"accountId"`
+	UserID     *int   `json:"userId"`
+	TokenID    *int   `json:"tokenId,omitempty"`
+	Input      int64  `json:"input"`
+	Output     int64  `json:"output"`
+	CacheRead  int64  `json:"cacheRead"`
+	CacheWrite int64  `json:"cacheWrite"`
+	// CacheWrite1h is the 1-hour-TTL slice of CacheWrite, priced at 2× input instead of 1.25×.
+	CacheWrite1h int64 `json:"cacheWrite1h,omitempty"`
+	// Server-side tool calls Anthropic bills per invocation (web search) — token counts alone
+	// do not cover them.
+	WebSearchRequests int64 `json:"webSearchRequests,omitempty"`
+	WebFetchRequests  int64 `json:"webFetchRequests,omitempty"`
+	// Fast marks a response served in fast mode, a premium price tier on the same model.
+	Fast             bool              `json:"fast,omitempty"`
 	Status           int               `json:"status"`
 	Model            *string           `json:"model"`
 	RatelimitHeaders map[string]string `json:"ratelimitHeaders"`
 	Source           string            `json:"source,omitempty"`
-	// MCP tool invocations observed in the response (tool_use blocks named "mcp__…"), by name.
+	// Free echoes the resolve's free-path flag (token counting, model listing): the service
+	// leaves a successful zero-token attempt out of the statistics.
+	Free bool `json:"free,omitempty"`
+	// MCP tool invocations observed in the response (tool_use blocks named "mcp__…", plus
+	// server-side `mcp_tool_use` blocks normalized to the same shape), by name.
 	McpCalls map[string]int64 `json:"mcpCalls,omitempty"`
 }
 

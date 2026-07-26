@@ -92,6 +92,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for i, cand := range resp.Candidates {
 		canRetry := i < len(resp.Candidates)-1
 		res := h.forward(r.Context(), w, r, cand, resp.Candidates, i, resp.UserID, resp.TokenID, body, canRetry, headSent)
+		res.report.Free = resp.Free
 		h.ctrl.ReportUsage(context.Background(), res.report)
 		headSent = res.headSent
 		if !res.retry {

@@ -8,8 +8,8 @@ import {
 } from '../api';
 import { LineChart, SERIES_COLORS, StackedChart } from '../Chart';
 import {
-  fmtEventTs, Legend, RangeControls, sumKinds, todayLocal, tokenSeries, TOKEN_KINDS, W5H,
-  WindowBurnCharts, WWK,
+  CacheWriteCell, fmtEventTs, Legend, PremiumMarks, RangeControls, sumKinds, todayLocal, tokenSeries,
+  TOKEN_KINDS, W5H, WindowBurnCharts, WWK,
 } from './statsShared';
 import { Segmented, Select, useChartMode } from '../ui';
 import { TokenUsageChartsRow, usageItems } from './tokenUsage';
@@ -301,11 +301,15 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
                 <td className="hint">{fmtEventTs(e.ts)}</td>
                 <td>{sourceBadge(e.source)}</td>
                 <td>{e.accountName ?? '—'}</td>
-                <td className="hint">{e.model ?? '—'}</td>
+                <td className="hint">
+                  <span className="row" style={{ gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+                    {e.model ?? '—'}<PremiumMarks e={e} />
+                  </span>
+                </td>
                 <td className="num">{e.inputTokens}</td>
                 <td className="num">{e.outputTokens}</td>
                 <td className="num">{e.cacheReadTokens}</td>
-                <td className="num">{e.cacheWriteTokens}</td>
+                <td className="num"><CacheWriteCell e={e} /></td>
                 <td className="num">{fmtUsd(e.cost)}</td>
                 <td>{statusBadge(e.httpStatus)}</td>
               </tr>

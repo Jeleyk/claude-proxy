@@ -120,4 +120,37 @@ class InternalRoutesTest {
         }
         assertEquals(HttpStatusCode.NoContent, res.status)
     }
+
+    /**
+     * The wire contract with the Go gateway. This is the exact JSON `control.UsageReport`
+     * marshals once a response carries the priced extras — if a field name drifts, the money
+     * silently stops being counted, so it is pinned here as a literal rather than a builder.
+     */
+    @Test
+    fun `usage endpoint accepts the priced extras the gateway sends`() = testApplication {
+        application { mount() }
+        val res = client.post("/internal/usage") {
+            header("X-Internal-Token", token)
+            contentType(ContentType.Application.Json)
+            setBody(
+                """{"accountId":1,"userId":$adminId,"input":100,"output":20,"cacheRead":5,""" +
+                    """"cacheWrite":9000,"cacheWrite1h":8000,"webSearchRequests":2,"webFetchRequests":1,""" +
+                    """"fast":true,"free":false,"status":200,"model":"claude-opus-5","ratelimitHeaders":{},""" +
+                    """"mcpCalls":{"mcp__github__get_issue":1}}""",
+            )
+        }
+        assertEquals(HttpStatusCode.NoContent, res.status)
+    }
+
+    /** A gateway that predates the extras must keep working — every new field defaults. */
+    @Test
+    fun `usage endpoint still accepts a legacy report`() = testApplication {
+        application { mount() }
+        val res = client.post("/internal/usage") {
+            header("X-Internal-Token", token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"accountId":1,"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"status":200,"model":"opus","ratelimitHeaders":{}}""")
+        }
+        assertEquals(HttpStatusCode.NoContent, res.status)
+    }
 }
