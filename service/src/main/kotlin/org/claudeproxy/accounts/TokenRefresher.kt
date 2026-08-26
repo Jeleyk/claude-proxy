@@ -10,16 +10,21 @@ import org.claudeproxy.model.AccountType
 import org.claudeproxy.oauth.ClaudeOAuth
 import org.claudeproxy.proxy.Http
 import org.slf4j.LoggerFactory
+import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Background loop that refreshes OAuth access tokens ~5 minutes before expiry.
  * Accounts whose refresh fails are marked REFRESH_FAILED and excluded from selection
- * until an operator fixes them.
+ * until an operator fixes them — and are not retried until their [RefreshBackoff] window
+ * elapses, so a permanently dead refresh token can't hammer Anthropic's token endpoint
+ * once a minute forever.
  */
 class TokenRefresher(private val pool: AccountPool) {
     private val log = LoggerFactory.getLogger("TokenRefresher")
     private val refreshMarginMs = 5 * 60 * 1000L
     private val pollIntervalMs = 60 * 1000L
+    private val backoff = RefreshBackoff()
 
     fun start(scope: CoroutineScope): Job = scope.launch {
         while (isActive) {
@@ -37,6 +42,9 @@ class TokenRefresher(private val pool: AccountPool) {
             val expiresAt = acc.secret.expiresAt
             val dueSoon = expiresAt == null || expiresAt - now <= refreshMarginMs
             if (!dueSoon) continue
+            // A failing account waits out its backoff. Re-authorizing it (a new refresh token)
+            // clears the wait immediately — that's the operator fixing it.
+            if (!backoff.allowed(acc.id, refreshToken, now)) continue
             refreshOne(acc.id, refreshToken)
         }
     }
@@ -53,11 +61,66 @@ class TokenRefresher(private val pool: AccountPool) {
             AccountRepo.updateSecret(accountId, updated)
             AccountRepo.updateHealth(accountId, AccountHealth.OK)
             pool.updateSecretInMemory(accountId, updated, AccountHealth.OK)
+            backoff.onSuccess(accountId)
             log.info("Refreshed token for account {}", accountId)
         } catch (e: Exception) {
-            log.warn("Refresh failed for account {}: {}", accountId, e.message)
+            val message = e.message ?: ""
+            // `invalid_grant` means the refresh token itself is gone (expired or revoked): no
+            // number of retries brings it back, only a fresh "Login with Claude".
+            val permanent = message.contains("invalid_grant")
+            val nextAt = backoff.onFailure(accountId, refreshToken, System.currentTimeMillis(), permanent)
+            if (permanent) {
+                log.warn(
+                    "Refresh token for account {} is no longer valid ({}) — re-add the account; next attempt at {}",
+                    accountId, message, Instant.ofEpochMilli(nextAt),
+                )
+            } else {
+                log.warn("Refresh failed for account {}: {} — next attempt at {}", accountId, message, Instant.ofEpochMilli(nextAt))
+            }
             AccountRepo.updateHealth(accountId, AccountHealth.REFRESH_FAILED)
             pool.setHealth(accountId, AccountHealth.REFRESH_FAILED)
         }
     }
+}
+
+/**
+ * Per-account retry gate for OAuth refresh failures: the first failure parks the account for
+ * [baseMs], each further one doubles the wait up to [maxMs], and a permanent failure goes
+ * straight to the cap. Keyed by account, but tied to the refresh token that failed — a new
+ * token (the operator re-authorized the account) is tried at once. Pure time-in/decision-out
+ * so the policy is testable without a clock or the network.
+ */
+internal class RefreshBackoff(
+    private val baseMs: Long = 30 * 60 * 1000L,
+    private val maxMs: Long = 6 * 60 * 60 * 1000L,
+) {
+    private data class Entry(val tokenTag: String, val notBefore: Long, val failures: Int)
+
+    private val entries = ConcurrentHashMap<Int, Entry>()
+
+    fun allowed(accountId: Int, refreshToken: String, now: Long): Boolean {
+        val e = entries[accountId] ?: return true
+        if (e.tokenTag != tag(refreshToken)) {
+            entries.remove(accountId)
+            return true
+        }
+        return now >= e.notBefore
+    }
+
+    /** Record a failure; returns the epoch-millis instant of the next allowed attempt. */
+    fun onFailure(accountId: Int, refreshToken: String, now: Long, permanent: Boolean): Long {
+        val prev = entries[accountId]?.takeIf { it.tokenTag == tag(refreshToken) }
+        val failures = (prev?.failures ?: 0) + 1
+        val wait = if (permanent) maxMs else minOf(maxMs, baseMs shl minOf(failures - 1, 16))
+        val notBefore = now + wait
+        entries[accountId] = Entry(tag(refreshToken), notBefore, failures)
+        return notBefore
+    }
+
+    fun onSuccess(accountId: Int) {
+        entries.remove(accountId)
+    }
+
+    /** Identifies the token without keeping (or ever logging) the secret itself. */
+    private fun tag(refreshToken: String): String = refreshToken.hashCode().toString()
 }

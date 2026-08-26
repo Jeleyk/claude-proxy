@@ -50,9 +50,14 @@ back. They never touch the database.
 - Accounts have `priority`, `threshold` (0..1), `coefficient` (×1/×5/×20 capacity weight),
   `enabled`, `health`, and per-window live `utilization`.
 - **Usage fraction** driving selection = max utilization across known windows (`LimitState`).
-- Order: accounts **under** their threshold first (by priority), then accounts **over**
-  threshold (**fallback**), then park hard rate-limited ones until `rateLimitedUntil`.
-- `TokenRefresher` refreshes OAuth access tokens in the background; `LimitScheduler`/`LimitProbe`
+- Order: accounts **under** their threshold first (by priority), then the ones that opted into
+  `over_threshold` (**fallback**), then over-threshold accounts without the flag as a last resort
+  — but only while upstream still reports room (no window `REJECTED` or at utilization 1.0).
+  Hard rate-limited accounts are parked until `rateLimitedUntil`.
+- `TokenRefresher` refreshes OAuth access tokens in the background. A failed refresh parks the
+  account for 30 min, doubling up to 6 h; an `invalid_grant` (expired/revoked refresh token) goes
+  straight to the 6 h cap, since only a fresh "Login with Claude" can fix it. Re-authorizing the
+  account (a new refresh token) clears the wait at once. `LimitScheduler`/`LimitProbe`
   periodically probe accounts to keep window state fresh even when idle.
 
 ## Data model (Exposed, `db/Tables.kt`)

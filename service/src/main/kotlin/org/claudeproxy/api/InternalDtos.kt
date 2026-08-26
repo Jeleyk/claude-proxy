@@ -83,7 +83,11 @@ data class UsageReport(
     val fast: Boolean = false,
     val status: Int,
     val model: String? = null,
-    val ratelimitHeaders: Map<String, String> = emptyMap(),
+    // Nullable on purpose: an attempt that never got a response (transport error, or a 502 the
+    // gateway synthesized itself) has no headers to report, and Go marshals that nil map as
+    // `null`. Refusing it cost the whole report — the failed attempt vanished from the stats and
+    // its account bookkeeping never ran — and buried a stack trace in the log for every one.
+    val ratelimitHeaders: Map<String, String>? = null,
     // datapath that produced this attempt: "proxy" (default) or "routing".
     val source: String = "proxy",
     // the request ran on a free path (token counting, model listing) — echoed back from the

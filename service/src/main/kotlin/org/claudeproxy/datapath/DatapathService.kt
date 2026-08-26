@@ -55,6 +55,7 @@ data class ResolveResult(
  * source of truth — selection, decryption, and limit state never leave it.
  */
 class DatapathService(private val pool: AccountPool) {
+    private val log = org.slf4j.LoggerFactory.getLogger("Datapath")
 
     /**
      * Resolve a request into an ordered, ready-to-forward candidate list. [source] selects the
@@ -103,11 +104,31 @@ class DatapathService(private val pool: AccountPool) {
 
         // Per-user daily USD limit is a shared-pool constraint; personal accounts are exempt.
         val costLimit = if (routing) UserRepo.dailyRoutingLimitOf(userId) else UserRepo.dailyLimitOf(userId)
-        val usedCost = if (costLimit != null) cachedDailySpend(userId, routing) else 0.0
+        val usedCost = if (costLimit != null) cachedDailySpend(userId, if (routing) "routing" else "proxy") else 0.0
         val overLimit = costLimit != null && usedCost >= costLimit
 
         val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst, allowGlobal)
+        // An empty plan becomes a 503 at the gateway and records no usage at all — without this
+        // line the failure leaves no trace anywhere, neither in the log nor in the stats.
+        if (order.isEmpty() && !overLimit) logNoCandidate(userId, source)
         return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() }, sysPrompt)
+    }
+
+    /** Why the pool had nothing to offer, per account in the user's reach. */
+    private suspend fun logNoCandidate(userId: Int, source: String) {
+        val now = Instant.now()
+        val reasons = pool.snapshot().filter { it.ownerId == null || it.ownerId == userId }.joinToString("; ") { a ->
+            val util = a.limit.usageFraction()
+            val why = when {
+                !a.enabled -> "disabled"
+                a.health != AccountHealth.OK -> a.health.name.lowercase()
+                a.limit.rateLimitedUntil?.isAfter(now) == true -> "rate-limited until ${a.limit.rateLimitedUntil}"
+                util != null && util >= a.threshold -> "used %.2f of threshold %.2f".format(util, a.threshold)
+                else -> "usable"
+            }
+            "#${a.id} ${a.name}: $why"
+        }
+        log.warn("No account to serve user {} ({}): {}", userId, source, reasons)
     }
 
     /**
@@ -115,8 +136,9 @@ class DatapathService(private val pool: AccountPool) {
      * and run the per-status account bookkeeping that `UpstreamForwarder` did inline.
      */
     suspend fun applyOutcome(o: UsageReport) {
-        val routing = o.source == "routing"
-        val source = if (routing) "routing" else "proxy"
+        // Datapath tag as reported: "proxy" (Claude Code), "routing" (API gateways) or "chat"
+        // (the built-in UI). Each meters its own daily limit, so the tag has to survive verbatim.
+        val source = o.source.ifBlank { "proxy" }
         val billed = o.billed()
         // A free-path request (token counting, model listing) that succeeded without consuming
         // anything is not a data point — recording it would pad the request counters and the
@@ -136,18 +158,19 @@ class DatapathService(private val pool: AccountPool) {
         // what the stats show.
         val ownerId = pool.get(o.accountId)?.ownerId
         if (o.userId != null && ownerId == null && cost > 0.0) {
-            MemoryCache.incrExistingByFloat(spendKey(o.userId, routing), cost)
+            MemoryCache.incrExistingByFloat(spendKey(o.userId, source), cost)
         }
 
+        val headers = o.ratelimitHeaders.orEmpty()
         val prev = pool.get(o.accountId)?.limit ?: LimitState()
-        val newLimit = RateLimitHeaders.parse(o.ratelimitHeaders, prev)
+        val newLimit = RateLimitHeaders.parse(headers, prev)
         pool.updateLimit(o.accountId, newLimit)
 
         when {
             o.status == 429 -> {
                 // Park the account: honor retry-after; else park to the window reset only when
                 // genuinely at the limit (util ~full), otherwise a short burst-limit backoff.
-                val retryAfter = resetInstantFrom(o.ratelimitHeaders)
+                val retryAfter = resetInstantFrom(headers)
                 val maxUtil = newLimit.windows.values.mapNotNull { it.utilization }.maxOrNull() ?: 0.0
                 val until = when {
                     retryAfter != null -> retryAfter
@@ -188,20 +211,20 @@ class DatapathService(private val pool: AccountPool) {
     }
 
     /**
-     * Cached shared-pool daily spend (USD) for a user on the given datapath. Cached in-process
-     * under `cp:spend:<user>:<utcDate>` (proxy) / `cp:rspend:<user>:<utcDate>` (routing) until
-     * the next UTC midnight, with a DB recompute on miss.
+     * Cached shared-pool daily spend (USD) for a user on one datapath. Cached in-process under
+     * `cp:spend:<source>:<user>:<utcDate>` until the next UTC midnight, with a DB recompute on
+     * miss. Public because the chat datapath meters its own limit through the same counter.
      */
-    private fun cachedDailySpend(userId: Int, routing: Boolean): Double {
+    fun cachedDailySpend(userId: Int, source: String): Double {
         val ttl = secondsToUtcMidnight()
-        val cached = MemoryCache.getOrLoad(spendKey(userId, routing), ttl) {
-            UsageRepo.userTotals(userId, UserRepo.startOfUtcDay(), globalOnly = true, source = if (routing) "routing" else "proxy").cost.toString()
+        val cached = MemoryCache.getOrLoad(spendKey(userId, source), ttl) {
+            UsageRepo.userTotals(userId, UserRepo.startOfUtcDay(), globalOnly = true, source = source).cost.toString()
         }
         return cached?.toDoubleOrNull() ?: 0.0
     }
 
-    private fun spendKey(userId: Int, routing: Boolean): String =
-        "cp:${if (routing) "rspend" else "spend"}:$userId:${LocalDate.now(ZoneOffset.UTC)}"
+    private fun spendKey(userId: Int, source: String): String =
+        "cp:spend:$source:$userId:${LocalDate.now(ZoneOffset.UTC)}"
 
     private fun secondsToUtcMidnight(): Long {
         val nextMidnight = LocalDate.now(ZoneOffset.UTC).plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant()

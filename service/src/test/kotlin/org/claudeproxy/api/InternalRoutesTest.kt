@@ -142,6 +142,23 @@ class InternalRoutesTest {
         assertEquals(HttpStatusCode.NoContent, res.status)
     }
 
+    /**
+     * An attempt that never reached upstream (transport error, or a 502 the gateway wrote itself)
+     * has no rate-limit headers, and Go marshals that nil map as `null`. Rejecting it dropped the
+     * whole report: the failed attempt left no usage row and no account bookkeeping, and every
+     * one of them logged a deserialization stack trace.
+     */
+    @Test
+    fun `usage endpoint accepts a report with no rate-limit headers`() = testApplication {
+        application { mount() }
+        val res = client.post("/internal/usage") {
+            header("X-Internal-Token", token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"accountId":1,"userId":$adminId,"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"status":0,"model":null,"ratelimitHeaders":null}""")
+        }
+        assertEquals(HttpStatusCode.NoContent, res.status)
+    }
+
     /** A gateway that predates the extras must keep working — every new field defaults. */
     @Test
     fun `usage endpoint still accepts a legacy report`() = testApplication {
