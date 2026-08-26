@@ -120,15 +120,24 @@ class AccountPool {
     }
 
     /**
-     * Within one tier: sorted by priority, under-threshold first. Accounts that are over their
-     * threshold are only appended as fallback if they opted in via [AccountRuntime.overThreshold];
-     * others drop out entirely until their window resets.
+     * Within one tier: sorted by priority, under-threshold first, then the accounts that opted
+     * into serving past their threshold ([AccountRuntime.overThreshold]), and only then — as a
+     * last resort — the ones that are over threshold without the flag but whose windows upstream
+     * still reports as usable. The threshold is a *rotation* point, not a hard stop: dropping
+     * such an account outright answered 503 while it still had a fifth of its 5h window left.
+     * An account whose window is REJECTED or fully consumed stays out; there is nothing left
+     * there to serve with.
      */
     internal fun tierOrder(tier: List<AccountRuntime>): List<AccountRuntime> {
         val sorted = tier.sortedWith(compareBy({ it.priority }, { it.id }))
         val under = sorted.filter { it.usageForSelection() < it.threshold }
-        val over = sorted.filter { it.usageForSelection() >= it.threshold && it.overThreshold }
-        return under + over
+        val over = sorted.filter { it.usageForSelection() >= it.threshold }
+        return under + over.filter { it.overThreshold } + over.filter { !it.overThreshold && it.hasHeadroom() }
+    }
+
+    /** Upstream still reports room: no window rejected, none fully consumed. */
+    private fun AccountRuntime.hasHeadroom(): Boolean = limit.windows.values.none {
+        it.status == LimitStatus.REJECTED || (it.usageFraction() ?: 0.0) >= 1.0
     }
 
     /** An account is in a user's routing scope if it is their personal account or a usable global one. */

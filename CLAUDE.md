@@ -140,11 +140,13 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   accounts. Managed at `/api/my/accounts/*` (self, `ACCOUNTS_OWN_MANAGE`) and
   `/api/users/{id}/accounts/*` (admin oversight, `USERS_MANAGE`).
 - **Rotation:** strictly by `priority`; move to the next account once the active one's window
-  usage crosses its `threshold`. When *all* are over threshold, only accounts with the opt-in
-  **`over_threshold`** flag stay usable past their threshold (appended as **fallback**, ordered
-  by priority); accounts without the flag drop out of selection until their window resets. The
-  flag is off by default, so with no opted-in account the pool can return nothing once everyone
-  is saturated. `coefficient` (×1/×5/×20) weights pool capacity. Personal accounts form a
+  usage crosses its `threshold`. The threshold is a **rotation point, not a hard stop** — within
+  a tier the order is: under-threshold (by priority), then accounts with the opt-in
+  **`over_threshold`** flag (**fallback**, by priority), then — last resort — the over-threshold
+  accounts *without* the flag, as long as upstream still reports room (no window `REJECTED`, none
+  at utilization 1.0). Dropping that last group outright is what once answered 503 to every
+  request while an account still had a fifth of its 5h window; only a genuinely exhausted account
+  leaves selection now, until its window resets. `coefficient` (×1/×5/×20) weights pool capacity. Personal accounts form a
   preferred tier ordered ahead of the global tier — unless the user flips
   `users.prefer_global_pool` (self-service toggle on "My Accounts", gated by
   `ACCOUNTS_ORDER_TOGGLE`), which routes through the global pool first and falls back to
