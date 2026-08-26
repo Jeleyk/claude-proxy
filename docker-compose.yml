@@ -77,6 +77,10 @@ services:
       SERVICE_URL: "http://service:8787"
       INTERNAL_TOKEN: ${INTERNAL_TOKEN}
       UPSTREAM_BASE_URL: "https://api.anthropic.com"
+      # How long an open stream may go without a single upstream byte before the relay gives up
+      # on it (0 disables). Our keep-alives make a dead upstream look alive, so without this a
+      # stream that dies mid-answer hangs until the user gives up.
+      UPSTREAM_STALL_SECONDS: ${UPSTREAM_STALL_SECONDS:-120}
       # Claude model for unmapped OpenAI model names (see gateway/internal/openaigw).
       DEFAULT_MODEL: "claude-sonnet-5"
     healthcheck:

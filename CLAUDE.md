@@ -263,6 +263,17 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   shape. Retryable HTTP statuses (429/401/500/502/503/529) still swap accounts before any head is
   sent, as before. The Kotlin rollback datapath does **not** do the in-stream swap — it normalizes
   and lets the client retry (its coroutine relay carries the load-bearing 502 fix; left alone).
+- **A stream can also just stop.** Anthropic sometimes goes silent mid-answer and holds the socket
+  open — no error frame, no `message_stop`. The keep-alive comments then make the corpse look
+  alive, so the client waits minutes and reports "Response stalled mid-stream" over a half-written
+  answer. `relaySSE` runs a watchdog (`UPSTREAM_STALL_SECONDS`, default 120, 0 disables): after
+  that long without a single *content-bearing* upstream frame it takes the same decision as an
+  in-stream error — swap accounts while the client has seen only keep-alives, otherwise close with
+  a retryable `overloaded_error` frame. The attempt is recorded as **504**, deliberately not 429:
+  parking a healthy account on a window reset because a stream went quiet would cost hours of pool
+  capacity. `pingOnly` is what makes the watchdog work at all: measured on a stuck stream, Anthropic
+  keeps sending exactly one 39-byte ping every 30s for minutes after the answer stops, so a byte
+  counter never fires — pings are relayed but count as neither progress nor client-visible content.
 - **SSE relay is timing-sensitive.** `UpstreamForwarder` must flush the response head
   *immediately*, stream with `readAvailable` (not the buffering `readRemaining`), and inject
   `: keep-alive\n\n` SSE comments during upstream silence. Adaptive-thinking Opus on a 1M

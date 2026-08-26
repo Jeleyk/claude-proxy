@@ -114,7 +114,7 @@ func (h *Handler) forward(
 	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
 		res := relaySSE(w, resp.Body, resp.StatusCode, contentType, headSent, canRetry, func() (string, int) {
 			return midStreamError(cands, idx)
-		})
+		}, h.cfg.UpstreamStallTimeout)
 		report.Status = res.status
 		applyUsage(&report, res.usage, modelFromRequest(outBody))
 		report.McpCalls = res.mcp

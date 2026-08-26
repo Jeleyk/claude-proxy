@@ -26,7 +26,7 @@ func TestRelaySSERetriesWhenOverloadArrivesBeforeAnyContent(t *testing.T) {
 		false, true, func() (string, int) {
 			t.Error("onMidStreamErr must not run when the request can still be retried")
 			return "", 0
-		}, time.Hour)
+		}, time.Hour, 0)
 
 	if !res.retry {
 		t.Fatal("retry = false, want true (no content had reached the client yet)")
@@ -53,7 +53,7 @@ func TestRelaySSEDoesNotRetryOnceContentIsOut(t *testing.T) {
 	}()
 	rec := httptest.NewRecorder()
 	res := relaySSEInterval(rec, pr, 200, "text/event-stream",
-		false, true, func() (string, int) { return "event: error\ndata: normalized\n\n", 529 }, time.Hour)
+		false, true, func() (string, int) { return "event: error\ndata: normalized\n\n", 529 }, time.Hour, 0)
 
 	// Swapping accounts here would replay content the client already has.
 	if res.retry {
@@ -72,7 +72,7 @@ func TestRelaySSERetriesWhenContentAndOverloadShareAChunk(t *testing.T) {
 		overloadFrame
 	rec := httptest.NewRecorder()
 	res := relaySSEInterval(rec, io.NopCloser(strings.NewReader(data)), 200, "text/event-stream",
-		false, true, func() (string, int) { return "", 0 }, time.Hour)
+		false, true, func() (string, int) { return "", 0 }, time.Hour, 0)
 
 	if !res.retry {
 		t.Error("retry = false, want true (nothing was relayed to the client)")
@@ -88,7 +88,7 @@ func TestRelaySSERetriesWhenContentAndOverloadShareAChunk(t *testing.T) {
 func TestRelaySSEDoesNotRetryOnTheLastCandidate(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res := relaySSEInterval(rec, io.NopCloser(strings.NewReader(overloadFrame)), 200, "text/event-stream",
-		false, false, func() (string, int) { return "event: error\ndata: normalized\n\n", 429 }, time.Hour)
+		false, false, func() (string, int) { return "event: error\ndata: normalized\n\n", 429 }, time.Hour, 0)
 
 	if res.retry {
 		t.Error("retry = true, want false (no candidate left to hand it to)")
@@ -105,7 +105,7 @@ func TestRelaySSESkipsHeadWhenAlreadySent(t *testing.T) {
 	data := "event: message_start\ndata: {}\n\n"
 	rec := httptest.NewRecorder()
 	relaySSEInterval(rec, io.NopCloser(strings.NewReader(data)), 200, "text/event-stream",
-		true, false, func() (string, int) { return "", 0 }, time.Hour)
+		true, false, func() (string, int) { return "", 0 }, time.Hour, 0)
 
 	// A second head would corrupt the stream the first attempt opened.
 	if strings.HasPrefix(rec.Body.String(), ": keep-alive") {

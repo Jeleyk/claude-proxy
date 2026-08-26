@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"io"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"claudeproxy/gateway/internal/anthropic"
@@ -13,6 +15,36 @@ import (
 // first event; without keep-alives the client (and Cloudflare/nginx) abort before the first real
 // event → nginx "upstream prematurely closed connection while reading response header" (502).
 const keepAliveInterval = 15 * time.Second
+
+// stallFrame ends a stream whose upstream went silent. Shaped as `overloaded_error` because that
+// is the one mid-stream error Claude Code re-sends the request on — a stalled answer is exactly
+// the case where a retry is the right move.
+const stallFrame = "event: error\n" +
+	`data: {"type":"error","error":{"type":"overloaded_error","message":"claude-proxy: upstream stopped sending data — retry"}}` + "\n\n"
+
+// stallStatus is recorded for a stalled attempt. Deliberately not 429: parking the account on a
+// window reset because a stream went quiet would take a healthy account out of the pool for hours.
+const stallStatus = 504
+
+// pingOnly reports whether a chunk carries nothing but SSE comments and Anthropic ping frames —
+// upstream noise that says the socket is alive but the answer is not moving.
+func pingOnly(b []byte) bool {
+	seenPing := false
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "" || strings.HasPrefix(line, ":"):
+			continue
+		case line == "event: ping":
+			seenPing = true
+		case strings.HasPrefix(line, "data:") && strings.Contains(line, `"ping"`):
+			seenPing = true
+		default:
+			return false
+		}
+	}
+	return seenPing
+}
 
 // sseResult is the outcome of relaying one SSE response.
 type sseResult struct {
@@ -35,15 +67,15 @@ type sseResult struct {
 // write it again. [canRetry] is false on the last candidate.
 func relaySSE(
 	w http.ResponseWriter, upstream io.ReadCloser, status int, contentType string,
-	headSent, canRetry bool, onMidStreamErr func() (string, int),
+	headSent, canRetry bool, onMidStreamErr func() (string, int), stallAfter time.Duration,
 ) sseResult {
-	return relaySSEInterval(w, upstream, status, contentType, headSent, canRetry, onMidStreamErr, keepAliveInterval)
+	return relaySSEInterval(w, upstream, status, contentType, headSent, canRetry, onMidStreamErr, keepAliveInterval, stallAfter)
 }
 
 // relaySSEInterval is relaySSE with an injectable keep-alive interval (for tests).
 func relaySSEInterval(
 	w http.ResponseWriter, upstream io.ReadCloser, status int, contentType string,
-	headSent, canRetry bool, onMidStreamErr func() (string, int), interval time.Duration,
+	headSent, canRetry bool, onMidStreamErr func() (string, int), interval, stallAfter time.Duration,
 ) sseResult {
 	fl, _ := w.(http.Flusher)
 	if !headSent {
@@ -94,9 +126,18 @@ func relaySSEInterval(
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	lastUpstream := time.Now()
 	for {
 		select {
 		case b := <-dataCh:
+			// Pings don't count as progress. Measured on a stuck stream: Anthropic kept sending
+			// exactly one 39-byte ping every 30s for minutes after the answer stopped mid-word,
+			// so a watchdog that looked at raw bytes — or a client that trusts the socket — waits
+			// forever. They are still relayed (and still don't count as client-visible content,
+			// so a swap stays invisible); they just don't reset the clock.
+			if !pingOnly(b) {
+				lastUpstream = time.Now()
+			}
 			scan.Feed(b)
 			errs.Feed(b)
 			if errs.Retryable() != "" {
@@ -121,11 +162,30 @@ func relaySSEInterval(
 				return sseResult{usage: scan.Usage(), mcp: scan.mcp.calls, status: recorded}
 			}
 			_, _ = w.Write(b)
-			wroteData = true
+			if !pingOnly(b) {
+				wroteData = true
+			}
 			if fl != nil {
 				fl.Flush()
 			}
 		case <-ticker.C:
+			// Upstream silent past the watchdog: the stream is dead, not thinking. Left alone it
+			// hangs for as long as the client tolerates our keep-alives — Anthropic drops a
+			// stream mid-answer often enough (a cold cache write of a very large prompt is where
+			// we see it) that "wait forever" is the wrong default. Same decision as an in-stream
+			// error: swap accounts while the client has seen nothing, otherwise end it honestly.
+			if stallAfter > 0 && time.Since(lastUpstream) >= stallAfter {
+				if !wroteData && canRetry {
+					log.Printf("upstream silent for %s before any content — trying the next account", stallAfter)
+					return sseResult{usage: scan.Usage(), mcp: scan.mcp.calls, status: recorded, retry: true}
+				}
+				log.Printf("upstream silent for %s mid-answer — ending the stream with a retryable error", stallAfter)
+				_, _ = io.WriteString(w, stallFrame)
+				if fl != nil {
+					fl.Flush()
+				}
+				return sseResult{usage: scan.Usage(), mcp: scan.mcp.calls, status: stallStatus}
+			}
 			// Upstream silent (thinking) → keep the connection warm.
 			_, _ = io.WriteString(w, ": keep-alive\n\n")
 			if fl != nil {

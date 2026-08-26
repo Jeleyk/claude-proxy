@@ -58,7 +58,7 @@ func TestRelaySSEReturnsMcpCalls(t *testing.T) {
 		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"mcp__memory__search","input":{}}}` + "\n\n"
 	rec := httptest.NewRecorder()
 	calls := relaySSEInterval(rec, io.NopCloser(strings.NewReader(data)), 200, "text/event-stream", false, false,
-		func() (string, int) { return "", 0 }, time.Hour).mcp
+		func() (string, int) { return "", 0 }, time.Hour, 0).mcp
 
 	if calls["mcp__memory__search"] != 1 {
 		t.Errorf("calls = %v, want mcp__memory__search=1", calls)

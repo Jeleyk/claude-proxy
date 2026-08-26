@@ -1,7 +1,11 @@
 // Package config loads the gateway's runtime configuration from environment variables.
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+	"time"
+)
 
 // Config is the gateway's runtime configuration.
 type Config struct {
@@ -13,16 +17,36 @@ type Config struct {
 	InternalToken string
 	// UpstreamBaseURL is the Anthropic API base (env UPSTREAM_BASE_URL).
 	UpstreamBaseURL string
+	// UpstreamStallTimeout is how long an open stream may go without a single upstream byte
+	// before the relay gives up on it (env UPSTREAM_STALL_SECONDS, 0 disables the watchdog).
+	// Our keep-alive comments make a dead upstream look alive to the client, so without this a
+	// stream that stops mid-answer hangs until the *user* gives up minutes later.
+	UpstreamStallTimeout time.Duration
 }
 
 // Load reads the configuration from the environment, applying defaults.
 func Load() *Config {
 	return &Config{
-		Port:            envOr("PORT", "9000"),
-		ServiceURL:      envOr("SERVICE_URL", "http://service:8787"),
-		InternalToken:   os.Getenv("INTERNAL_TOKEN"),
-		UpstreamBaseURL: envOr("UPSTREAM_BASE_URL", "https://api.anthropic.com"),
+		Port:                 envOr("PORT", "9000"),
+		ServiceURL:           envOr("SERVICE_URL", "http://service:8787"),
+		InternalToken:        os.Getenv("INTERNAL_TOKEN"),
+		UpstreamBaseURL:      envOr("UPSTREAM_BASE_URL", "https://api.anthropic.com"),
+		UpstreamStallTimeout: secondsOr("UPSTREAM_STALL_SECONDS", 120*time.Second),
 	}
+}
+
+// secondsOr reads a whole-seconds duration from the environment. An unparseable value keeps the
+// default; an explicit 0 is honored and turns the setting off.
+func secondsOr(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return time.Duration(n) * time.Second
 }
 
 func envOr(key, def string) string {

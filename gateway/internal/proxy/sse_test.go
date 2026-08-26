@@ -13,7 +13,7 @@ func TestRelaySSEFlushesHeadAndScansUsage(t *testing.T) {
 		`data: {"type":"message_start","message":{"usage":{"input_tokens":1200,"output_tokens":1}}}` + "\n\n"
 	rec := httptest.NewRecorder()
 	res := relaySSEInterval(rec, io.NopCloser(strings.NewReader(data)), 200, "text/event-stream", false, false,
-		func() (string, int) { return "", 0 }, time.Hour)
+		func() (string, int) { return "", 0 }, time.Hour, 0)
 	scan, status := res.usage, res.status
 
 	if status != 200 {
@@ -38,7 +38,7 @@ func TestRelaySSEEmitsKeepAlivesDuringSilence(t *testing.T) {
 		_ = pw.Close()
 	}()
 	rec := httptest.NewRecorder()
-	relaySSEInterval(rec, pr, 200, "text/event-stream", false, false, func() (string, int) { return "", 0 }, 20*time.Millisecond)
+	relaySSEInterval(rec, pr, 200, "text/event-stream", false, false, func() (string, int) { return "", 0 }, 20*time.Millisecond, 0)
 
 	// Head keep-alive + at least one during the silence.
 	if n := strings.Count(rec.Body.String(), ": keep-alive\n\n"); n < 2 {
@@ -59,7 +59,7 @@ func TestRelaySSEInjectsMidStreamError(t *testing.T) {
 	res := relaySSEInterval(rec, pr, 200, "text/event-stream", false, false, func() (string, int) {
 		called = true
 		return "event: error\ndata: injected-retry\n\n", 529
-	}, time.Hour)
+	}, time.Hour, 0)
 	scan, status := res.usage, res.status
 
 	if !called {
