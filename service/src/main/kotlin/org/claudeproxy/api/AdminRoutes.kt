@@ -159,6 +159,7 @@ private fun assembleStats(
         nextWeeklyReset = nextWeeklyReset,
         activeProxySessions = active.proxy,
         activeRoutingSessions = active.routing,
+        selectionStrategy = org.claudeproxy.accounts.SelectionStrategy.current().name,
         accounts = accounts,
     )
 }

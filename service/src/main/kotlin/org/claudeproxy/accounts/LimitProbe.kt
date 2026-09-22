@@ -45,9 +45,17 @@ class LimitProbe(
         return """{"model":"$probeModel","max_tokens":1,"system":"$systemPrompt","messages":[{"role":"user","content":"."}],"metadata":{"user_id":$userId}}"""
     }
 
-    /** Probe a single account. Returns true if any rate-limit header was observed. */
-    suspend fun probe(accountId: Int): Boolean {
-        val account = pool.get(accountId) ?: return false
+    /**
+     * Outcome of one probe, kept apart from "did we see rate-limit headers" because the scheduler
+     * has to tell a reading it could not refresh from one it refreshed and found nothing in. A
+     * [FAILED] probe leaves the account's `updatedAt` frozen while the account still looks
+     * healthy, which is the shape of the seven-hour-stale reading seen on 2026-09-14.
+     */
+    enum class Outcome { OBSERVED, REACHED, FAILED }
+
+    /** Probe a single account. */
+    suspend fun probe(accountId: Int): Outcome {
+        val account = pool.get(accountId) ?: return Outcome.FAILED
         return try {
             val resp: HttpResponse = Http.client.post("$upstreamBaseUrl$probePath") {
                 contentType(ContentType.Application.Json)
@@ -80,10 +88,10 @@ class LimitProbe(
                 }
             }
             log.info("Probed account {} -> status {} (rate-limit headers: {})", accountId, resp.status.value, observed)
-            observed
+            if (observed) Outcome.OBSERVED else Outcome.REACHED
         } catch (e: Exception) {
             log.warn("Probe failed for account {}: {}", accountId, e.message)
-            false
+            Outcome.FAILED
         }
     }
 
@@ -91,7 +99,7 @@ class LimitProbe(
     suspend fun probeAll(): Int {
         var n = 0
         for (acc in pool.snapshot()) {
-            if (probe(acc.id)) n++
+            if (probe(acc.id) == Outcome.OBSERVED) n++
         }
         return n
     }
