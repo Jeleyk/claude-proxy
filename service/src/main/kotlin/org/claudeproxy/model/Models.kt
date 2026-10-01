@@ -200,6 +200,10 @@ data class PoolStatsDto(
     // payload: pool-wide view = everyone, personal view = that user's own.
     val activeProxySessions: Int = 0,
     val activeRoutingSessions: Int = 0,
+    // Which order the pool drains its accounts in — `PRIORITY` or `DEADLINE`. Reported rather
+    // than inferred: a dashboard that draws a drain order has no other way to know which rule
+    // produced it, and one drawn under the wrong rule is worse than none at all.
+    val selectionStrategy: String = "PRIORITY",
     val accounts: List<AccountDto>,
 )
 

@@ -67,7 +67,7 @@ class AccountPool {
     suspend fun selectionOrderOwned(userId: Int, now: Instant = Instant.now()): List<AccountRuntime> = mutex.withLock {
         tierOrder(accounts.values.filter {
             it.enabled && it.health == AccountHealth.OK && !it.isHardLimited(now) && it.ownerId == userId
-        })
+        }, SelectionStrategy.current(), now)
     }
 
     fun markActive(id: Int) { activeAccountId = id }
@@ -115,12 +115,16 @@ class AccountPool {
         val personal = if (userId == null) emptyList() else healthy.filter { it.ownerId == userId }
         // The shared pool is only a candidate tier when the caller may use it (POOL_GLOBAL_USE).
         val global = if (!allowGlobal) emptyList() else healthy.filter { it.ownerId == null && canUseGlobal(it, allowedGroups) }
-        return if (personalFirst) tierOrder(personal) + tierOrder(global)
-               else tierOrder(global) + tierOrder(personal)
+        // Resolved once per request rather than per tier: a setting flip between the two calls
+        // would order the tiers by different rules and read as a routing bug.
+        val strategy = SelectionStrategy.current()
+        return if (personalFirst) tierOrder(personal, strategy, now) + tierOrder(global, strategy, now)
+               else tierOrder(global, strategy, now) + tierOrder(personal, strategy, now)
     }
 
     /**
-     * Within one tier: sorted by priority, under-threshold first, then the accounts that opted
+     * Within one tier: sorted by [strategy] (see [SelectionStrategy]), under-threshold first,
+     * then the accounts that opted
      * into serving past their threshold ([AccountRuntime.overThreshold]), and only then — as a
      * last resort — the ones that are over threshold without the flag but whose windows upstream
      * still reports as usable. The threshold is a *rotation* point, not a hard stop: dropping
@@ -128,8 +132,12 @@ class AccountPool {
      * An account whose window is REJECTED or fully consumed stays out; there is nothing left
      * there to serve with.
      */
-    internal fun tierOrder(tier: List<AccountRuntime>): List<AccountRuntime> {
-        val sorted = tier.sortedWith(compareBy({ it.priority }, { it.id }))
+    internal fun tierOrder(
+        tier: List<AccountRuntime>,
+        strategy: SelectionStrategy = SelectionStrategy.PRIORITY,
+        now: Instant = Instant.now(),
+    ): List<AccountRuntime> {
+        val sorted = tier.sortedWith(candidateOrder(strategy, now))
         val under = sorted.filter { it.usageForSelection() < it.threshold }
         val over = sorted.filter { it.usageForSelection() >= it.threshold }
         return under + over.filter { it.overThreshold } + over.filter { !it.overThreshold && it.hasHeadroom() }
