@@ -117,6 +117,9 @@ data class CreateProxyTokenRequest(val name: String, val systemPrompt: String? =
 @Serializable
 data class UpdateRoutingTokenRequest(val systemPrompt: String? = null)
 
+@Serializable
+data class UpdateProxyTokenRequest(val defaultModel: String? = null)
+
 /**
  * PATCH body for the `…/{id}/enabled` sub-resource of both token kinds. A dedicated sub-resource
  * rather than a field on [UpdateRoutingTokenRequest], which can't tell "prompt omitted" from

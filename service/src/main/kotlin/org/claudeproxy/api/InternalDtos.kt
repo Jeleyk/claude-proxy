@@ -53,6 +53,9 @@ data class ResolveResponse(
     val candidates: List<CandidateDto> = emptyList(),
     // routing only: static per-token system prompt the gateway injects ahead of client system.
     val systemPrompt: String? = null,
+    // proxy only: model forced by the token. The gateway writes it over the body's `model`; a
+    // `[1m]` suffix (Claude Code's notation) is stripped there and becomes the 1M-context beta.
+    val defaultModel: String? = null,
     // free path (token counting, model listing): the gateway echoes this back on the usage
     // report so a successful zero-token attempt stays out of the statistics.
     val free: Boolean = false,

@@ -57,7 +57,7 @@ export function TokenUsageSection({ source, tokens, onDelete, onToggle, onEdit, 
   // Disable/enable the token: reversible, so no confirmation — unlike delete.
   onToggle: (id: number, enabled: boolean) => void;
   // When supplied, the row offers "Edit" (a settings dialog) instead of an inline enable toggle —
-  // routing tokens have more than one setting, so they get a dialog.
+  // tokens with more than one setting get a dialog.
   onEdit?: (t: ProxyTokenDto) => void;
   emptyHint: string;
 }) {
@@ -97,6 +97,7 @@ export function TokenUsageSection({ source, tokens, onDelete, onToggle, onEdit, 
                     <span className={t.enabled ? undefined : 'hint'}>{t.name}</span>
                     {!t.enabled && <span className="badge muted" style={{ marginLeft: 8 }}>disabled</span>}
                     {t.systemPrompt && <span className="badge accent" style={{ marginLeft: 8 }} title={t.systemPrompt}>prompt</span>}
+                    {t.defaultModel && <span className="badge accent mono" style={{ marginLeft: 8 }} title="Every request of this token runs on this model">{t.defaultModel}</span>}
                   </td>
                   <td className="hint">{new Date(t.createdAt).toLocaleString()}</td>
                   <td className="hint">{t.lastUsedAt ? new Date(t.lastUsedAt).toLocaleString() : 'never'}</td>

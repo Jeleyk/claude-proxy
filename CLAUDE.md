@@ -200,6 +200,16 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   (401) on every datapath at once; the switch evicts the resolve cache, so it applies instantly.
   A routing token's settings (enable switch + static system prompt) live in one Edit dialog on
   the API Routing page; creation only takes a name.
+- **Token default model** (`proxy_tokens.default_model`, `PATCH /api/proxy-tokens/{id}`, Edit
+  dialog on the Proxy Tokens page): a `cxp_` token may force one model onto *every* request it
+  makes — Claude Code's background Haiku calls and `count_tokens` included, so the context
+  indicator counts against the model that will answer. Free text in Claude Code's notation: a
+  trailing `[1m]` is stripped and becomes the `context-1m-2025-08-07` beta, merged into the
+  client's `anthropic-beta` (that is all Claude Code itself does with the suffix). The service
+  returns it from `/internal/resolve` (`defaultModel`, cached 60s, evicted on edit); the Go
+  gateway splices it over the body's *top-level* `model` in place (`proxy/model.go`) — no
+  re-marshal of a transcript-sized body, and a nested `"model"` in a tool input is left alone.
+  Go datapath only: the Kotlin rollback path forwards the client's model.
 - **Viewer-local days:** every time-series endpoint takes an IANA `tz` query param
   (`rangeParams()` in `AdminRoutes`), and so do the **"today" counter** payloads that carry no
   date range — `/stats/mine`, `/users/{id}/stats`, `/stats/models`, `/users/stats/overview` — via

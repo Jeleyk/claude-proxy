@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import { api, fmtTokens, fmtUntilUtcMidnight, fmtUsd, ProxyTokenDto, UserDto } from '../api';
-import { ConnectScripts, Copy } from '../ui';
+import { ConnectScripts, Copy, Modal, Switch } from '../ui';
 import { TokenUsageSection } from './tokenUsage';
 
 export function Tokens() {
   const [tokens, setTokens] = useState<ProxyTokenDto[]>([]);
   const [name, setName] = useState('');
   const [revealed, setRevealed] = useState<ProxyTokenDto | null>(null);
+  const [editing, setEditing] = useState<ProxyTokenDto | null>(null);
   // The datapath is fronted by nginx under /gateway (Claude Code appends /v1/...).
   const [base, setBase] = useState(window.location.origin + '/gateway');
   const [me, setMe] = useState<UserDto | null>(null);
@@ -89,7 +90,89 @@ export function Tokens() {
         </div>
       </div>
 
-      <TokenUsageSection source="proxy" tokens={tokens} onDelete={del} onToggle={toggle} emptyHint="No tokens yet." />
+      <TokenUsageSection source="proxy" tokens={tokens} onDelete={del} onToggle={toggle}
+        onEdit={setEditing} emptyHint="No tokens yet." />
+
+      {editing && (
+        <ProxyTokenModal token={tokens.find((t) => t.id === editing.id) ?? editing}
+          onClose={() => setEditing(null)} onChanged={load} />
+      )}
     </div>
+  );
+}
+
+// Suggestions only — the field takes any model id, so a new model needs no release.
+const MODEL_SUGGESTIONS = [
+  'claude-opus-5-5[1m]', 'claude-opus-5-5', 'claude-opus-5[1m]', 'claude-opus-5',
+  'claude-fable-5-1', 'claude-sonnet-5[1m]', 'claude-sonnet-5', 'claude-haiku-4-5-20251001',
+];
+
+/**
+ * One proxy token's settings: the on/off switch and the default model. The model is written over
+ * whatever the client asks for on every request — Claude Code's background Haiku calls included —
+ * and takes Claude Code's own "[1m]" suffix to switch on the 1M-context window.
+ */
+function ProxyTokenModal({ token, onClose, onChanged }: {
+  token: ProxyTokenDto; onClose: () => void; onChanged: () => void;
+}) {
+  const [model, setModel] = useState(token.defaultModel ?? '');
+  const [dirty, setDirty] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // A background refresh may bring a newer value; never clobber an edit in progress.
+  useEffect(() => { if (!dirty) setModel(token.defaultModel ?? ''); }, [token.defaultModel, dirty]);
+
+  async function save(value: string | null) {
+    setErr(null);
+    try {
+      await api.updateTokenModel(token.id, value);
+      setDirty(false); setSaved(true); setTimeout(() => setSaved(false), 1500);
+      onChanged();
+    } catch (e: any) { setErr(e.message); }
+  }
+  async function setEnabled(v: boolean) {
+    setErr(null);
+    try { await api.setTokenEnabled(token.id, v); onChanged(); }
+    catch (e: any) { setErr(e.message); }
+  }
+
+  return (
+    <Modal title={`Token · ${token.name}`} onClose={onClose} width={560}
+      footer={
+        <>
+          {saved && <span className="hint" style={{ marginRight: 'auto' }}>Saved ✓</span>}
+          {token.defaultModel && <button className="ghost" onClick={() => { setModel(''); save(null); }}>Clear model</button>}
+          <button onClick={() => save(model.trim() || null)} disabled={!dirty}>Save</button>
+          <button className="ghost" onClick={onClose}>Close</button>
+        </>
+      }>
+      {err && <div className="err">{err}</div>}
+
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <div>
+          <b>Enabled</b>
+          <p className="hint" style={{ margin: '2px 0 0' }}>
+            Off = clients using this token get 401 immediately, without revoking it.
+          </p>
+        </div>
+        <Switch checked={token.enabled} onChange={setEnabled} />
+      </div>
+
+      <h3 style={{ margin: '20px 0 4px', fontSize: 14 }}>Default model</h3>
+      <p className="hint" style={{ margin: '0 0 8px' }}>
+        Replaces the model of every request made with this token, whatever the client picked.
+        Add <span className="mono">[1m]</span> for the 1M-token context window. Empty = the client decides.
+      </p>
+      <input
+        className="mono" list="proxy-token-models" value={model} style={{ width: '100%' }}
+        onChange={(e) => { setModel(e.target.value); setDirty(true); }}
+        onKeyDown={(e) => e.key === 'Enter' && dirty && save(model.trim() || null)}
+        placeholder="e.g. claude-opus-5-5[1m]"
+      />
+      <datalist id="proxy-token-models">
+        {MODEL_SUGGESTIONS.map((m) => <option key={m} value={m} />)}
+      </datalist>
+    </Modal>
   );
 }

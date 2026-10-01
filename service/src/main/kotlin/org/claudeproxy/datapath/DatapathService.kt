@@ -42,6 +42,8 @@ data class ResolveResult(
     // routing only: the token's static system prompt, injected by the gateway ahead of the
     // client's own system content (but after the mandatory Claude Code block).
     val systemPrompt: String? = null,
+    // proxy only: the model the token forces onto the request, replacing the client's choice.
+    val defaultModel: String? = null,
     // the request is on a free path (token counting, model listing): no quota, no limit, and a
     // successful zero-token outcome is not recorded as usage.
     val free: Boolean = false,
@@ -92,6 +94,7 @@ class DatapathService(private val pool: AccountPool) {
         val allowGlobal = Permission.ADMIN in perms || Permission.POOL_GLOBAL_USE in perms
 
         val sysPrompt = if (routing) tokenId?.let { RoutingTokenRepo.promptOf(it) } else null
+        val forcedModel = if (routing) null else tokenId?.let { ProxyTokenRepo.defaultModelOf(it) }
 
         // Free paths (token counting, model listing) never consume quota: any account, no limits.
         // They still get the *whole* try-list rather than a single pick — Claude Code counts
@@ -99,7 +102,7 @@ class DatapathService(private val pool: AccountPool) {
         // when the pool has others that would answer.
         if (isFreePath(path)) {
             val order = pool.selectAnyOrder(userId, allowedGroups, personalFirst, allowGlobal)
-            return ResolveResult(userId, tokenId, null, false, null, null, order.map { it.toCandidate() }, sysPrompt, free = true)
+            return ResolveResult(userId, tokenId, null, false, null, null, order.map { it.toCandidate() }, sysPrompt, forcedModel, free = true)
         }
 
         // Per-user daily USD limit is a shared-pool constraint; personal accounts are exempt.
@@ -111,7 +114,7 @@ class DatapathService(private val pool: AccountPool) {
         // An empty plan becomes a 503 at the gateway and records no usage at all — without this
         // line the failure leaves no trace anywhere, neither in the log nor in the stats.
         if (order.isEmpty() && !overLimit) logNoCandidate(userId, source)
-        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() }, sysPrompt)
+        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() }, sysPrompt, forcedModel)
     }
 
     /** Why the pool had nothing to offer, per account in the user's reach. */

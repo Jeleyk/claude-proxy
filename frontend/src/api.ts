@@ -136,6 +136,8 @@ export interface ProxyTokenDto {
   systemPrompt?: string | null;
   // off = the token stops authenticating (clients get 401) without being deleted
   enabled: boolean;
+  // proxy tokens only: model that replaces whatever the client asks for ("[1m]" = 1M context)
+  defaultModel?: string | null;
 }
 
 export interface RoleDto {
@@ -240,6 +242,9 @@ export const api = {
   // Disable/enable a token without revoking it; returns the refreshed list.
   setTokenEnabled: (id: number, enabled: boolean) =>
     req<ProxyTokenDto[]>('PATCH', `/api/proxy-tokens/${id}/enabled`, { enabled }),
+  // Set (non-blank) or clear (null) the model forced onto every request of a proxy token.
+  updateTokenModel: (id: number, defaultModel: string | null) =>
+    req<ProxyTokenDto[]>('PATCH', `/api/proxy-tokens/${id}`, { defaultModel }),
 
   // Routing tokens (cxr_...) for the OpenAI/Anthropic API gateways. Same shape as proxy tokens.
   routingTokens: () => req<ProxyTokenDto[]>('GET', '/api/routing-tokens'),

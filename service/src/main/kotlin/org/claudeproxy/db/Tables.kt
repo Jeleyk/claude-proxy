@@ -71,6 +71,9 @@ object ProxyTokens : Table("proxy_tokens") {
     val name = varchar("name", 128)
     // off = the token stops authenticating (resolves like an unknown token) without being revoked.
     val enabled = bool("enabled").default(true)
+    // optional model forced onto every request made with this token, whatever the client asked
+    // for. Claude Code's own notation: a `[1m]` suffix also turns on the 1M-context beta.
+    val defaultModel = varchar("default_model", 128).nullable()
     val createdAt = timestamp("created_at")
     val lastUsedAt = timestamp("last_used_at").nullable()
     override val primaryKey = PrimaryKey(id)

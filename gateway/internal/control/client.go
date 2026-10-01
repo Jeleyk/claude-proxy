@@ -35,6 +35,9 @@ type ResolveResp struct {
 	Candidates    []Candidate `json:"candidates"`
 	// Routing only: the token's static system prompt, to inject ahead of client system content.
 	SystemPrompt *string `json:"systemPrompt"`
+	// Proxy only: the model the token forces onto every request, in Claude Code's notation
+	// (a trailing "[1m]" asks for the 1M-context beta). Empty = the client's own choice.
+	DefaultModel string `json:"defaultModel"`
 	// Free marks a path that consumes no subscription quota (token counting, model listing).
 	// Echoed back on the usage report so the service can keep zero-token successes out of stats.
 	Free bool `json:"free"`

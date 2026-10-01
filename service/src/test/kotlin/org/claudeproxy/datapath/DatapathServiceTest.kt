@@ -16,6 +16,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** Behavioral, DB-backed tests for [DatapathService] against throwaway SQLite. */
@@ -60,6 +61,31 @@ class DatapathServiceTest {
     @AfterTest
     fun teardown() {
         dbFile.delete()
+    }
+
+    @Test
+    fun `resolve carries the token's forced model, and an edit applies at once`() = runBlocking {
+        val svc = DatapathService(pool)
+        val id = ProxyTokenRepo.listForUser(adminId).single().id
+        assertEquals(null, svc.resolve(seededToken, "POST", "/v1/messages").defaultModel)
+
+        assertTrue(ProxyTokenRepo.updateDefaultModel(id, adminId, "  claude-opus-5-5[1m] "))
+        assertEquals("claude-opus-5-5[1m]", svc.resolve(seededToken, "POST", "/v1/messages").defaultModel)
+        // count_tokens must be counted against the model that will actually answer
+        assertEquals("claude-opus-5-5[1m]", svc.resolve(seededToken, "POST", "/v1/messages/count_tokens").defaultModel)
+        assertEquals("claude-opus-5-5[1m]", ProxyTokenRepo.listForUser(adminId).single().defaultModel)
+
+        assertFalse(ProxyTokenRepo.updateDefaultModel(id, adminId + 1, "x"), "someone else's token")
+        assertTrue(ProxyTokenRepo.updateDefaultModel(id, adminId, " "))
+        assertEquals(null, svc.resolve(seededToken, "POST", "/v1/messages").defaultModel)
+    }
+
+    @Test
+    fun `a forced model id must be a single word`() {
+        assertEquals(null, ProxyTokenRepo.normalizeModel(""))
+        assertEquals("claude-opus-5-5", ProxyTokenRepo.normalizeModel(" claude-opus-5-5 "))
+        assertTrue(runCatching { ProxyTokenRepo.normalizeModel("opus 5.5") }.isFailure)
+        assertTrue(runCatching { ProxyTokenRepo.normalizeModel("a".repeat(129)) }.isFailure)
     }
 
     @Test

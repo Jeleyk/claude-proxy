@@ -166,6 +166,8 @@ data class ProxyTokenDto(
     val systemPrompt: String? = null,
     // off = the token no longer authenticates, without being revoked
     val enabled: Boolean = true,
+    // model that replaces whatever the client asks for (proxy tokens only; null = client's choice)
+    val defaultModel: String? = null,
 )
 
 @Serializable

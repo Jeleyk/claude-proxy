@@ -79,6 +79,7 @@ object ProxyTokenRepo {
                 createdAt = row[ProxyTokens.createdAt].toString(),
                 lastUsedAt = row[ProxyTokens.lastUsedAt]?.toString(),
                 enabled = row[ProxyTokens.enabled],
+                defaultModel = row[ProxyTokens.defaultModel],
             )
         }
     }
@@ -101,6 +102,37 @@ object ProxyTokenRepo {
         return updated
     }
 
+    /**
+     * The token's forced model for the resolve hot path (cached 60s, "" = none). Evicted on
+     * [updateDefaultModel]/[delete], so an edit applies on the next request.
+     */
+    fun defaultModelOf(tokenId: Int): String? =
+        MemoryCache.getOrLoad("cp:tokmodel:$tokenId", 60) {
+            transaction {
+                ProxyTokens.selectAll().where { ProxyTokens.id eq tokenId }
+                    .firstOrNull()?.get(ProxyTokens.defaultModel) ?: ""
+            }
+        }?.takeIf { it.isNotEmpty() }
+
+    /** Set or clear (null/blank) the model forced onto the token's requests. Own tokens only. */
+    fun updateDefaultModel(id: Int, userId: Int, model: String?): Boolean {
+        val m = normalizeModel(model)
+        val updated = transaction {
+            ProxyTokens.update({ (ProxyTokens.id eq id) and (ProxyTokens.userId eq userId) }) {
+                it[defaultModel] = m
+            }
+        }
+        if (updated > 0) MemoryCache.evict("cp:tokmodel:$id")
+        return updated > 0
+    }
+
+    /** Blank clears; anything else is kept verbatim (trimmed) — new model ids need no release. */
+    internal fun normalizeModel(model: String?): String? {
+        val m = model?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        require(m.length <= 128 && m.none { it.isWhitespace() || it == '"' || it == '\\' }) { "bad model id" }
+        return m
+    }
+
     fun delete(id: Int, userId: Int): Boolean {
         val (deleted, hash) = transaction {
             val h = ProxyTokens.selectAll()
@@ -112,6 +144,7 @@ object ProxyTokenRepo {
         if (deleted && hash != null) {
             // A revoked token must stop working immediately, not after the 60s TTL.
             MemoryCache.evict("cp:tok:$hash")
+            MemoryCache.evict("cp:tokmodel:$id")
         }
         return deleted
     }

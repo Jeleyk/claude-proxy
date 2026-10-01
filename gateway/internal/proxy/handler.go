@@ -86,6 +86,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if resp.DefaultModel != "" {
+		body = overrideModel(body, r.Header, resp.DefaultModel)
+	}
+
 	// headSent survives across attempts: once a stream is open (because an attempt got a 200 and
 	// only then hit an overload), the next account keeps writing into that same response.
 	headSent := false

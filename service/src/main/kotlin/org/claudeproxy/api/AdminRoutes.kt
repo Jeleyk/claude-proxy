@@ -550,6 +550,19 @@ private fun Route.proxyTokenRoutes() {
         if (ok) call.respond(ProxyTokenRepo.listForUser(user.id))
         else call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
     }
+    // Set/clear the model forced onto every request made with the token (own tokens only).
+    patch("/proxy-tokens/{id}") {
+        val user = call.requirePermission(Permission.PROXY_USE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val req = call.receive<UpdateProxyTokenRequest>()
+        runCatching { ProxyTokenRepo.normalizeModel(req.defaultModel) }.onFailure {
+            return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("model id must be one word, up to 128 characters"))
+        }
+        val ok = ProxyTokenRepo.updateDefaultModel(id, user.id, req.defaultModel)
+        if (ok) call.respond(ProxyTokenRepo.listForUser(user.id))
+        else call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+    }
     delete("/proxy-tokens/{id}") {
         val user = call.requireUser()
         val id = call.parameters["id"]?.toIntOrNull()
