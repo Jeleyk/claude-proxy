@@ -60,3 +60,37 @@ func TestSSEParserTypeFromDataWhenNoEventLine(t *testing.T) {
 		t.Fatalf("type should fall back to data.type: %+v", events)
 	}
 }
+
+// A plan or a doc that quotes an SSE error frame arrives as a `text_delta`, where the newlines are
+// escaped — so `event: error` appears mid-line and must not arm the scanner. An unanchored
+// substring search saw it and killed healthy answers about error handling.
+func TestErrScanIgnoresAForgedErrorEventInModelText(t *testing.T) {
+	var e ErrScan
+	e.Feed([]byte("event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"The frame is event: error\ndata: {\"type\":\"error\"}"}}` + "\n\n"))
+	e.Feed([]byte("event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"and the type is overloaded_error, which we retry"}}` + "\n\n"))
+	if got := e.Retryable(); got != "" {
+		t.Errorf("Retryable = %q, want \"\" — model text cannot forge an error event", got)
+	}
+}
+
+// A real error frame still arms it, whatever the chunk boundaries.
+func TestErrScanDetectsARealFrameSplitAcrossChunks(t *testing.T) {
+	var e ErrScan
+	e.Feed([]byte("event: content_block_delta\ndata: {}\n\nevent: er"))
+	e.Feed([]byte("ror\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloa"))
+	e.Feed([]byte("ded_error\",\"message\":\"Overloaded\"}}\n\n"))
+	if got := e.Retryable(); got != "overloaded_error" {
+		t.Errorf("Retryable = %q, want overloaded_error", got)
+	}
+}
+
+// The very first bytes of a stream are a line start too.
+func TestErrScanDetectsAnErrorEventAtTheStreamStart(t *testing.T) {
+	var e ErrScan
+	e.Feed([]byte("event: error\n" + `data: {"type":"error","error":{"type":"rate_limit_error"}}` + "\n\n"))
+	if got := e.Retryable(); got != "rate_limit_error" {
+		t.Errorf("Retryable = %q, want rate_limit_error", got)
+	}
+}
