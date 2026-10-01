@@ -196,6 +196,9 @@ class UpstreamForwarder(
                 // the status we record for this attempt instead of the 200 we already sent.
                 var streamErrorStatus: Int? = null
                 val buf = ByteArray(16 * 1024)
+                // Everything written to the client goes through the framer, so a keep-alive comment
+                // can never land inside a half-delivered event (see SseFramer).
+                val framer = SseFramer()
                 // A client that disconnects mid-stream closes the write channel; that's normal,
                 // not an error. Swallow it and still record whatever usage we scanned.
                 try {
@@ -210,10 +213,14 @@ class UpstreamForwarder(
                             val ready = withTimeoutOrNull(15_000L) { src.awaitContent(1) }
                             when {
                                 ready == null -> {
-                                    // upstream silent (thinking) → keep the connection warm
-                                    writeStringUtf8(": keep-alive\n\n")
-                                    flush()
-                                    keepalives++
+                                    // upstream silent (thinking) → keep the connection warm, but
+                                    // never while an event is half delivered: the comment's blank
+                                    // line would cut that event short.
+                                    if (framer.pendingBytes == 0) {
+                                        writeStringUtf8(": keep-alive\n\n")
+                                        flush()
+                                        keepalives++
+                                    }
                                 }
                                 ready == false -> {} // channel closed; while-condition ends the loop
                                 else -> {
@@ -224,6 +231,10 @@ class UpstreamForwarder(
                                         errorScan.feed(buf, 0, n)
                                         val errType = errorScan.retryableType
                                         if (errType != null) {
+                                            // The fragment still buffered belongs to an event
+                                            // upstream abandoned; drop it so the normalized error
+                                            // frame opens a clean one.
+                                            framer.discard()
                                             // A limit/overload surfaced *inside* the stream, so the
                                             // 200 head is already out and we can't retry another
                                             // account transparently. Don't relay the raw error frame;
@@ -234,10 +245,13 @@ class UpstreamForwarder(
                                             streamErrorStatus = injectStreamError(this, errType, account, userId, allowedGroups)
                                             break
                                         }
-                                        writeFully(buf, 0, n)
-                                        relayed += n
-                                        chunks++
-                                        flush()
+                                        val out = framer.feed(buf, 0, n)
+                                        if (out.isNotEmpty()) {
+                                            writeFully(out, 0, out.size)
+                                            relayed += out.size
+                                            chunks++
+                                            flush()
+                                        }
                                     }
                                 }
                             }

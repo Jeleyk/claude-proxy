@@ -326,6 +326,10 @@ func (h *Handler) relayStream(
 	}()
 
 	var errs anthropic.ErrScan
+	// Hand the writer whole events only: the native passthrough translator copies its input
+	// straight to the client, so a keep-alive comment injected while half an event is out would
+	// terminate that event early and hand the client unparseable JSON (see anthropic.SSEFramer).
+	var framer anthropic.SSEFramer
 	wroteData := false
 	ticker := time.NewTicker(keepAliveInterval)
 	defer ticker.Stop()
@@ -338,12 +342,19 @@ func (h *Handler) relayStream(
 				// translating an upstream overload into a client-facing failure.
 				return sw.Usage(), true
 			}
-			sw.Feed(b)
+			out := framer.Feed(b)
+			if len(out) == 0 {
+				continue
+			}
+			sw.Feed(out)
 			wroteData = true
 			if fl != nil {
 				fl.Flush()
 			}
 		case <-ticker.C:
+			if framer.Pending() > 0 {
+				continue
+			}
 			_, _ = io.WriteString(w, ": keep-alive\n\n")
 			if fl != nil {
 				fl.Flush()

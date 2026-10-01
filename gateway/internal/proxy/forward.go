@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"claudeproxy/gateway/internal/anthropic"
 	"claudeproxy/gateway/internal/control"
@@ -86,7 +87,7 @@ func (h *Handler) forward(
 		req.ContentLength = int64(len(outBody))
 	}
 
-	resp, err := h.upstream.Do(req)
+	resp, headSent, err := h.doWithEarlyHead(w, req, streamRequested(outBody), headSent)
 	if err != nil {
 		if canRetry {
 			return forwardResult{retry: true, headSent: headSent, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Status: 0}}
@@ -135,6 +136,66 @@ func (h *Handler) forward(
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(buf)
 	return forwardResult{retry: false, headSent: false, report: report}
+}
+
+// doWithEarlyHead runs the upstream request, opening the client's stream *before* the answer when
+// the response head takes too long, and keeping it warm with keep-alive comments. It returns the
+// upstream response and whether the head is on the wire now.
+//
+// Without this the client sees zero bytes for the whole wait — Anthropic's own think time plus
+// every retried candidate ahead of this one — and whatever sits in front of the gateway times the
+// request out on that silence (Cloudflare: 524 at 120s). The comments are the same ones relaySSE
+// sends during silence: SSE consumers discard them, so an early head costs the client nothing and
+// still leaves the stream a blank slate another account can take over.
+func (h *Handler) doWithEarlyHead(
+	w http.ResponseWriter, req *http.Request, streaming, headSent bool,
+) (*http.Response, bool, error) {
+	// A non-streaming client is waiting on a JSON body — opening an event-stream for it would
+	// hand it a response it cannot parse, so those requests keep waiting in silence.
+	if headSent || !streaming || h.cfg.EarlyHeadTimeout <= 0 {
+		resp, err := h.upstream.Do(req)
+		return resp, headSent, err
+	}
+
+	type upstreamResult struct {
+		resp *http.Response
+		err  error
+	}
+	// Buffered so the request goroutine can always finish, even if we stopped reading.
+	done := make(chan upstreamResult, 1)
+	go func() {
+		resp, err := h.upstream.Do(req)
+		done <- upstreamResult{resp, err}
+	}()
+
+	fl, _ := w.(http.Flusher)
+	wait := time.NewTimer(h.cfg.EarlyHeadTimeout)
+	defer wait.Stop()
+	for {
+		select {
+		case res := <-done:
+			return res.resp, headSent, res.err
+		case <-wait.C:
+			if !headSent {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				headSent = true
+			}
+			_, _ = io.WriteString(w, ": keep-alive\n\n")
+			if fl != nil {
+				fl.Flush()
+			}
+			wait.Reset(keepAliveInterval)
+		}
+	}
+}
+
+// streamRequested reports whether the client asked for an SSE response.
+func streamRequested(body []byte) bool {
+	var obj struct {
+		Stream bool `json:"stream"`
+	}
+	return json.Unmarshal(body, &obj) == nil && obj.Stream
 }
 
 // failAfterHead reports a terminal failure to the client, picking the only form still available:

@@ -155,3 +155,65 @@ func TestRelaySSEWatchdogDisabledByZero(t *testing.T) {
 		t.Error("watchdog fired although it is disabled")
 	}
 }
+
+// The silence that broke production: the model streams a preamble, opens a `tool_use` block, and
+// then Anthropic sends nothing but pings while it buffers a 40 KB parameter value. Timing alone
+// cannot tell that apart from a dead stream, so the watchdog has to know about the open block —
+// otherwise every long Write dies at the watchdog mark and the client's retry repeats it.
+func TestRelaySSEWaitsOutABufferedToolInput(t *testing.T) {
+	ping := "event: ping\n" + `data: {"type": "ping"}` + "\n\n"
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("event: content_block_delta\n" +
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Writing the plan."}}` + "\n\n"))
+		_, _ = pw.Write([]byte("event: content_block_start\n" +
+			`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"Write","input":{}}}` + "\n\n"))
+		// Anthropic buffers the parameter: pings only, well past the plain watchdog budget.
+		for i := 0; i < 10; i++ {
+			time.Sleep(10 * time.Millisecond)
+			if _, err := pw.Write([]byte(ping)); err != nil {
+				return
+			}
+		}
+		_, _ = pw.Write([]byte("event: content_block_delta\n" +
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"content\":\"…\"}"}}` + "\n\n" +
+			"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":1}` + "\n\n" +
+			"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"))
+		_ = pw.Close()
+	}()
+	defer pw.Close()
+
+	rec := httptest.NewRecorder()
+	res := relaySSEInterval(rec, pr, 200, "text/event-stream", false, false,
+		func() (string, int) { return "", 0 }, 5*time.Millisecond, 50*time.Millisecond)
+
+	if res.status != 200 {
+		t.Errorf("status = %d, want 200 — a buffered tool input is not a stalled stream", res.status)
+	}
+	if !strings.Contains(rec.Body.String(), "message_stop") {
+		t.Errorf("the answer never reached the client: %q", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "stopped sending data") {
+		t.Error("watchdog killed a live tool-input stream")
+	}
+}
+
+// The grace is bounded: once the tool block closes, ordinary silence is a stall again.
+func TestRelaySSEStillFiresAfterTheToolBlockCloses(t *testing.T) {
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("event: content_block_start\n" +
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"Write","input":{}}}` + "\n\n" +
+			"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":0}` + "\n\n"))
+		select {}
+	}()
+	defer pw.Close()
+
+	rec := httptest.NewRecorder()
+	res := relaySSEInterval(rec, pr, 200, "text/event-stream", false, false,
+		func() (string, int) { return "", 0 }, 5*time.Millisecond, 30*time.Millisecond)
+
+	if res.status != stallStatus {
+		t.Errorf("status = %d, want %d", res.status, stallStatus)
+	}
+}

@@ -274,6 +274,39 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   capacity. `pingOnly` is what makes the watchdog work at all: measured on a stuck stream, Anthropic
   keeps sending exactly one 39-byte ping every 30s for minutes after the answer stops, so a byte
   counter never fires — pings are relayed but count as neither progress nor client-visible content.
+- **One silence is Anthropic's own doing, and the watchdog must not kill it.** Unless a tool opts
+  into eager input streaming, the API buffers and validates a tool parameter's *whole value* before
+  sending it, and current models emit one key-value pair at a time — so a `Write` whose `content` is
+  a 40 KB document opens its `content_block_start` and then sends nothing but pings for minutes.
+  Measured: 178s for a 42 KB plan, 191s for a 46 KB spec, 397s for a 109 KB file. At the plain 120s
+  budget that died *every time*, after the model's preamble text had already gone out (so no account
+  swap either), and the client's retry walked into the same wall — superpowers' `writing-plans`
+  reproduced it on demand, re-billing a cold cache write of the whole prompt on each attempt (1.1%
+  of all datapath requests, $14.82 in one day). `blockScan` tracks the open content block and grants
+  `toolInputStallFactor` (×4) while a tool input is being buffered; everything else keeps the tight
+  budget. Both numbers stay well inside Claude Code's own limits (byte watchdog 300s on a gateway
+  base URL, event watchdog ~600s with its synthetic pings).
+- **The relay writes whole SSE events, never half of one** (`anthropic.SSEFramer`, Kotlin
+  `SseFramer`). Upstream chunk boundaries are arbitrary — over HTTP/2 a read routinely ends inside a
+  `data:` line — and the relay injects bytes of its own (keep-alive comments, the stall frame, the
+  normalized mid-stream error). Injected mid-event, the blank line terminates that event early and
+  the client parses `…"text":"hel: keep-alive` → a JSON error, or worse, deltas for a
+  `content_block_start` it never saw, which is an unhandled `RangeError` in Claude Code's SSE
+  consumer. So the framer holds the trailing fragment until it completes, injection only happens at
+  `Pending() == 0`, and a fragment that can never complete is discarded before the terminating
+  frame. Nothing is delayed that the client could have used: an SSE reader buffers a partial event
+  the same way.
+- **The silence *before* the head counts too.** `ResponseHeaderTimeout` is deliberately 0 (Opus
+  can think 30s+ before its first byte), so a streaming request used to sit mute for Anthropic's
+  whole think time *plus* every retried candidate ahead of it — and whatever fronts the gateway
+  times the request out on that silence: behind Cloudflare it became a **524 at 120s** with a
+  `499 0` in the nginx log (~2% of datapath requests during a slow upstream spell).
+  `doWithEarlyHead` (`EARLY_HEAD_SECONDS`, default 45, 0 disables) opens the client's stream
+  itself once the wait passes that mark and keeps sending `: keep-alive` until upstream answers.
+  Only for requests that asked for `stream: true` — an event-stream head would be unparseable to a
+  client waiting on JSON. The early head costs nothing else: keep-alive comments are discarded by
+  SSE consumers, so `headSent` still leaves the stream a blank slate the next account can take
+  over, and a non-SSE answer after it closes out through the existing `failAfterHead` path.
 - **SSE relay is timing-sensitive.** `UpstreamForwarder` must flush the response head
   *immediately*, stream with `readAvailable` (not the buffering `readRemaining`), and inject
   `: keep-alive\n\n` SSE comments during upstream silence. Adaptive-thinking Opus on a 1M

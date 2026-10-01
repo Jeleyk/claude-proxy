@@ -22,6 +22,12 @@ type Config struct {
 	// Our keep-alive comments make a dead upstream look alive to the client, so without this a
 	// stream that stops mid-answer hangs until the *user* gives up minutes later.
 	UpstreamStallTimeout time.Duration
+	// EarlyHeadTimeout is how long a streaming request may wait for Anthropic's response head
+	// before we open the client's stream ourselves and start sending keep-alives
+	// (env EARLY_HEAD_SECONDS, 0 disables it). Until the head is out the client sees zero bytes,
+	// and anything in front of us counts that silence: Cloudflare cuts a request off at 120s
+	// with a 524, which is what a slow upstream (or a couple of retried candidates) reached.
+	EarlyHeadTimeout time.Duration
 }
 
 // Load reads the configuration from the environment, applying defaults.
@@ -32,6 +38,7 @@ func Load() *Config {
 		InternalToken:        os.Getenv("INTERNAL_TOKEN"),
 		UpstreamBaseURL:      envOr("UPSTREAM_BASE_URL", "https://api.anthropic.com"),
 		UpstreamStallTimeout: secondsOr("UPSTREAM_STALL_SECONDS", 120*time.Second),
+		EarlyHeadTimeout:     secondsOr("EARLY_HEAD_SECONDS", 45*time.Second),
 	}
 }
 

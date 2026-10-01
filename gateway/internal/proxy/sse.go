@@ -26,6 +26,32 @@ const stallFrame = "event: error\n" +
 // window reset because a stream went quiet would take a healthy account out of the pool for hours.
 const stallStatus = 504
 
+// toolInputStallFactor multiplies the watchdog budget while a tool input is being buffered
+// upstream. That silence is generated on purpose and scales with the parameter's size (see
+// blockScan); the longest legitimate one measured on real sessions is 397s for a 109 KB file.
+// 4× the 120s default clears that with room to spare and still lands *under* Claude Code's own
+// patience (~600s on a gateway base URL), so a genuinely dead tool block ends as a retryable error
+// the client can act on instead of its own "Response stalled mid-stream" over a half-written answer.
+//
+// Without this the watchdog was a self-inflicted outage: every `Write` of a document big enough to
+// take two minutes died at exactly 120s *after* the model's preamble text had already been
+// relayed — so no account swap was possible either — and the client's retry walked into the same
+// wall. Superpowers' writing-plans (42 KB in one Write, 178s) reproduced it every single time,
+// re-billing a cold cache write of the whole prompt on each attempt.
+const toolInputStallFactor = 4
+
+// fragmentGrace is how long a half-delivered event may sit before the relay writes it off. It has
+// to clear every legitimate mid-event pause: Anthropic pings roughly every 30s and a ping is a whole
+// frame, so any fragment older than the plain stall budget is one upstream abandoned. Past that the
+// relay drops it and resumes keep-alives rather than going byte-silent — silence would hand the
+// client's own byte watchdog an abort with no error to act on.
+func fragmentGrace(stallAfter, interval time.Duration) time.Duration {
+	if stallAfter > 0 {
+		return stallAfter
+	}
+	return 8 * interval
+}
+
 // pingOnly reports whether a chunk carries nothing but SSE comments and Anthropic ping frames —
 // upstream noise that says the socket is alive but the answer is not moving.
 func pingOnly(b []byte) bool {
@@ -93,6 +119,9 @@ func relaySSEInterval(
 
 	var scan streamScan
 	var errs anthropic.ErrScan
+	// Everything we write to the client goes through the framer, so a keep-alive comment or an
+	// error frame can never land inside a half-delivered event (see anthropic.SSEFramer).
+	var framer anthropic.SSEFramer
 	recorded := status
 	// Whether any upstream bytes reached the client. Keep-alive comments don't count: SSE
 	// consumers discard comment lines, so a stream that has only sent those is still a blank
@@ -153,6 +182,9 @@ func relaySSEInterval(
 				// normalized retryable error so it re-sends the whole request.
 				frame, rs := onMidStreamErr()
 				if frame != "" {
+					// Whatever fragment is still buffered belongs to an event upstream abandoned;
+					// it can never complete, so drop it and let the error frame open a clean one.
+					framer.Discard()
 					_, _ = io.WriteString(w, frame)
 					if fl != nil {
 						fl.Flush()
@@ -161,12 +193,14 @@ func relaySSEInterval(
 				recorded = rs
 				return sseResult{usage: scan.Usage(), mcp: scan.mcp.calls, status: recorded}
 			}
-			_, _ = w.Write(b)
-			if !pingOnly(b) {
-				wroteData = true
-			}
-			if fl != nil {
-				fl.Flush()
+			if out := framer.Feed(b); len(out) > 0 {
+				_, _ = w.Write(out)
+				if !pingOnly(out) {
+					wroteData = true
+				}
+				if fl != nil {
+					fl.Flush()
+				}
 			}
 		case <-ticker.C:
 			// Upstream silent past the watchdog: the stream is dead, not thinking. Left alone it
@@ -174,19 +208,34 @@ func relaySSEInterval(
 			// stream mid-answer often enough (a cold cache write of a very large prompt is where
 			// we see it) that "wait forever" is the wrong default. Same decision as an in-stream
 			// error: swap accounts while the client has seen nothing, otherwise end it honestly.
-			if stallAfter > 0 && time.Since(lastUpstream) >= stallAfter {
+			limit := stallAfter
+			if scan.InToolInput() {
+				limit *= toolInputStallFactor
+			}
+			if limit > 0 && time.Since(lastUpstream) >= limit {
 				if !wroteData && canRetry {
-					log.Printf("upstream silent for %s before any content — trying the next account", stallAfter)
+					log.Printf("upstream silent for %s before any content — trying the next account", limit)
 					return sseResult{usage: scan.Usage(), mcp: scan.mcp.calls, status: recorded, retry: true}
 				}
-				log.Printf("upstream silent for %s mid-answer — ending the stream with a retryable error", stallAfter)
+				log.Printf("upstream silent for %s mid-answer (tool input open: %v) — ending the stream with a retryable error", limit, scan.InToolInput())
+				framer.Discard()
 				_, _ = io.WriteString(w, stallFrame)
 				if fl != nil {
 					fl.Flush()
 				}
 				return sseResult{usage: scan.Usage(), mcp: scan.mcp.calls, status: stallStatus}
 			}
-			// Upstream silent (thinking) → keep the connection warm.
+			// Upstream silent (thinking) → keep the connection warm. Not while an event is half
+			// delivered, though: the comment's blank line would cut that event short. A fragment
+			// that has sat there for a whole keep-alive period is not arriving — upstream would
+			// have finished the event long ago — so drop it rather than go byte-silent and let the
+			// client's own byte watchdog end the request with no error to act on.
+			if framer.Pending() > 0 {
+				if time.Since(lastUpstream) < fragmentGrace(stallAfter, interval) {
+					continue
+				}
+				framer.Discard()
+			}
 			_, _ = io.WriteString(w, ": keep-alive\n\n")
 			if fl != nil {
 				fl.Flush()

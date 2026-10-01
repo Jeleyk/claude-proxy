@@ -17,6 +17,7 @@ type streamScan struct {
 	parser anthropic.SSEParser
 	usage  anthropic.Usage
 	mcp    mcpScan
+	blocks blockScan
 }
 
 // Feed scans another chunk of the stream. Chunk boundaries are handled by the parser, which
@@ -25,8 +26,13 @@ func (s *streamScan) Feed(b []byte) {
 	for _, ev := range s.parser.Feed(b) {
 		s.usage.Consume(ev)
 		s.mcp.Consume(ev)
+		s.blocks.Consume(ev)
 	}
 }
+
+// InToolInput reports whether a tool-input content block is open, i.e. whether upstream silence is
+// the expected kind (Anthropic buffering a parameter value) rather than an abandoned stream.
+func (s *streamScan) InToolInput() bool { return s.blocks.openToolInput }
 
 // Usage returns the scanned usage, normalized so the service can price it without re-checking.
 func (s *streamScan) Usage() anthropic.Usage {
