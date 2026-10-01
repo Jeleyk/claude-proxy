@@ -11,6 +11,7 @@ import io.ktor.server.routing.route
 import kotlinx.serialization.Serializable
 import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.datapath.ActiveSessions
+import org.claudeproxy.datapath.DatapathService
 import org.claudeproxy.model.Permission
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.SettingsRepo
@@ -87,7 +88,7 @@ class ProxyEngine(
 
         // Requests that don't consume subscription quota (token counting, model listing)
         // should always work if any account exists — no limit checks, ignore rate-limit.
-        if (isFreePath(pathAndQuery)) {
+        if (DatapathService.isFreePath(pathAndQuery)) {
             val account = pool.selectAny(userId, allowedGroups, personalFirst, allowGlobal)
             if (account == null) { respondNoAccount(call, userId, allowedGroups); return }
             forwarder.forward(call, account, pathAndQuery, bodyBytes, userId, tokenId, canRetry = false, allowedGroups = allowedGroups)
@@ -129,11 +130,6 @@ class ProxyEngine(
         }
     }
 
-    /** Paths that don't consume subscription usage. */
-    private fun isFreePath(pathAndQuery: String): Boolean {
-        val p = pathAndQuery.substringBefore('?')
-        return p.contains("count_tokens") || p.endsWith("/v1/models") || p.contains("/v1/models/")
-    }
 
     /** No usable account at all (none enabled/healthy in scope, or all hard rate-limited). */
     private suspend fun respondNoAccount(call: ApplicationCall, userId: Int, allowedGroups: Set<Int>?) {

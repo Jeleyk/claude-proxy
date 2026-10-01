@@ -52,10 +52,12 @@ object ShareImport {
         val host = url.host?.lowercase()?.removePrefix("www.") ?: throw ImportError("Not a valid link.")
         if (url.scheme !in setOf("http", "https")) throw ImportError("Only http(s) links can be imported.")
 
+        // Known share hosts only. The fetch runs from inside the server's network, so an arbitrary
+        // host turned the import box into a GET against localhost and the compose network.
         val candidates = when {
-            host.endsWith("chatgpt.com") || host.endsWith("openai.com") -> chatGptCandidates(input)
-            host.endsWith("claude.ai") -> claudeCandidates(input)
-            else -> listOf(input)
+            isHost(host, "chatgpt.com") || isHost(host, "openai.com") -> chatGptCandidates(input)
+            isHost(host, "claude.ai") -> claudeCandidates(input)
+            else -> throw ImportError("Only chatgpt.com and claude.ai share links can be imported.")
         }
         for (candidate in candidates) {
             val body = runCatching { get(candidate) }.getOrNull() ?: continue
@@ -72,6 +74,9 @@ object ShareImport {
                 "you can also paste the exported JSON directly.",
         )
     }
+
+    /** [host] is [domain] or a subdomain of it — a bare suffix match would also take `evilclaude.ai`. */
+    internal fun isHost(host: String, domain: String): Boolean = host == domain || host.endsWith(".$domain")
 
     /** Share id → the JSON endpoints and the page itself, most reliable first. */
     internal fun chatGptCandidates(url: String): List<String> {

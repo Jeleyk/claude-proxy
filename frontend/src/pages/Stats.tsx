@@ -107,7 +107,7 @@ export function Stats({ user }: { user: UserDto }) {
     <div className="main-inner">
       <div className="section-head" style={{ marginTop: 0 }}>
         <div><h1>Statistics</h1><p className="sub" style={{ margin: 0 }}>Usage across the account pool.</p></div>
-        {canStats && <button className="ghost" onClick={async () => { if (confirm('Reset usage statistics for ALL users?')) { await api.resetAllStats(); load(); } }}>Reset all stats</button>}
+        {has(user, 'ADMIN') && <button className="ghost" onClick={async () => { if (confirm('Reset usage statistics for ALL users?')) { await api.resetAllStats(); load(); } }}>Reset all stats</button>}
       </div>
 
       {/* first load only — the 10s poll must never flip live numbers back to placeholders */}

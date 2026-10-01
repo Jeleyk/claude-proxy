@@ -240,9 +240,18 @@ class DatapathService(private val pool: AccountPool) {
         return null
     }
 
-    /** Paths that don't consume subscription usage (mirrors `ProxyRoutes.isFreePath`). */
-    private fun isFreePath(pathAndQuery: String): Boolean {
-        val p = pathAndQuery.substringBefore('?')
-        return p.contains("count_tokens") || p.endsWith("/v1/models") || p.contains("/v1/models/")
+    companion object {
+        private val freePathRe = Regex("""/v1/(messages/count_tokens|models(/[^/]+)?)/?""")
+
+        /**
+         * Paths that don't consume subscription usage: token counting and model listing, matched as
+         * the *whole* path (every datapath hands the resolve a bare `/v1/…`). A substring match let any path that merely mentioned
+         * `count_tokens` — `/v1/chat/completions/count_tokens` on the OpenAI gateway, say — skip
+         * the daily limit while the translator still ran a full generation.
+         */
+        internal fun isFreePath(pathAndQuery: String): Boolean {
+            val p = pathAndQuery.substringBefore('?')
+            return freePathRe.matches(p)
+        }
     }
 }

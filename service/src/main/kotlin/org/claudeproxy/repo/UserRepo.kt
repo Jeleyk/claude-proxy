@@ -1,6 +1,7 @@
 package org.claudeproxy.repo
 
 import org.claudeproxy.auth.Passwords
+import org.claudeproxy.cache.MemoryCache
 import org.claudeproxy.db.RolePermissions
 import org.claudeproxy.db.Roles
 import org.claudeproxy.db.UserGroupAccess
@@ -188,35 +189,53 @@ object UserRepo {
         dailyCostLimit: Double?, clearDailyLimit: Boolean,
         dailyRoutingCostLimit: Double? = null, clearRoutingLimit: Boolean = false,
         dailyChatCostLimit: Double? = null, clearChatLimit: Boolean = false,
-    ) = transaction {
-        Users.update({ Users.id eq userId }) {
-            if (password != null) it[passwordHash] = Passwords.hash(password)
-            if (enabled != null) it[Users.enabled] = enabled
-            if (clearDailyLimit) it[Users.dailyCostLimit] = null else if (dailyCostLimit != null) it[Users.dailyCostLimit] = dailyCostLimit
-            if (clearRoutingLimit) it[Users.dailyRoutingCostLimit] = null else if (dailyRoutingCostLimit != null) it[Users.dailyRoutingCostLimit] = dailyRoutingCostLimit
-            if (clearChatLimit) it[Users.dailyChatCostLimit] = null else if (dailyChatCostLimit != null) it[Users.dailyChatCostLimit] = dailyChatCostLimit
+    ) {
+        transaction {
+            Users.update({ Users.id eq userId }) {
+                if (password != null) it[passwordHash] = Passwords.hash(password)
+                if (enabled != null) it[Users.enabled] = enabled
+                if (clearDailyLimit) it[Users.dailyCostLimit] = null else if (dailyCostLimit != null) it[Users.dailyCostLimit] = dailyCostLimit
+                if (clearRoutingLimit) it[Users.dailyRoutingCostLimit] = null else if (dailyRoutingCostLimit != null) it[Users.dailyRoutingCostLimit] = dailyRoutingCostLimit
+                if (clearChatLimit) it[Users.dailyChatCostLimit] = null else if (dailyChatCostLimit != null) it[Users.dailyChatCostLimit] = dailyChatCostLimit
+            }
+            if (roleNames != null) setRoles(userId, roleNames)
+            if (groupIds != null) setAllowedGroups(userId, groupIds)
         }
-        if (roleNames != null) setRoles(userId, roleNames)
-        if (groupIds != null) setAllowedGroups(userId, groupIds)
+        // Token resolves are cached for 60s; a disable has to bite on the very next request.
+        // Evicted after the commit, or a concurrent resolve could re-cache the old state.
+        if (enabled == false) tokenCacheKeys(userId).forEach(MemoryCache::evict)
     }
 
-    fun delete(userId: Int) = transaction {
-        // clear rows that reference the user (Postgres enforces these FKs)
-        org.claudeproxy.db.ProxyTokens.deleteWhere { org.claudeproxy.db.ProxyTokens.userId eq userId }
-        org.claudeproxy.db.RoutingTokens.deleteWhere { org.claudeproxy.db.RoutingTokens.userId eq userId }
-        org.claudeproxy.db.UsageEvents.update({ org.claudeproxy.db.UsageEvents.userId eq userId }) {
-            it[org.claudeproxy.db.UsageEvents.userId] = null
+    /** Resolve-cache keys of every token this user owns, both namespaces. */
+    private fun tokenCacheKeys(userId: Int): List<String> = transaction {
+        org.claudeproxy.db.ProxyTokens.selectAll().where { org.claudeproxy.db.ProxyTokens.userId eq userId }
+            .map { "cp:tok:${it[org.claudeproxy.db.ProxyTokens.tokenHash]}" } +
+            org.claudeproxy.db.RoutingTokens.selectAll().where { org.claudeproxy.db.RoutingTokens.userId eq userId }
+                .map { "cp:rtok:${it[org.claudeproxy.db.RoutingTokens.tokenHash]}" }
+    }
+
+    fun delete(userId: Int) {
+        val cacheKeys = tokenCacheKeys(userId)
+        transaction {
+            // clear rows that reference the user (Postgres enforces these FKs)
+            org.claudeproxy.db.ProxyTokens.deleteWhere { org.claudeproxy.db.ProxyTokens.userId eq userId }
+            org.claudeproxy.db.RoutingTokens.deleteWhere { org.claudeproxy.db.RoutingTokens.userId eq userId }
+            org.claudeproxy.db.UsageEvents.update({ org.claudeproxy.db.UsageEvents.userId eq userId }) {
+                it[org.claudeproxy.db.UsageEvents.userId] = null
+            }
+            McpUsageRepo.detachUser(userId)
+            // delete this user's personal accounts (their secrets/limits/usage cascade off Accounts)
+            org.claudeproxy.db.Accounts.deleteWhere { org.claudeproxy.db.Accounts.ownerId eq userId }
+            // detach global accounts this user created so the users row can be removed (Postgres FK)
+            org.claudeproxy.db.Accounts.update({ org.claudeproxy.db.Accounts.createdBy eq userId }) {
+                it[org.claudeproxy.db.Accounts.createdBy] = null
+            }
+            UserGroupAccess.deleteWhere { UserGroupAccess.userId eq userId }
+            UserRoles.deleteWhere { UserRoles.userId eq userId }
+            Users.deleteWhere { Users.id eq userId }
         }
-        McpUsageRepo.detachUser(userId)
-        // delete this user's personal accounts (their secrets/limits/usage cascade off Accounts)
-        org.claudeproxy.db.Accounts.deleteWhere { org.claudeproxy.db.Accounts.ownerId eq userId }
-        // detach global accounts this user created so the users row can be removed (Postgres FK)
-        org.claudeproxy.db.Accounts.update({ org.claudeproxy.db.Accounts.createdBy eq userId }) {
-            it[org.claudeproxy.db.Accounts.createdBy] = null
-        }
-        UserGroupAccess.deleteWhere { UserGroupAccess.userId eq userId }
-        UserRoles.deleteWhere { UserRoles.userId eq userId }
-        Users.deleteWhere { Users.id eq userId }
+        // a deleted user's tokens are gone from the DB; their cached resolves must go too
+        cacheKeys.forEach(MemoryCache::evict)
     }
 
     private fun setRoles(userId: Int, roleNames: List<String>) {

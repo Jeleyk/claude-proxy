@@ -102,7 +102,9 @@ func (t *Translator) HandleLocal(w http.ResponseWriter, method, path string) boo
 
 // Prepare parses the OpenAI request and builds the Anthropic Messages upstream request.
 func (t *Translator) Prepare(w http.ResponseWriter, method, path, requestURI string, body []byte) (routing.Prepared, bool) {
-	if !strings.HasPrefix(path, "/v1/chat/completions") {
+	// Exact match, not a prefix: the service decides "free path, no daily limit" from the URL, so
+	// `/v1/chat/completions/count_tokens` must not reach a generation here.
+	if strings.TrimSuffix(path, "/") != "/v1/chat/completions" {
 		t.WriteError(w, http.StatusNotFound, "invalid_request_error", "Unsupported endpoint: "+path)
 		return routing.Prepared{}, false
 	}

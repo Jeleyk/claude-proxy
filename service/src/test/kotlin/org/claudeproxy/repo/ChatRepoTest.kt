@@ -218,4 +218,21 @@ class ChatRepoTest {
         assertEquals("Backend dev", saved.aboutYou)
         assertNull(saved.responseStyle, "a blank half is cleared, not stored as whitespace")
     }
+
+    @Test
+    fun `a message only adopts its owner's own unattached uploads`() {
+        val bobsFile = ChatMemoryRepo.addAttachment(bob, "secret.txt", "text/plain", "text", "bob".toByteArray())
+        val alicesFile = ChatMemoryRepo.addAttachment(alice, "mine.txt", "text/plain", "text", "alice".toByteArray())
+        val chat = ChatRepo.create(alice, "Grab", "claude-sonnet-5")
+        ChatRepo.addMessage(chat.id, "user", "look", attachmentIds = listOf(bobsFile.id, alicesFile.id))
+        assertEquals(listOf(alicesFile.id), ChatRepo.get(alice, chat.id)!!.messages.single().attachments.map { it.id })
+
+        // Already bound to a message: a second message can't take it over either.
+        ChatRepo.addMessage(chat.id, "user", "again", attachmentIds = listOf(alicesFile.id))
+        assertTrue(ChatRepo.get(alice, chat.id)!!.messages.last().attachments.isEmpty())
+
+        // And deleting Alice's chat leaves Bob's file where it was.
+        assertTrue(ChatRepo.delete(alice, chat.id))
+        assertEquals(1, ChatMemoryRepo.blobsOf(bob, listOf(bobsFile.id)).size)
+    }
 }

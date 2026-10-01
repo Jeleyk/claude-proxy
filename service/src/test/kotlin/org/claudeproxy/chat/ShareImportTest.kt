@@ -3,6 +3,8 @@ package org.claudeproxy.chat
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -96,5 +98,15 @@ class ShareImportTest {
 
         val claude = ShareImport.claudeCandidates("https://claude.ai/share/9f2/")
         assertEquals("https://claude.ai/api/chat_snapshots/9f2", claude.first())
+    }
+
+    @Test
+    fun `only the known share hosts are fetched`() {
+        assertTrue(ShareImport.isHost("claude.ai", "claude.ai"))
+        assertTrue(ShareImport.isHost("chat.openai.com", "openai.com"))
+        assertFalse(ShareImport.isHost("evilclaude.ai", "claude.ai"))
+        for (url in listOf("http://127.0.0.1:8787/internal/resolve", "http://service:8787/", "https://claude.ai.evil.com/share/x")) {
+            assertFailsWith<ShareImport.ImportError> { kotlinx.coroutines.runBlocking { ShareImport.fetch(url) } }
+        }
     }
 }

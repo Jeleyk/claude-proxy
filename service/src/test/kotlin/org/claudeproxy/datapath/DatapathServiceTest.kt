@@ -266,4 +266,15 @@ class DatapathServiceTest {
         assertTrue(personalId in ids)
         assertTrue(ids.size > 1) // personal + the global "acc1"
     }
+
+    @Test
+    fun `only the real counting and listing endpoints are free`() {
+        listOf("/v1/messages/count_tokens?beta=true", "/v1/models", "/v1/models/claude-opus-5-5").forEach {
+            assertTrue(DatapathService.isFreePath(it), it)
+        }
+        listOf(
+            "/v1/messages", "/v1/chat/completions/count_tokens", "/v1/messages?count_tokens",
+            "/v1/messages/count_tokens/x", "/v1/models/a/b",
+        ).forEach { assertFalse(DatapathService.isFreePath(it), it) }
+    }
 }

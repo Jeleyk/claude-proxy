@@ -48,12 +48,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeProxyError(w, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
-		return
-	}
-
 	pathAndQuery := r.URL.RequestURI()
 	resp, status, err := h.ctrl.Resolve(r.Context(), token, r.Method, pathAndQuery)
 	if err != nil {
@@ -75,6 +69,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// The resolve opened an "active now" entry for this request; close it however we leave.
 	defer h.ctrl.EndSession(resp.SessionID)
+
+	// The body is read only once the token is known good. Read first, an unauthenticated client
+	// could make the gateway buffer up to the router's body cap per connection for free.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeProxyError(w, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		return
+	}
 
 	if len(resp.Candidates) == 0 {
 		if resp.OverLimit {

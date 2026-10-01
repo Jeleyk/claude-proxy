@@ -29,3 +29,21 @@ func TestModelsListAndLookup(t *testing.T) {
 		t.Fatalf("unknown model must 404, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// The service reads "free path" off the URL, so a suffix like /count_tokens must never reach a
+// generation through this translator.
+func TestPrepareOnlyServesTheExactCompletionsPath(t *testing.T) {
+	tr := New()
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	for _, p := range []string{"/v1/chat/completions", "/v1/chat/completions/"} {
+		if _, ok := tr.Prepare(httptest.NewRecorder(), "POST", p, p, body); !ok {
+			t.Errorf("%s should be served", p)
+		}
+	}
+	for _, p := range []string{"/v1/chat/completions/count_tokens", "/v1/chat/completionsx"} {
+		rr := httptest.NewRecorder()
+		if _, ok := tr.Prepare(rr, "POST", p, p, body); ok || rr.Code != 404 {
+			t.Errorf("%s should be a 404, got ok=%v code=%d", p, ok, rr.Code)
+		}
+	}
+}

@@ -103,4 +103,21 @@ class ProxyTokenCacheTest {
         assertNull(parseTokenAuth(null))
         assertNull(parseTokenAuth("garbage"))
     }
+
+    @Test
+    fun `disabling the owner revokes both token kinds at once, cache or not`() {
+        val bob = UserRepo.create("bob", "pw", emptyList(), emptyList(), null)
+        val proxy = ProxyTokenRepo.create(bob, "p")
+        val routing = RoutingTokenRepo.create(bob, "r")
+        // Cached first: the disable has to evict, not wait out the 60s TTL.
+        assertEquals(TokenAuth(bob, proxy.id), ProxyTokenRepo.resolveAuth(proxy.token!!))
+        assertEquals(TokenAuth(bob, routing.id), RoutingTokenRepo.resolveAuth(routing.token!!))
+
+        UserRepo.update(bob, null, false, null, null, null, false)
+        assertNull(ProxyTokenRepo.resolveAuth(proxy.token!!))
+        assertNull(RoutingTokenRepo.resolveAuth(routing.token!!))
+
+        UserRepo.update(bob, null, true, null, null, null, false)
+        assertEquals(TokenAuth(bob, proxy.id), ProxyTokenRepo.resolveAuth(proxy.token!!))
+    }
 }

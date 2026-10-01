@@ -13,6 +13,7 @@ import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.isNull
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
@@ -240,7 +241,14 @@ object ChatRepo {
             it[createdAt] = now
         }[ChatMessages.id]
         if (attachmentIds.isNotEmpty()) {
-            ChatAttachments.update({ ChatAttachments.id inList attachmentIds }) { it[messageId] = id }
+            // Only the chat owner's own staged (still unattached) uploads. The ids come straight
+            // from the request body: binding by id alone let anyone adopt another user's file
+            // into their message — and then take it with them by deleting their own chat.
+            val owner = Chats.selectAll().where { Chats.id eq chatId }.single()[Chats.userId]
+            ChatAttachments.update({
+                (ChatAttachments.id inList attachmentIds) and (ChatAttachments.userId eq owner) and
+                    ChatAttachments.messageId.isNull()
+            }) { it[messageId] = id }
         }
         Chats.update({ Chats.id eq chatId }) { it[updatedAt] = now }
         id

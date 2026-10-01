@@ -408,9 +408,9 @@ class ChatEngine(
      * and a silent failure here would open an empty one that has quietly lost the thread.
      */
     suspend fun continueInNewChat(user: UserAuth, chatId: Int): Int? {
+        val source = ChatRepo.meta(user.id, chatId) ?: return null
         val messages = ChatRepo.messagesOf(chatId).filter { it.content.isNotBlank() }
         if (messages.isEmpty()) return null
-        val source = ChatRepo.meta(user.id, chatId) ?: return null
 
         // Bound what goes upstream: a very long chat would otherwise blow past the context window
         // (and cost accordingly). The tail is the part a handover actually needs.
@@ -495,7 +495,13 @@ class ChatEngine(
         val perms = user.permissions
         val allowedGroups: Set<Int>? = if (Permission.ADMIN in perms) null else UserRepo.allowedGroupsOf(user.id)
         val allowGlobal = Permission.ADMIN in perms || Permission.POOL_GLOBAL_USE in perms
-        val order = pool.selectionOrder(user.id, allowedGroups, !UserRepo.preferGlobalPoolOf(user.id), allowGlobal)
+        // Same daily chat limit as a turn: compaction (`/continue`) is a full model call over the
+        // transcript, and the chores are billed as chat too. Over the limit only the user's own
+        // accounts remain — none means no call at all.
+        val limit = UserRepo.dailyChatLimitOf(user.id)
+        val overLimit = limit != null && datapath.cachedDailySpend(user.id, "chat") >= limit
+        val order = if (overLimit) pool.selectionOrderOwned(user.id)
+        else pool.selectionOrder(user.id, allowedGroups, !UserRepo.preferGlobalPoolOf(user.id), allowGlobal)
         val bytes = body.toString().toByteArray()
         for (account in order.take(2)) {
             val result = Http.client.prepareRequest("$upstreamBaseUrl/v1/messages") {

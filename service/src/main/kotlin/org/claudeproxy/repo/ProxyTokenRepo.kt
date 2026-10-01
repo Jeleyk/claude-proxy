@@ -3,6 +3,7 @@ package org.claudeproxy.repo
 import org.claudeproxy.cache.MemoryCache
 import org.claudeproxy.db.Crypto
 import org.claudeproxy.db.ProxyTokens
+import org.claudeproxy.db.Users
 import org.claudeproxy.model.ProxyTokenDto
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.and
@@ -26,6 +27,13 @@ internal fun parseTokenAuth(cached: String?): TokenAuth? {
     return TokenAuth(userId, cached.substringAfter(':', "").toIntOrNull())
 }
 
+/**
+ * A token is only as live as its owner: disabling a user has to cut off the datapaths too, not
+ * just the UI session. Called inside the token lookup's own transaction.
+ */
+internal fun ownerEnabled(userId: Int): Boolean =
+    !Users.selectAll().where { (Users.id eq userId) and (Users.enabled eq true) }.empty()
+
 object ProxyTokenRepo {
 
     /**
@@ -47,6 +55,7 @@ object ProxyTokenRepo {
         val row = ProxyTokens.selectAll()
             .where { (ProxyTokens.tokenHash eq hash) and (ProxyTokens.enabled eq true) }
             .firstOrNull() ?: return@transaction null
+        if (!ownerEnabled(row[ProxyTokens.userId])) return@transaction null
         ProxyTokens.update({ ProxyTokens.tokenHash eq hash }) { it[lastUsedAt] = Instant.now() }
         "${row[ProxyTokens.userId]}:${row[ProxyTokens.id]}"
     }

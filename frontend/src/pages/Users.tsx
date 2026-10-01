@@ -31,7 +31,7 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
       <div className="section-head" style={{ marginTop: 0 }}>
         <div><h1>Users &amp; Roles</h1><p className="sub" style={{ margin: 0 }}>Access, permissions, group scope, and daily spend limits.</p></div>
         <div className="row">
-          <button className="ghost" onClick={async () => { if (confirm('Reset usage statistics for ALL users? This cannot be undone.')) { const r = await api.resetAllStats(); alert(r.message); load(); } }}>Reset all stats</button>
+          {isAdmin && <button className="ghost" onClick={async () => { if (confirm('Reset usage statistics for ALL users? This cannot be undone.')) { const r = await api.resetAllStats(); alert(r.message); load(); } }}>Reset all stats</button>}
           <button onClick={() => setEditing('new')}>+ New user</button>
         </div>
       </div>

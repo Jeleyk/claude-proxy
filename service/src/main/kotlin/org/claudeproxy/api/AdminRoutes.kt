@@ -1127,7 +1127,8 @@ private fun Route.statsRoutes(pool: AccountPool) {
         call.respond(buildTokens(days, endDate, user.canAccounts(), zone))
     }
     post("/stats/reset") {
-        call.requirePermission(Permission.STATS_VIEW)
+        // Wipes every user's history and today's spend (so every daily limit) — admin only, not a viewer right.
+        call.requirePermission(Permission.ADMIN)
         McpUsageRepo.clearAll()
         call.respond(MessageResponse("Cleared ${UsageRepo.clearAll()} usage records for all users"))
     }

@@ -34,6 +34,7 @@ object RoutingTokenRepo {
         val row = RoutingTokens.selectAll()
             .where { (RoutingTokens.tokenHash eq hash) and (RoutingTokens.enabled eq true) }
             .firstOrNull() ?: return@transaction null
+        if (!ownerEnabled(row[RoutingTokens.userId])) return@transaction null
         RoutingTokens.update({ RoutingTokens.tokenHash eq hash }) { it[lastUsedAt] = Instant.now() }
         "${row[RoutingTokens.userId]}:${row[RoutingTokens.id]}"
     }
