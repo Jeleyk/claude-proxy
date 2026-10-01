@@ -144,4 +144,17 @@ class ModelPricingTest {
         assertMoney(15.0, ModelPriceRepo.costOf("claude-opus-4-1-20250805", BilledUsage(input = 1_000_000)))
         assertMoney(5.0, ModelPriceRepo.costOf("claude-opus-9-future", BilledUsage(input = 1_000_000)))
     }
+
+    /** Point releases whose id extends their predecessor's must not inherit its price. */
+    @Test
+    fun `point releases are priced on their own row`() {
+        val u = BilledUsage(input = 1_000_000, output = 1_000_000, cacheRead = 1_000_000, cacheWrite5m = 1_000_000, cacheWrite1h = 1_000_000)
+        // Opus 5.5: 4 + 20 + 0.20 + 5 + 8, not Opus 5's 5 + 25 + 0.5 + 6.25 + 10
+        assertMoney(37.2, ModelPriceRepo.costOf("claude-opus-5-5", u))
+        assertMoney(46.75, ModelPriceRepo.costOf("claude-opus-5", u))
+        // Fable 5.1 reads its cache at $0.25, Fable 5 at $1
+        assertMoney(0.25, ModelPriceRepo.costOf("claude-fable-5-1", BilledUsage(cacheRead = 1_000_000)))
+        assertMoney(0.25, ModelPriceRepo.costOf("claude-mythos-5-1", BilledUsage(cacheRead = 1_000_000)))
+        assertMoney(1.0, ModelPriceRepo.costOf("claude-fable-5", BilledUsage(cacheRead = 1_000_000)))
+    }
 }

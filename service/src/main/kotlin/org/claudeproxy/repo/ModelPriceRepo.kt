@@ -68,17 +68,24 @@ object ModelPriceRepo {
             // tokens, from Anthropic's list prices (platform.claude.com/docs/en/about-claude/pricing).
             // cacheWrite5m is the "5m Cache Writes" column (= 1.25× input), cacheWrite1h the
             // "1h Cache Writes" one (= 2× input); cacheRead the "Cache Hits & Refreshes" column
-            // (= 0.1× input). Version-specific full-id patterns come first so the longest-match
+            // (= 0.1× input; the 5.1 Fable/Mythos and Opus 5.5 generation reads cheaper, see their
+            // rows). Version-specific full-id patterns come first so the longest-match
             // rule (see list()) prices each version correctly — e.g. Opus 4.1 ($15) is
             // distinguished from Opus 4.8 ($5), and Fable 5 no longer falls through to $0. The
             // bare haiku/sonnet/opus rows stay as catch-all fallbacks for any unrecognised
             // future id. fastMultiplier and webSearchPrice take their column defaults (×2 and
             // $0.01/search), which hold across every current model.
             listOf(
-                // Fable / Mythos
+                // Fable / Mythos. 5.1 reads its cache at 0.025× input ($0.25) against 5's 0.1×;
+                // without its own row it would match `claude-fable-5` and pay 4× for every hit.
+                Row("claude-fable-5-1", 10.0, 50.0, 0.25, 12.5, 20.0),
+                Row("claude-mythos-5-1", 10.0, 50.0, 0.25, 12.5, 20.0),
                 Row("claude-fable-5", 10.0, 50.0, 1.0, 12.5, 20.0),
                 Row("claude-mythos-5", 10.0, 50.0, 1.0, 12.5, 20.0),
-                // Opus 5 — current flagship. Priced identically to Opus 4.8, but spelled out
+                // Opus 5.5 — cheaper than Opus 5, and reads its cache at 0.05× input ($0.20).
+                // Needs its own row: `claude-opus-5` is a substring of its id.
+                Row("claude-opus-5-5", 4.0, 20.0, 0.2, 5.0, 8.0),
+                // Opus 5. Priced identically to Opus 4.8, but spelled out
                 // rather than left to the bare `opus` fallback: the fallback is only correct by
                 // coincidence, and a future edit to it would silently misprice the flagship.
                 Row("claude-opus-5", 5.0, 25.0, 0.5, 6.25, 10.0),
@@ -92,8 +99,8 @@ object ModelPriceRepo {
                 // any traffic that still names it.
                 Row("claude-opus-4-1", 15.0, 75.0, 1.5, 18.75, 30.0),
                 Row("claude-opus-4-0", 15.0, 75.0, 1.5, 18.75, 30.0),
-                // Sonnet 5 introductory pricing, in effect through 2026-08-31.
-                // Reverts to standard 3.0 / 15.0 / 0.3 / 3.75 / 6.0 on 2026-09-01 — bump then (or via the UI).
+                // Sonnet 5: launched as introductory pricing, made the standard price instead of
+                // the increase to $3/$15 once scheduled for 2026-09-01.
                 Row("claude-sonnet-5", 2.0, 10.0, 0.2, 2.5, 4.0),
                 // Sonnet 4.x ($3 tier)
                 Row("claude-sonnet-4-6", 3.0, 15.0, 0.3, 3.75, 6.0),
