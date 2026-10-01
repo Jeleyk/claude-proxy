@@ -12,6 +12,8 @@ object Users : Table("users") {
     val dailyCostLimit = double("daily_cost_limit").nullable()
     // optional per-day spend limit in USD for the OpenAI/Anthropic routing gateways. null = unlimited.
     val dailyRoutingCostLimit = double("daily_routing_cost_limit").nullable()
+    // optional per-day spend limit in USD for the built-in chat UI. null = unlimited.
+    val dailyChatCostLimit = double("daily_chat_cost_limit").nullable()
     // routing preference: true = try the global pool before this user's personal accounts.
     val preferGlobalPool = bool("prefer_global_pool").default(false)
     val createdAt = timestamp("created_at")
@@ -246,6 +248,106 @@ object SessionMap : Table("session_map") {
     override val primaryKey = PrimaryKey(origin, accountId)
 }
 
+/**
+ * A conversation in the built-in chat UI. Owned by exactly one user — chats are private, there
+ * is no sharing model. "Temporary" chats never reach this table at all: the datapath keeps their
+ * history in the request body, so nothing about them is persisted anywhere.
+ */
+object Chats : Table("chats") {
+    val id = integer("id").autoIncrement()
+    val userId = integer("user_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    val title = varchar("title", 300)
+    // model used for the next turn; each message also records the model that actually answered
+    val model = varchar("model", 128)
+    // per-chat custom instructions, prepended after the user's global ones
+    val systemPrompt = text("system_prompt").nullable()
+    val pinned = bool("pinned").default(false)
+    val archived = bool("archived").default(false)
+    // whether this chat reads and writes the user's memory
+    val useMemory = bool("use_memory").default(true)
+    // set once an auto-generated title has replaced the first-message stub, so a renamed chat
+    // is never re-titled behind the user's back
+    val titleLocked = bool("title_locked").default(false)
+    val createdAt = timestamp("created_at")
+    val updatedAt = timestamp("updated_at")
+    override val primaryKey = PrimaryKey(id)
+    init { index(false, userId, updatedAt) }
+}
+
+/** One turn in a chat. Assistant rows carry the token/cost accounting of the turn that produced them. */
+object ChatMessages : Table("chat_messages") {
+    val id = long("id").autoIncrement()
+    val chatId = integer("chat_id").references(Chats.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    val role = varchar("role", 16)              // "user" | "assistant"
+    val content = text("content")
+    // extended-thinking text, kept apart from the answer so the UI can collapse it and the
+    // upstream request can leave it out of the replayed history
+    val thinking = text("thinking").nullable()
+    val model = varchar("model", 128).nullable()
+    val inputTokens = long("input_tokens").default(0)
+    val outputTokens = long("output_tokens").default(0)
+    val cacheReadTokens = long("cache_read_tokens").default(0)
+    val cacheWriteTokens = long("cache_write_tokens").default(0)
+    val cost = double("cost").default(0.0)
+    // set when the turn failed; the row is kept so the thread shows what happened
+    val error = text("error").nullable()
+    val createdAt = timestamp("created_at")
+    override val primaryKey = PrimaryKey(id)
+    init { index(false, chatId, createdAt) }
+}
+
+/**
+ * A file attached to a chat message. Bytes live in the DB rather than on disk: the deploy has
+ * exactly one persistent volume (pgdata) and attachments must survive a redeploy like the rest
+ * of the chat. Uploads are bounded (see ChatRoutes), so rows stay small.
+ */
+object ChatAttachments : Table("chat_attachments") {
+    val id = integer("id").autoIncrement()
+    val userId = integer("user_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    // null until the attachment is sent with a message (uploads are staged first)
+    val messageId = long("message_id").nullable()
+    val name = varchar("name", 255)
+    val mimeType = varchar("mime_type", 128)
+    val size = long("size")
+    // "image" | "document" | "text" — decides which Anthropic content block it becomes
+    val kind = varchar("kind", 16)
+    val data = binary("data")
+    val createdAt = timestamp("created_at")
+    override val primaryKey = PrimaryKey(id)
+    init { index(false, userId, messageId) }
+}
+
+/**
+ * A durable fact about a user, injected into every chat that opts into memory. Written either by
+ * hand or by the extractor that runs after a turn (see ChatMemory). Disabled entries stay
+ * visible in the UI but are not injected.
+ */
+object ChatMemories : Table("chat_memories") {
+    val id = integer("id").autoIncrement()
+    val userId = integer("user_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    val content = text("content")
+    // named sourceCol because `source` collides with a ColumnSet member
+    val sourceCol = varchar("source", 16).default("auto")   // "auto" | "manual"
+    // chat it was learned in; kept for provenance, cleared when that chat is deleted
+    val chatId = integer("chat_id").references(Chats.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.SET_NULL).nullable()
+    val enabled = bool("enabled").default(true)
+    val createdAt = timestamp("created_at")
+    override val primaryKey = PrimaryKey(id)
+    init { index(false, userId) }
+}
+
+/** Per-user chat preferences (one row per user, created on first save). */
+object ChatSettings : Table("chat_settings") {
+    val userId = integer("user_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    val memoryEnabled = bool("memory_enabled").default(true)
+    val defaultModel = varchar("default_model", 128).nullable()
+    // "what should Claude know about you" / "how should Claude respond" — the two halves of the
+    // familiar custom-instructions pair, injected as one system block
+    val aboutYou = text("about_you").nullable()
+    val responseStyle = text("response_style").nullable()
+    override val primaryKey = PrimaryKey(userId)
+}
+
 object OAuthAddSessions : Table("oauth_add_sessions") {
     val id = varchar("id", 64)          // state
     val pkceVerifier = varchar("pkce_verifier", 256)
@@ -259,4 +361,5 @@ val ALL_TABLES = arrayOf(
     AccountGroups, UserGroupAccess,
     Accounts, AccountSecrets, AccountLimits, UsageEvents, McpToolCalls, WindowSnapshots,
     OAuthAddSessions, SessionOwners, SessionMap,
+    Chats, ChatMessages, ChatAttachments, ChatMemories, ChatSettings,
 )

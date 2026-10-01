@@ -169,6 +169,8 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
   const [limitVal, setLimitVal] = useState<number>(user?.dailyCostLimit ?? 5);
   const [rLimitOn, setRLimitOn] = useState(user?.dailyRoutingCostLimit != null);
   const [rLimitVal, setRLimitVal] = useState<number>(user?.dailyRoutingCostLimit ?? 5);
+  const [cLimitOn, setCLimitOn] = useState(user?.dailyChatCostLimit != null);
+  const [cLimitVal, setCLimitVal] = useState<number>(user?.dailyChatCostLimit ?? 5);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -185,12 +187,14 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
           ...common, username, password,
           dailyCostLimit: limitOn ? limitVal : null,
           dailyRoutingCostLimit: rLimitOn ? rLimitVal : null,
+          dailyChatCostLimit: cLimitOn ? cLimitVal : null,
         });
       } else {
         const body: any = { ...common };
         if (password) body.password = password;
         if (limitOn) body.dailyCostLimit = limitVal; else body.clearDailyLimit = true;
         if (rLimitOn) body.dailyRoutingCostLimit = rLimitVal; else body.clearRoutingLimit = true;
+        if (cLimitOn) body.dailyChatCostLimit = cLimitVal; else body.clearChatLimit = true;
         await api.updateUser(user!.id, body);
       }
       onSaved();
@@ -243,6 +247,21 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
             <div className="row">
               <span className="hint">$</span>
               <NumberInput value={rLimitVal} onChange={setRLimitVal} min={0} step={0.5} />
+              <span className="hint">per day (UTC)</span>
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="field">
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <span style={{ margin: 0 }}>Daily chat limit <span className="hint">· built-in chat UI</span></span>
+          <Switch checked={cLimitOn} onChange={setCLimitOn} />
+        </div>
+        {cLimitOn && (
+          <div style={{ marginTop: 10 }}>
+            <div className="row">
+              <span className="hint">$</span>
+              <NumberInput value={cLimitVal} onChange={setCLimitVal} min={0} step={0.5} />
               <span className="hint">per day (UTC)</span>
             </div>
           </div>

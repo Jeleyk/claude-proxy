@@ -498,3 +498,475 @@ td.totalcell { cursor: default; }
      leave the (still informative) static placeholder shapes */
   .sk::after { display: none; }
 }
+
+/* ============================================================================
+   CHAT
+   The chat owns the whole viewport: the shell drops its padding and scrolling
+   (.main-scroll.full) and the page lays out its own three regions — the
+   conversation rail, the transcript, and the composer pinned to the bottom.
+   ========================================================================== */
+
+.main-scroll.full { padding: 0; overflow: hidden; }
+
+.chatpage { display: flex; height: 100%; min-height: 0; position: relative; }
+.chat-scrim { display: none; }
+
+/* ---- conversation rail ---- */
+.chat-side {
+  width: 276px; flex-shrink: 0; display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--border); background: var(--panel-2);
+}
+.chatpage:not(.side-open) .chat-side { display: none; }
+
+/* Way back to the rest of the admin. On a phone the app topbar is hidden on this route, so this
+   is the only door out — hence its own row above the list rather than an icon among others. */
+.leave-chat {
+  display: flex; align-items: center; gap: 8px; width: calc(100% - 24px); margin: 12px 12px 0;
+  background: transparent; border: 1px solid var(--border); color: var(--muted);
+  padding: 7px 10px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600;
+}
+.leave-chat:hover { background: var(--panel-3); color: var(--text); filter: none; }
+.leave-chat .hint { margin-left: auto; font-size: 11px; }
+
+.chat-side-top { display: flex; gap: 8px; padding: 12px 12px 8px; }
+.new-chat {
+  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 9px 12px;
+}
+.temp-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); border-color: var(--accent); }
+.close-side { display: none; }
+
+.chat-search { position: relative; display: flex; align-items: center; padding: 0 12px 10px; color: var(--faint); }
+.chat-search svg { position: absolute; left: 22px; width: 15px; height: 15px; pointer-events: none; }
+.chat-search input { padding-left: 32px; background: var(--panel); }
+.chat-search .x { position: absolute; right: 18px; background: none; border: none; color: var(--faint); font-size: 17px; padding: 0 4px; cursor: pointer; }
+
+.chat-list { flex: 1; overflow-y: auto; padding: 0 8px 8px; min-height: 0; }
+.chat-group-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint);
+  padding: 12px 8px 5px; font-weight: 600;
+}
+.chat-row-wrap { position: relative; border-radius: var(--radius-sm); }
+.chat-row-wrap:hover { background: var(--panel-3); }
+.chat-row-wrap.active { background: var(--accent-soft); }
+.chat-row {
+  display: block; width: 100%; text-align: left; background: none; border: none; color: inherit;
+  padding: 8px 32px 8px 10px; border-radius: var(--radius-sm); cursor: pointer; font-family: inherit;
+  font-weight: 500; overflow: hidden;
+}
+.chat-row:hover { filter: none; }
+.chat-row .t {
+  display: flex; align-items: center; gap: 5px; font-size: 13.5px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chat-row .t svg { flex-shrink: 0; color: var(--accent-ink); }
+.chat-row .p {
+  display: block; font-size: 11.5px; color: var(--faint); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chat-row-wrap.active .chat-row .t { color: var(--accent-ink); }
+.chat-row-wrap .rename { margin: 4px 6px; width: calc(100% - 12px); }
+.row-menu-btn {
+  position: absolute; top: 6px; right: 4px; background: none; border: none; color: var(--faint);
+  padding: 2px 6px; border-radius: 6px; cursor: pointer; opacity: 0; font-size: 15px; line-height: 1;
+}
+.chat-row-wrap:hover .row-menu-btn, .chat-row-wrap.active .row-menu-btn { opacity: 1; }
+.row-menu-btn:hover { background: var(--panel); color: var(--text); filter: none; }
+.row-menu {
+  position: absolute; top: 28px; right: 6px; z-index: 30; min-width: 150px; padding: 5px;
+  background: var(--panel); border: 1px solid var(--border-2); border-radius: var(--radius-sm);
+  box-shadow: 0 14px 34px rgba(20, 14, 6, .28); display: flex; flex-direction: column;
+}
+.row-menu button {
+  background: none; border: none; color: var(--text); text-align: left; padding: 7px 9px;
+  border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;
+}
+.row-menu button:hover { background: var(--panel-3); filter: none; }
+.row-menu button.danger { color: var(--bad); border: none; }
+/* portal-rendered variant: positioned against its trigger, above everything the page stacks */
+.row-menu.floating { position: fixed; z-index: 260; }
+
+.chat-row.temp { padding-left: 10px; }
+.chat-row-wrap.temp, .chat-row.temp.active { background: var(--accent-soft); border-radius: var(--radius-sm); }
+
+.chat-side-foot {
+  display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border);
+}
+.chat-side-foot button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 6px; }
+
+/* ---- transcript column ---- */
+.chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.chat-head {
+  display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+  border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 90%, transparent);
+  backdrop-filter: blur(8px); flex-shrink: 0;
+}
+.chat-title {
+  font-size: 16px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: flex; align-items: center; gap: 7px; min-width: 0;
+}
+.chat-head-right { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+/* A menu closes on any outside click; a transparent full-screen catcher is the one way that
+   also works for a tap on a phone. It must sit *under* the menu it belongs to — an earlier
+   version had it above, which made every menu item look enabled and swallow its own clicks. */
+.menu-backdrop { position: fixed; inset: 0; z-index: 255; }
+.row-menu button:disabled { opacity: .45; cursor: default; }
+.temp-banner.compacting { background: var(--panel-3); color: var(--muted); }
+.chat-head-right .iconbtn.on, .chat-head-right button.on {
+  background: var(--accent-soft); color: var(--accent-ink);
+}
+
+/* ---- ask panel ----
+   A side conversation about the thread: docked above the composer on desktop, a sheet on a
+   phone. Nothing it produces reaches the transcript unless "Add to chat" is pressed. */
+.askpanel {
+  max-width: 784px; width: calc(100% - 40px); margin: 0 auto 10px; background: var(--panel);
+  border: 1px solid var(--border-2); border-radius: var(--radius); box-shadow: var(--shadow);
+  display: flex; flex-direction: column; max-height: min(56vh, 460px); overflow: hidden;
+}
+.askpanel-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 10px 9px 14px; border-bottom: 1px solid var(--border); background: var(--panel-2);
+}
+.askpanel-head .t { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.askpanel-body { padding: 12px 14px; overflow-y: auto; flex: 1; min-height: 0; }
+.askpanel-q {
+  font-size: 13px; font-weight: 600; color: var(--accent-ink); margin-bottom: 10px;
+  padding-left: 10px; border-left: 2px solid var(--accent);
+}
+.askpanel-foot { padding: 10px 12px; border-top: 1px solid var(--border); display: grid; gap: 8px; }
+.askpanel-foot textarea { resize: none; max-height: 160px; }
+
+.temp-banner {
+  display: flex; align-items: center; gap: 8px; justify-content: center; padding: 8px 14px;
+  background: var(--accent-soft); color: var(--accent-ink); font-size: 12.5px; font-weight: 500;
+}
+.chat-err { margin: 10px 16px 0; }
+
+/* No `scroll-behavior: smooth` here on purpose: the stream sets scrollTop every frame, and an
+   animated scroller restarts its easing on each one — which reads as the thread juddering.
+   The one place a smooth scroll is wanted (the jump-to-latest button) asks for it explicitly. */
+.chat-scroll { flex: 1; overflow-y: auto; position: relative; overscroll-behavior: contain; }
+.chat-thread { max-width: 784px; margin: 0 auto; padding: 26px 20px 24px; display: flex; flex-direction: column; gap: 26px; }
+
+.jump-bottom {
+  position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+  width: 34px; height: 34px; padding: 0; border-radius: 999px; background: var(--panel);
+  border: 1px solid var(--border-2); color: var(--muted); box-shadow: var(--shadow);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.jump-bottom:hover { color: var(--text); filter: none; }
+
+/* empty state */
+.chat-empty {
+  max-width: 620px; margin: 0 auto; padding: 12vh 20px 20px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.chat-empty .halo {
+  width: 52px; height: 52px; border-radius: 16px; background: var(--accent); color: var(--on-accent);
+  display: inline-flex; align-items: center; justify-content: center; margin-bottom: 6px;
+  box-shadow: 0 8px 26px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.chat-empty h2 { margin: 0; font-size: 25px; text-transform: none; letter-spacing: -0.01em; color: var(--text); font-family: ui-serif, Georgia, serif; }
+.starters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
+.starters button { font-weight: 500; }
+
+/* ---- messages ---- */
+.msg { display: flex; gap: 12px; }
+.msg.user { flex-direction: column; align-items: flex-end; gap: 4px; }
+.msg.user .bubble {
+  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 16px 16px 4px 16px; padding: 11px 14px; max-width: min(100%, 640px);
+}
+.msg.user .user-text { white-space: pre-wrap; word-break: break-word; }
+.msg.user .edit-box { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.msg.user .edit-box textarea { resize: none; }
+
+.msg.assistant .avatar {
+  width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0; margin-top: 2px;
+  background: var(--accent); color: var(--on-accent);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.msg.assistant .body { min-width: 0; flex: 1; }
+
+.msg-actions { display: flex; align-items: center; gap: 4px; margin-top: 8px; opacity: .55; transition: opacity .12s; }
+.msg:hover .msg-actions { opacity: 1; }
+.msg-actions .act {
+  background: none; border: none; color: var(--muted); font-size: 12px; font-weight: 500;
+  padding: 4px 7px; border-radius: 6px; display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+}
+.msg-actions .act:hover { background: var(--panel-3); color: var(--text); filter: none; }
+.msg-actions .meta { margin-left: auto; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.msg-error {
+  margin-top: 10px; display: flex; align-items: center; gap: 7px; font-size: 12.5px;
+  color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bad) 28%, transparent);
+  border-radius: var(--radius-sm); padding: 8px 11px;
+}
+
+/* thinking + tools */
+.thinking { border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 12px; background: var(--panel-2); }
+.thinking-head {
+  display: flex; align-items: center; gap: 7px; width: 100%; background: none; border: none;
+  color: var(--muted); padding: 8px 11px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.thinking-head:hover { color: var(--text); filter: none; }
+.thinking-head svg { transition: transform .15s; }
+.thinking.open .thinking-head svg { transform: rotate(180deg); }
+.thinking-body {
+  padding: 0 12px 11px; font-size: 12.5px; color: var(--muted); white-space: pre-wrap;
+  max-height: 340px; overflow-y: auto; line-height: 1.55;
+}
+.tool-chip {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted);
+  background: var(--panel-3); border-radius: 999px; padding: 4px 10px; margin: 0 6px 8px 0;
+}
+
+.typing { display: inline-flex; gap: 4px; padding: 6px 0; }
+.typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); animation: blink 1.2s infinite; }
+.typing span:nth-child(2) { animation-delay: .18s; }
+.typing span:nth-child(3) { animation-delay: .36s; }
+@keyframes blink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+.caret {
+  display: inline-block; width: 7px; height: 15px; margin-left: 2px; vertical-align: -2px;
+  background: var(--accent); animation: caret 1s steps(2) infinite;
+}
+@keyframes caret { 50% { opacity: 0; } }
+
+/* attachments */
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.att { position: relative; }
+.att img { max-width: 190px; max-height: 190px; border-radius: 10px; display: block; border: 1px solid var(--border); }
+.att .file {
+  display: inline-flex; align-items: center; gap: 8px; padding: 8px 11px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--text); font-size: 12.5px; text-decoration: none;
+}
+.att .file:hover { border-color: var(--accent); text-decoration: none; }
+.att .file .n { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att .file .s { color: var(--faint); }
+.att .rm {
+  position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; padding: 0; border-radius: 50%;
+  background: var(--panel); border: 1px solid var(--border-2); color: var(--muted); font-size: 14px; line-height: 1;
+}
+.att .rm:hover { color: var(--bad); filter: none; }
+
+/* ---- composer ---- */
+.composer { padding: 0 20px 16px; flex-shrink: 0; }
+.composer.dragging .composer-box { border-color: var(--accent); background: var(--accent-soft); }
+.composer-err { max-width: 784px; margin: 0 auto 8px; }
+.composer-box {
+  max-width: 784px; margin: 0 auto; background: var(--panel); border: 1px solid var(--border-2);
+  border-radius: 18px; padding: 10px 12px 8px; box-shadow: var(--shadow); transition: border-color .12s;
+}
+.composer-box:focus-within { border-color: var(--accent); }
+.composer-box textarea {
+  border: none; background: none; padding: 4px 2px; resize: none; width: 100%;
+  font-size: 14.5px; line-height: 1.5; max-height: 260px; overflow-y: auto;
+}
+.composer-box textarea:focus { outline: none; border: none; }
+.composer-bar { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.composer-bar .left, .composer-bar .right { display: flex; align-items: center; gap: 8px; }
+.composer-bar .right { margin-left: auto; }
+.composer-hint { white-space: nowrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; background: transparent; color: var(--muted);
+  border: 1px solid var(--border-2); border-radius: 999px; padding: 5px 11px; font-size: 12px; font-weight: 600;
+}
+.chip:hover { color: var(--text); background: var(--panel-3); filter: none; }
+.chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-ink); }
+/* model picker — sits beside Send, opens upward (there is no room below the composer) */
+.modelpick { position: relative; }
+.modelpick-btn {
+  display: inline-flex; align-items: center; gap: 5px; background: transparent; color: var(--muted);
+  border: 1px solid transparent; border-radius: 999px; padding: 5px 8px; font-size: 12px; font-weight: 600;
+  max-width: 168px;
+}
+.modelpick-btn:hover, .modelpick-btn.open { background: var(--panel-3); color: var(--text); filter: none; }
+.modelpick-btn .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modelpick-menu {
+  position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 40; width: 268px; padding: 5px;
+  background: var(--panel); border: 1px solid var(--border-2); border-radius: var(--radius);
+  box-shadow: 0 16px 40px rgba(20, 14, 6, .3); display: flex; flex-direction: column; gap: 1px;
+}
+.modelpick-item {
+  position: relative; background: none; border: none; text-align: left; color: var(--text);
+  padding: 8px 26px 8px 10px; border-radius: var(--radius-sm); cursor: pointer; font-family: inherit;
+}
+.modelpick-item:hover { background: var(--panel-3); filter: none; }
+.modelpick-item.active { background: var(--accent-soft); }
+.modelpick-item .n { display: block; font-size: 13px; font-weight: 600; }
+.modelpick-item .d { display: block; font-size: 11.5px; color: var(--faint); margin-top: 1px; }
+.modelpick-item .tick { position: absolute; right: 9px; top: 9px; color: var(--accent-ink); font-size: 12px; }
+.modelpick-item.empty { color: var(--faint); font-size: 12px; cursor: default; }
+
+.send, .stop {
+  width: 34px; height: 34px; padding: 0; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.stop { width: auto; padding: 0 13px; gap: 6px; background: var(--panel-3); color: var(--text); }
+.stop:hover { filter: none; background: var(--border); }
+
+/* ============================ markdown ============================ */
+.md { font-size: 14.5px; line-height: 1.65; word-break: break-word; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md-p { margin: 0 0 12px; }
+.md-h { margin: 20px 0 10px; font-family: ui-serif, Georgia, serif; text-transform: none; letter-spacing: -0.005em; color: var(--text); }
+.md-h1 { font-size: 21px; }
+.md-h2 { font-size: 18px; }
+.md-h3 { font-size: 16px; }
+.md-h4, .md-h5, .md-h6 { font-size: 14.5px; }
+.md-hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+.md-list { margin: 0 0 12px; padding-left: 22px; }
+.md-list li { margin: 4px 0; }
+.md-list .md-list { margin-bottom: 0; }
+.md-quote {
+  margin: 0 0 12px; padding: 2px 0 2px 14px; border-left: 3px solid var(--border-2); color: var(--muted);
+}
+.md-code {
+  background: var(--panel-3); border-radius: 5px; padding: 1.5px 5px; font-size: .89em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.md-img { max-width: 100%; border-radius: 10px; border: 1px solid var(--border); margin: 4px 0; }
+.md-math { font-family: ui-serif, Georgia, serif; font-style: italic; background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+.md-math.block { display: block; text-align: center; padding: 10px; margin: 12px 0; font-size: 15px; }
+
+.md-tablewrap { overflow-x: auto; margin: 0 0 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.md-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.md-table th, .md-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); white-space: normal; }
+.md-table thead th { background: var(--panel-2); position: static; font-size: 12px; }
+.md-table tbody tr:last-child td { border-bottom: none; }
+
+.md-pre {
+  margin: 0 0 14px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--panel-2); overflow: hidden;
+}
+.md-pre-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 5px 8px 5px 12px;
+  border-bottom: 1px solid var(--border); background: var(--panel-3);
+}
+.md-pre-head .lang { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.md-pre pre { margin: 0; padding: 12px 14px; overflow-x: auto; }
+.md-pre code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.8px; line-height: 1.6;
+  white-space: pre; color: var(--text);
+}
+/* an unterminated fence is a block still streaming in — mark it, don't hide it */
+.md-pre.streaming { border-style: dashed; }
+
+.hl-com { color: var(--faint); font-style: italic; }
+.hl-str { color: var(--ok); }
+.hl-num { color: var(--accent-2); }
+.hl-kw { color: var(--accent-ink); font-weight: 600; }
+.hl-fn { color: var(--accent-2); }
+.hl-typ { color: var(--warn); }
+.hl-tag { color: var(--accent-ink); }
+.hl-atr { color: var(--accent-2); }
+.hl-var { color: var(--warn); }
+.hl-op { color: var(--muted); }
+
+/* memory list (in the Memory modal) */
+.memlist { display: flex; flex-direction: column; }
+.memrow { display: flex; align-items: center; gap: 11px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.memrow:last-child { border-bottom: none; }
+.memrow .c { flex: 1; font-size: 13px; }
+.memrow.off .c { color: var(--faint); text-decoration: line-through; }
+
+/* The escape hatch only exists where the app topbar is hidden — i.e. on phones. */
+.leave-chat { display: none; }
+
+/* ============================ chat: responsive ============================ */
+@media (max-width: 900px) {
+  /* On this route the app topbar was pure overhead: a title that repeats the page and a theme
+     toggle nobody reaches for mid-conversation, eating a row of a screen that is mostly transcript.
+     The way back to the rest of the admin moved into the conversation list instead. */
+  .app.chat-route .topbar { display: none; }
+  .leave-chat { display: flex; }
+  /* The rail becomes an overlay drawer — the transcript keeps the full width underneath. */
+  .chat-side {
+    position: absolute; inset: 0 auto 0 0; z-index: 70; width: min(86vw, 320px);
+    box-shadow: 0 0 40px rgba(20, 14, 6, .35);
+  }
+  .chatpage:not(.side-open) .chat-side { display: flex; transform: translateX(-101%); }
+  .chat-side { transition: transform .22s ease; }
+  .close-side { display: inline-flex; }
+  .chatpage.side-open .chat-scrim {
+    display: block; position: absolute; inset: 0; z-index: 65; background: rgba(20, 14, 6, .45);
+  }
+  .chat-thread { padding: 18px 14px 16px; gap: 22px; }
+  .composer { padding: 0 12px calc(12px + env(safe-area-inset-bottom)); }
+  .composer-box { border-radius: 16px; }
+  .chat-head { padding: 9px 12px; }
+  .chat-title { font-size: 15px; }
+  .msg.user .bubble { max-width: 100%; }
+  /* Touch has no hover, so the per-message actions have to be visible by default. */
+  .msg-actions { opacity: 1; }
+  .row-menu-btn { opacity: 1; }
+  .chat-empty { padding-top: 8vh; }
+  .chat-empty h2 { font-size: 21px; }
+
+  /* iOS zooms into any field whose text is under 16px and never zooms back out on blur, which
+     leaves the whole app scaled up until a manual pinch. These are the chat's own fields, and
+     they beat the generic rule below on specificity — so they have to say it themselves. */
+  .composer-box textarea,
+  .msg.user .edit-box textarea,
+  .askpanel-foot textarea,
+  .chat-search input,
+  .chat-row-wrap .rename { font-size: 16px; }
+
+  .askpanel { width: calc(100% - 24px); max-height: 62dvh; }
+}
+
+@media (max-width: 560px) {
+  .composer-bar .chip span { display: none; }
+  .chip { padding: 6px 9px; }
+  .composer-hint { display: none; }
+  /* the model's name is the first thing to go when the bar gets tight — the icon still opens it */
+  .modelpick-btn .lbl { display: none; }
+  .modelpick-btn { padding: 6px 7px; }
+  .modelpick-menu { width: min(78vw, 268px); }
+  .msg-actions .act .lbl { display: none; }
+  .att img { max-width: 128px; max-height: 128px; }
+  .md { font-size: 15px; }
+  .md-pre code { font-size: 12px; }
+  .starters { flex-direction: column; }
+  .starters button { width: 100%; }
+}
+
+/* ============================================================================
+   Mobile polish for the admin sections
+   Small screens got the drawer and the stacked charts; these fix what was left:
+   full-bleed dialogs, tables that can actually be read, and controls big enough
+   to hit with a thumb.
+   ========================================================================== */
+@media (max-width: 900px) {
+  /* iOS zooms any input whose text is under 16px on focus, which then leaves the
+     layout scaled up. Cheaper to size the fields correctly than to fight it. */
+  input:not([type=checkbox]), select, textarea { font-size: 16px; }
+  button, .navitem, .seg { min-height: 38px; }
+  .iconbtn { width: 38px; height: 38px; }
+  .main-scroll { padding: 16px 12px; }
+  .panel { padding: 16px; }
+  .card { padding: 14px; }
+  .card .value { font-size: 22px; }
+  .section-head, .head-row { gap: 8px; }
+  .controlbar { gap: 8px; }
+  /* A horizontally scrollable table needs to advertise that it scrolls. */
+  .tablewrap { -webkit-overflow-scrolling: touch; }
+  th, td { padding: 10px 12px; }
+}
+
+@media (max-width: 640px) {
+  .overlay { padding: 0; align-items: flex-end; }
+  /* A dialog on a phone is a sheet: full width, rounded only where it meets the page. */
+  .modal { width: 100%; max-width: 100%; max-height: 92dvh; border-radius: var(--radius) var(--radius) 0 0; }
+  .modal-foot { flex-wrap: wrap; padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .modal-foot button { flex: 1; min-width: 120px; }
+  .cards { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
+  h1 { font-size: 20px; }
+  .sub { margin-bottom: 16px; }
+  .connect-tabs { gap: 6px; }
+  .codeblock { font-size: 11.5px; padding-right: 14px; }
+  /* The copy button overlapping a wrapped command is unusable — give it its own line. */
+  .copybtn { position: static; display: block; margin-top: 8px; }
+}

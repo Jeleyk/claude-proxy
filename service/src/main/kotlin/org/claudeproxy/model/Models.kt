@@ -12,6 +12,7 @@ enum class Permission {
     ACCOUNTS_ORDER_TOGGLE,// may switch whether their personal accounts or the global pool are tried first
     POOL_GLOBAL_USE,    // may route requests through the shared (global) account pool
     ROUTING_USE,        // may use the OpenAI/Anthropic API routing gateways + manage routing tokens
+    CHAT_USE,           // may use the built-in chat UI (conversations, attachments, memory)
     STATS_VIEW_RECENT,  // may view the list of recent requests (pool-wide)
     STATS_VIEW_ACCOUNTS,// may see which account each request/stat came from
     ACCOUNTS_VIEW,      // may view upstream accounts + their limits
@@ -68,12 +69,17 @@ data class UserDto(
     // per-day spend limit in USD for the OpenAI/Anthropic routing gateways; null = unlimited.
     // Tracked separately from dailyCostLimit — routing spend is metered against this one.
     val dailyRoutingCostLimit: Double? = null,
+    // per-day spend limit in USD for the built-in chat UI; null = unlimited. Metered separately
+    // again, so a chat session can't eat the quota Claude Code runs on (and vice versa).
+    val dailyChatCostLimit: Double? = null,
     // routing preference: true = try the global pool before personal accounts (default false = personal first)
     val preferGlobalPool: Boolean = false,
     // usage since the start of the current UTC day
     val todayCost: Double = 0.0,
     // routing spend (source=routing) since the start of the current UTC day
     val todayRoutingCost: Double = 0.0,
+    // chat spend (source=chat) since the start of the current UTC day
+    val todayChatCost: Double = 0.0,
     val todayInputTokens: Long = 0,
     val todayOutputTokens: Long = 0,
 )

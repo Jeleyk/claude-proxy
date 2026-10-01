@@ -57,14 +57,12 @@ object UserRepo {
     }
 
     fun list(): List<UserDto> = transaction {
-        Users.selectAll().map { row ->
-            toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyCostLimit], row[Users.dailyRoutingCostLimit], row[Users.preferGlobalPool])
-        }
+        Users.selectAll().map { row -> toDto(row) }
     }
 
     fun get(userId: Int): UserDto? = transaction {
         val row = Users.selectAll().where { Users.id eq userId }.firstOrNull() ?: return@transaction null
-        toDto(row[Users.id], row[Users.username], row[Users.enabled], row[Users.dailyCostLimit], row[Users.dailyRoutingCostLimit], row[Users.preferGlobalPool])
+        toDto(row)
     }
 
     /** Per-day spend limit in USD for a user; null = unlimited. */
@@ -75,6 +73,11 @@ object UserRepo {
     /** Per-day routing (OpenAI/Anthropic gateway) spend limit in USD for a user; null = unlimited. */
     fun dailyRoutingLimitOf(userId: Int): Double? = transaction {
         Users.selectAll().where { Users.id eq userId }.firstOrNull()?.get(Users.dailyRoutingCostLimit)
+    }
+
+    /** Per-day chat-UI spend limit in USD for a user; null = unlimited. */
+    fun dailyChatLimitOf(userId: Int): Double? = transaction {
+        Users.selectAll().where { Users.id eq userId }.firstOrNull()?.get(Users.dailyChatCostLimit)
     }
 
     /** Routing preference: true = try the global pool before the user's own personal accounts. */
@@ -106,25 +109,29 @@ object UserRepo {
         }
     }
 
-    private fun toDto(uid: Int, username: String, enabled: Boolean, dailyCostLimit: Double?, dailyRoutingCostLimit: Double?, preferGlobalPool: Boolean): UserDto {
+    private fun toDto(row: ResultRow): UserDto {
+        val uid = row[Users.id]
         val perms = permissionsOf(uid)
         // "today" here reflects shared-pool spend (what the daily limit governs); personal-account usage is excluded.
-        // Split by datapath so proxy and routing spend are metered against their own daily limits.
+        // Split by datapath so proxy, routing and chat spend are metered against their own daily limits.
         val today = UsageRepo.userTotals(uid, startOfUtcDay(), globalOnly = true, source = "proxy")
         val todayRouting = UsageRepo.userTotals(uid, startOfUtcDay(), globalOnly = true, source = "routing")
+        val todayChat = UsageRepo.userTotals(uid, startOfUtcDay(), globalOnly = true, source = "chat")
         return UserDto(
             id = uid,
-            username = username,
-            enabled = enabled,
+            username = row[Users.username],
+            enabled = row[Users.enabled],
             roles = rolesOf(uid),
             permissions = perms.map { it.name },
             allowedGroups = allowedGroupsOf(uid).toList(),
             allGroups = Permission.ADMIN in perms,
-            dailyCostLimit = dailyCostLimit,
-            dailyRoutingCostLimit = dailyRoutingCostLimit,
-            preferGlobalPool = preferGlobalPool,
+            dailyCostLimit = row[Users.dailyCostLimit],
+            dailyRoutingCostLimit = row[Users.dailyRoutingCostLimit],
+            dailyChatCostLimit = row[Users.dailyChatCostLimit],
+            preferGlobalPool = row[Users.preferGlobalPool],
             todayCost = today.cost,
             todayRoutingCost = todayRouting.cost,
+            todayChatCost = todayChat.cost,
             todayInputTokens = today.input,
             todayOutputTokens = today.output,
         )
@@ -160,7 +167,7 @@ object UserRepo {
 
     fun create(
         username: String, password: String, roleNames: List<String>, groupIds: List<Int>,
-        dailyCostLimit: Double?, dailyRoutingCostLimit: Double? = null,
+        dailyCostLimit: Double?, dailyRoutingCostLimit: Double? = null, dailyChatCostLimit: Double? = null,
     ): Int = transaction {
         val uid = Users.insert {
             it[Users.username] = username
@@ -168,6 +175,7 @@ object UserRepo {
             it[enabled] = true
             it[Users.dailyCostLimit] = dailyCostLimit
             it[Users.dailyRoutingCostLimit] = dailyRoutingCostLimit
+            it[Users.dailyChatCostLimit] = dailyChatCostLimit
             it[createdAt] = Instant.now()
         }[Users.id]
         setRoles(uid, roleNames)
@@ -179,12 +187,14 @@ object UserRepo {
         userId: Int, password: String?, enabled: Boolean?, roleNames: List<String>?, groupIds: List<Int>?,
         dailyCostLimit: Double?, clearDailyLimit: Boolean,
         dailyRoutingCostLimit: Double? = null, clearRoutingLimit: Boolean = false,
+        dailyChatCostLimit: Double? = null, clearChatLimit: Boolean = false,
     ) = transaction {
         Users.update({ Users.id eq userId }) {
             if (password != null) it[passwordHash] = Passwords.hash(password)
             if (enabled != null) it[Users.enabled] = enabled
             if (clearDailyLimit) it[Users.dailyCostLimit] = null else if (dailyCostLimit != null) it[Users.dailyCostLimit] = dailyCostLimit
             if (clearRoutingLimit) it[Users.dailyRoutingCostLimit] = null else if (dailyRoutingCostLimit != null) it[Users.dailyRoutingCostLimit] = dailyRoutingCostLimit
+            if (clearChatLimit) it[Users.dailyChatCostLimit] = null else if (dailyChatCostLimit != null) it[Users.dailyChatCostLimit] = dailyChatCostLimit
         }
         if (roleNames != null) setRoles(userId, roleNames)
         if (groupIds != null) setAllowedGroups(userId, groupIds)

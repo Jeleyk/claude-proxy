@@ -19,8 +19,8 @@ listening on `127.0.0.1:8080`). A host reverse proxy terminates TLS and proxies 
 
 | Public path   | Component            | Notes                                                    |
 |---------------|----------------------|----------------------------------------------------------|
-| `/`           | **frontend** (SPA)   | React admin UI, static, served by nginx (React Router)   |
-| `/api/…`      | **service** (Kotlin) | Management REST API                                      |
+| `/`           | **frontend** (SPA)   | React admin UI **+ the chat UI**, static, served by nginx (React Router) |
+| `/api/…`      | **service** (Kotlin) | Management REST API **+ the chat API/datapath** (`/api/chat/…`) |
 | `/gateway/…`  | **gateway** (Go)     | Anthropic datapath (`/gateway/v1/…`), served by the Go **gateway** (Spec B). It resolves each request against the service's private `/internal/*` control API, forwards to Anthropic, relays SSE, and reports usage back. The Kotlin datapath (`service:8787`) stays running as an instant rollback (revert the two nginx `proxy_pass` targets). |
 | `/routing/openai/…`    | **gateway** (Go, same container) | OpenAI Chat Completions API emulated over Claude Code subscriptions. Translates OpenAI↔Anthropic (streaming + tool calls), resolves via the control API with `source="routing"`. base_url = `<origin>/routing/openai/v1`. |
 | `/routing/anthropic/…` | **gateway** (Go, same container) | Native Anthropic Messages API served from Claude Code subscriptions (injects the Claude Code system prompt), `source="routing"`. base_url = `<origin>/routing/anthropic`. |
@@ -29,7 +29,8 @@ The routing gateways expose standard OpenAI/Anthropic API contracts to arbitrary
 them through the same account pool as the Claude Code proxy. They authenticate with **routing
 tokens** (`cxr_…`, gated by `ROUTING_USE`), meter spend against a **separate per-user daily USD
 limit** (`users.daily_routing_cost_limit`), and tag usage rows `source="routing"` (proxy rows are
-`source="proxy"`) so the two datapaths share stats but keep independent limits. A routing token
+`source="proxy"`, chat rows `source="chat"`) so the three datapaths share stats but keep
+independent limits. A routing token
 may carry a **static system prompt** (`routing_tokens.system_prompt`, editable on the API Routing
 page): the service returns it from `/internal/resolve` and `routing.go` injects it via
 `ccident.InsertStaticPrompt` right after the mandatory Claude Code block — ahead of (higher
@@ -71,6 +72,7 @@ to server runtime state). See `docs/superpowers/specs/2026-07-12-repo-restructur
 | `accounts/` | `AccountPool` (selection/rotation/fallback), `AccountRepo`, `RateLimitHeaders` (parse `anthropic-ratelimit-*`), `TokenRefresher` (background OAuth refresh), `LimitProbe`/`LimitScheduler`, `UpstreamAuth`, `Secrets`. |
 | `api/` | `AdminRoutes` (REST API for the UI), `Dtos`; `InternalRoutes` + `InternalDtos` (the private `/internal/resolve` + `/internal/usage` control API for the Go gateway, gated by `X-Internal-Token`). |
 | `datapath/` | `DatapathService` — the reusable resolve-a-request-into-an-ordered-plan + apply-an-outcome logic, shared by the Kotlin datapath and the control API (selection/crypto/limit bookkeeping stays here). |
+| `chat/` | **The built-in chat.** `ChatEngine` (its own datapath: build → select → forward → relay SSE → record), `ChatPrompt` (system blocks + content blocks, pure), `ChatSse` (Anthropic SSE → typed events, pure), `ChatModels` (picker catalogue), `ChatMemory` (extractor output parsing), `ShareImport` (ChatGPT/Claude share links). |
 | `cache/` | `MemoryCache` — in-process TTL cache with DB fallback (token resolve, daily spend); evicted on token delete. |
 | `auth/` | `Security` (session cookies), `Passwords` (bcrypt). |
 | `db/` | `Database` (init + seed), `Tables` (Exposed schema), `Crypto` (AES-256-GCM for account secrets at rest). |
@@ -79,8 +81,12 @@ to server runtime state). See `docs/superpowers/specs/2026-07-12-repo-restructur
 | `oauth/ClaudeOAuth.kt` | PKCE "Login with Claude" flow to add accounts. |
 
 Frontend lives in `frontend/src/` (`App.tsx` = router shell, `api.ts`, `Chart.tsx`, `ui.tsx`,
-`pages/*`). Section URLs: `/dashboard`, `/my/accounts`, `/my/stats`, `/stats`, `/tokens`,
-`/pricing`, `/users` (react-router; nginx `try_files` falls unknown paths back to `index.html`).
+`pages/*`, `chat/*`). Section URLs: `/chat` (+ `/chat/:id`), `/dashboard`, `/my/accounts`,
+`/my/stats`, `/stats`, `/tokens`, `/pricing`, `/users` (react-router; nginx `try_files` falls
+unknown paths back to `index.html`). The chat page opts out of the shell's padding/scrolling
+(`.main-scroll.full`) and lays out its own three regions; `chat/Markdown.tsx` +
+`chat/highlight.ts` are a hand-rolled renderer/highlighter (React nodes only — never
+`dangerouslySetInnerHTML`, so model output can't inject markup).
 
 ## Build / run / test
 
@@ -218,7 +224,7 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   are sliced on the same (viewer's) day. Missing/unparseable `tz` falls back to UTC — the
   pre-existing behaviour. **Exception, load-bearing:** the per-user **daily USD limits stay on UTC
   days** (`UserRepo.startOfUtcDay`, enforced in `DatapathService`/`ProxyRoutes`), so everything
-  read *against a limit* keeps the UTC basis — `MyStatsPayload.proxyTodayCost`/`routingTodayCost`,
+  read *against a limit* keeps the UTC basis — `MyStatsPayload.proxyTodayCost`/`routingTodayCost`/`chatTodayCost`,
   `UserOverviewRow.todayProxyCost`/`todayRoutingCost`, and the Users-list "Spent today" column.
   Those are labelled UTC in the UI (the limit card spells out its own 00:00 UTC countdown);
   `UsageRepo.overviewByUser` takes both day starts for exactly this reason. Guarded by
@@ -247,13 +253,78 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   the entry on a successful resolve and closes it on `/internal/session-end` (fire-and-forget from
   the gateway's `defer`); the Kotlin datapath wraps its own handler. Entries expire after 30 min so
   a lost close can't pin the gauge. In-process and unpersisted — a restart correctly reads zero.
+- **Built-in chat** (`chat/`, `/api/chat/…`, SPA `/chat`): a full chat client — stored
+  conversations with search, attachments (images/PDF native, text inlined), streaming, per-user
+  **memory**, custom instructions, **temporary chats** (never persisted; their transcript rides in
+  the request body), and **import** from a public ChatGPT/Claude share link. It is a **third
+  datapath**: it selects from the same pool with the same personal-first/group rules, but tags
+  usage `source="chat"` and meters `users.daily_chat_cost_limit` — so a chat session can't eat the
+  quota Claude Code runs on. Gated by `CHAT_USE`. `ChatEngine` mirrors the proxy datapath's
+  load-bearing SSE behaviour (head flushed immediately, true streaming, keep-alive comments during
+  silence) and retries the next account while nothing user-visible has been written; when an
+  account dies after emitting only thinking, a `reset` event tells the client to drop it.
+  Auto-titling and memory extraction are fire-and-forget Haiku calls after the turn — recorded as
+  chat usage like everything else, never billed invisibly. **The whole `/api/chat/` prefix needs
+  the datapath's nginx settings** (`proxy_stream.conf`): buffering withholds the head exactly as it
+  did for the Anthropic datapath, and the 60s default read timeout kills the slow operations —
+  compacting a conversation is a full model call over its transcript, and the browser then gets an
+  HTML 504 where it expected JSON. `/continue` answers as a stream with keep-alives for the same
+  reason.
+- **Chat prompt caching** (`ChatPrompt.cacheMarks`): every request marks the last system block
+  (tools + system are byte-identical across a conversation's turns) and a **rolling pair** of
+  messages — the newest turn, plus one two turns back so an expired write still leaves an older
+  prefix to read. Three breakpoints, inside Anthropic's limit of four. Writes are priced at the 5m
+  tier, which `ModelPriceRepo` already bills; below the model's minimum cacheable length the
+  markers are simply ignored upstream.
+- **Turn timestamps:** each user turn is prefixed with a `[sent <date> <time>, <tz>]` text block on
+  the viewer's clock (`ChatStreamRequest.tz`), and the system prompt tells the model to read it as
+  metadata — the newest one is "now". Deliberately **not** in the system prefix: a clock up there
+  would change the cached prefix on every request and turn every cache read into a miss.
+- **`ChatRepo.copy`** duplicates a conversation, transcript and attachment *bytes* included, so the
+  two are independent — deleting either must not knock a file out of the other. Timestamps are
+  carried over, since it is the same conversation.
+- **Rewind vs retry vs edit** (chat UI): *retry* re-answers the same turn, *edit* rewrites a user
+  turn and resends, *rewind* cuts back to a user turn and returns it — text and files — to the
+  composer **unsent**. That last one is why `ChatRepo.truncateFrom` **detaches** attachments
+  (`message_id = null`) instead of deleting them; the orphan pruner sweeps whatever is never
+  re-sent. **`truncateFrom` verifies the id is a real message of that chat** — the cut is
+  `id >= messageId`, so an out-of-range id (a client-side optimistic placeholder, say) deletes the
+  entire conversation. That happened to a live chat; the client also never sends a placeholder now,
+  and re-reads the thread after a stream dies.
+- **"Continue in a new chat"** (`ChatEngine.continueInNewChat`, `POST /chat/chats/{id}/continue`):
+  compacts the transcript upstream into a handover and opens a fresh chat whose first assistant
+  message *is* that handover — visible, editable, and replayed like any other turn. Deliberately
+  not also copied into the chat's system prompt: the model would read the same text twice on every
+  request. Synchronous, unlike the other chores — the user is waiting on the new chat, and a silent
+  failure would open one that has quietly lost the thread.
+- **"Ask about this chat"** (`chat/AskPanel.tsx`): a side question answered against the open
+  conversation's transcript, run as a **temporary** turn — so it costs money but leaves no trace
+  unless kept. "Add to chat" appends the pair through `POST /chat/chats/{id}/messages`, which does
+  no upstream call at all: the answer already exists and was already billed.
+- **Dialogs and menus render through a portal** (`Modal`, `AnchoredMenu` in `ui.tsx`). Not
+  tidiness: the chat page nests them inside a column that clips its overflow and stacks a drawer,
+  a scrim and a sticky header, so an in-place dialog ends up visible but unclickable, and the row
+  menu gets clipped by the scrolling list. `AnchoredMenu` positions against the live trigger and
+  closes on scroll rather than chasing it.
+- **The thread scrolls by setting `scrollTop` once per animation frame**, and `.chat-scroll` has
+  no `scroll-behavior: smooth`. A `scrollIntoView` per token restarts an easing animation on every
+  delta, which is what made the transcript judder on a phone mid-answer.
+- **Chat on phones:** the app topbar is hidden on `/chat` (`.app.chat-route`) — it repeated the
+  page title and ate a row of a mostly-transcript screen; the way back to the rest of the admin is
+  the `.leave-chat` button above the conversation list. Every chat field is **16px on mobile**:
+  below that iOS zooms on focus and never zooms back out, leaving the whole app scaled up. Those
+  rules have to live next to the chat selectors — the generic `input { font-size: 16px }` loses on
+  specificity.
 - **Permissions** (`model/Models.kt`, ordered least→most): `PROXY_USE`, `ROUTING_USE` (use the
-  OpenAI/Anthropic routing gateways + manage `cxr_` tokens), `STATS_VIEW_OWN`, `STATS_RESET_OWN`,
+  OpenAI/Anthropic routing gateways + manage `cxr_` tokens), `CHAT_USE` (use the built-in chat UI),
+  `STATS_VIEW_OWN`, `STATS_RESET_OWN`,
   `ACCOUNTS_OWN_MANAGE` (manage own personal accounts + "My Accounts" page), `ACCOUNTS_ORDER_TOGGLE`
   (switch personal-vs-global routing order), `POOL_GLOBAL_USE` (route through the shared pool),
   `STATS_VIEW_RECENT`, `STATS_VIEW_ACCOUNTS`, `ACCOUNTS_VIEW`, `STATS_VIEW`, `ACCOUNTS_MANAGE`,
   `USERS_MANAGE`, `ADMIN`. Default roles `user`/`manager` include `ACCOUNTS_OWN_MANAGE` +
-  `ACCOUNTS_ORDER_TOGGLE` + `POOL_GLOBAL_USE` + `ROUTING_USE`.
+  `ACCOUNTS_ORDER_TOGGLE` + `POOL_GLOBAL_USE` + `ROUTING_USE` + `CHAT_USE`. A one-time migration
+  (`migrated:chat_use`) grants `CHAT_USE` to every role that already had `PROXY_USE`, so the chat
+  is reachable right after an upgrade without hand-editing roles.
 
 ## Anthropic upstream specifics (calibrated against live traffic)
 

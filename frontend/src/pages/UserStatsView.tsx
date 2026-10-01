@@ -16,13 +16,15 @@ import { TokenUsageChartsRow, usageItems } from './tokenUsage';
 import { ChartMode } from '../Chart';
 import { SkeletonChartRow, SkeletonControls, SkeletonStatsPage } from '../Skeleton';
 
-type SourceSel = 'all' | 'proxy' | 'routing';
+type SourceSel = 'all' | 'proxy' | 'routing' | 'chat';
 const SOURCE_OPTIONS: { value: SourceSel; label: string }[] = [
-  { value: 'all', label: 'All sources' }, { value: 'proxy', label: 'Proxy' }, { value: 'routing', label: 'Routing' },
+  { value: 'all', label: 'All sources' }, { value: 'proxy', label: 'Proxy' },
+  { value: 'routing', label: 'Routing' }, { value: 'chat', label: 'Chat' },
 ];
 
 export function sourceBadge(source: string) {
-  return <span className={`badge ${source === 'routing' ? 'accent' : 'muted'}`}>{source}</span>;
+  const tone = source === 'routing' ? 'accent' : source === 'chat' ? 'active' : 'muted';
+  return <span className={`badge ${tone}`}>{source}</span>;
 }
 
 export function UserStatsView({ userId, canReset, onResetDone }: {
@@ -137,6 +139,7 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
           <div className="label">Daily limits</div>
           <LimitRow label="proxy" used={s.proxyTodayCost} limit={s.dailyCostLimit} />
           <LimitRow label="routing" used={s.routingTodayCost} limit={s.dailyRoutingCostLimit} />
+          <LimitRow label="chat" used={s.chatTodayCost} limit={s.dailyChatCostLimit} />
           {/* the limit is enforced on UTC days, so spell out when it actually rolls over —
               the charts above are on local days and the two boundaries rarely coincide */}
           <div className="hint" style={{ marginTop: 8 }}>resets in {fmtUntilUtcMidnight()} · 00:00 UTC</div>
@@ -215,8 +218,8 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
             <PerTokenBlock userId={userId} source="routing" title="By routing token" days={days} endDate={endDate} mode={mode} />
           )}
 
-          {/* MCP tool calls — Claude Code datapath only, so hidden under the routing filter */}
-          {sourceSel !== 'routing' && (
+          {/* MCP tool calls — Claude Code datapath only, so hidden under the other filters */}
+          {(sourceSel === 'all' || sourceSel === 'proxy') && (
             <McpBlock userId={userId} days={days} endDate={endDate} mode={mode} />
           )}
 

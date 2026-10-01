@@ -38,7 +38,14 @@ import org.claudeproxy.repo.UsageRepo
 import org.claudeproxy.repo.UserRepo
 import java.time.Instant
 
-fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: String) {
+fun Route.adminRoutes(
+    pool: AccountPool,
+    probe: LimitProbe,
+    publicBaseUrl: String,
+    chatEngine: org.claudeproxy.chat.ChatEngine,
+    datapath: org.claudeproxy.datapath.DatapathService,
+    upstreamBaseUrl: String,
+) {
     route("/api") {
         get("/config") {
             call.requireUser()
@@ -77,6 +84,7 @@ fun Route.adminRoutes(pool: AccountPool, probe: LimitProbe, publicBaseUrl: Strin
         proxyTokenRoutes()
         routingTokenRoutes()
         statsRoutes(pool)
+        chatRoutes(pool, chatEngine, datapath, upstreamBaseUrl)
     }
 }
 
@@ -477,7 +485,7 @@ private fun Route.userRoutes() {
     post("/users") {
         call.requirePermission(Permission.USERS_MANAGE)
         val req = call.receive<CreateUserRequest>()
-        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyCostLimit, req.dailyRoutingCostLimit)
+        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyCostLimit, req.dailyRoutingCostLimit, req.dailyChatCostLimit)
         call.respond(UserRepo.get(id) ?: MessageResponse("created"))
     }
     patch("/users/{id}") {
@@ -485,7 +493,7 @@ private fun Route.userRoutes() {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateUserRequest>()
-        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyCostLimit, req.clearDailyLimit, req.dailyRoutingCostLimit, req.clearRoutingLimit)
+        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyCostLimit, req.clearDailyLimit, req.dailyRoutingCostLimit, req.clearRoutingLimit, req.dailyChatCostLimit, req.clearChatLimit)
         call.respond(UserRepo.get(id) ?: MessageResponse("updated"))
     }
     delete("/users/{id}") {
@@ -800,6 +808,8 @@ private fun buildUserStats(
         proxyTodayCost = UsageRepo.userTotals(userId, startOfLimitDay, globalOnly = true, source = "proxy").cost,
         dailyRoutingCostLimit = UserRepo.dailyRoutingLimitOf(userId),
         routingTodayCost = UsageRepo.userTotals(userId, startOfLimitDay, globalOnly = true, source = "routing").cost,
+        dailyChatCostLimit = UserRepo.dailyChatLimitOf(userId),
+        chatTodayCost = UsageRepo.userTotals(userId, startOfLimitDay, globalOnly = true, source = "chat").cost,
         activeProxySessions = active.proxy,
         activeRoutingSessions = active.routing,
         perModel = UsageRepo.userPerModel(userId, source = source),
@@ -808,9 +818,9 @@ private fun buildUserStats(
     )
 }
 
-/** Optional `source` query param: "proxy" | "routing", anything else = no filter. */
+/** Optional `source` query param: "proxy" | "routing" | "chat"; anything else = no filter. */
 private fun io.ktor.server.application.ApplicationCall.sourceParam(): String? =
-    parameters["source"]?.takeIf { it == "proxy" || it == "routing" }
+    parameters["source"]?.takeIf { it in setOf("proxy", "routing", "chat") }
 
 /**
  * Build bucketed window-utilization series (5h + weekly) for a range, with carry-forward.

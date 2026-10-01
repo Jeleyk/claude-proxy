@@ -60,6 +60,7 @@ data class CreateUserRequest(
     val allowedGroups: List<Int> = emptyList(),
     val dailyCostLimit: Double? = null,
     val dailyRoutingCostLimit: Double? = null,
+    val dailyChatCostLimit: Double? = null,
 )
 
 @Serializable
@@ -72,6 +73,8 @@ data class UpdateUserRequest(
     val clearDailyLimit: Boolean = false,
     val dailyRoutingCostLimit: Double? = null,
     val clearRoutingLimit: Boolean = false,
+    val dailyChatCostLimit: Double? = null,
+    val clearChatLimit: Boolean = false,
 )
 
 @Serializable
@@ -151,6 +154,8 @@ data class MyStatsPayload(
     val proxyTodayCost: Double = 0.0,           // spend counted against dailyCostLimit today
     val dailyRoutingCostLimit: Double? = null,
     val routingTodayCost: Double = 0.0,         // spend counted against dailyRoutingCostLimit today
+    val dailyChatCostLimit: Double? = null,
+    val chatTodayCost: Double = 0.0,            // spend counted against dailyChatCostLimit today
     // this user's requests streaming from Anthropic right now, by datapath
     val activeProxySessions: Int = 0,
     val activeRoutingSessions: Int = 0,

@@ -4,6 +4,7 @@ import { api, has, UserDto } from './api';
 import { Icon, IconButton, Modal, ThemeToggle } from './ui';
 import { SkeletonLine } from './Skeleton';
 import { Login } from './pages/Login';
+import { Chat } from './pages/Chat';
 import { Dashboard } from './pages/Dashboard';
 import { MyAccounts } from './pages/MyAccounts';
 import { Users } from './pages/Users';
@@ -23,6 +24,7 @@ interface NavDef {
 }
 
 const NAV: NavDef[] = [
+  { path: '/chat', label: 'Chat', icon: 'chat', perm: 'CHAT_USE' },
   { path: '/dashboard', label: 'Dashboard', icon: 'dashboard', perm: 'ACCOUNTS_VIEW' },
   { path: '/my/accounts', label: 'My Accounts', icon: 'accounts', perm: 'ACCOUNTS_OWN_MANAGE' },
   { path: '/my/stats', label: 'My Stats', icon: 'mystats', perm: 'STATS_VIEW_OWN' },
@@ -108,9 +110,11 @@ function Shell({ user, setUser }: { user: UserDto; setUser: (u: UserDto | null) 
     ?? (location.pathname.startsWith('/user-stats') ? NAV.find((n) => n.path === '/users') : undefined);
   const activeLabel = active?.label ?? 'claude-proxy';
   const landing = firstAllowedPath(user);
+  // The chat owns its own scrolling and fills the viewport; the shell must not pad or scroll it.
+  const isChat = location.pathname.startsWith('/chat');
 
   return (
-    <div className={'app' + (collapsed ? ' collapsed' : '') + (drawerOpen ? ' drawer-open' : '')}>
+    <div className={'app' + (collapsed ? ' collapsed' : '') + (drawerOpen ? ' drawer-open' : '') + (isChat ? ' chat-route' : '')}>
       <div className="scrim" onClick={() => setDrawerOpen(false)} />
 
       <aside className="sidebar">
@@ -157,8 +161,10 @@ function Shell({ user, setUser }: { user: UserDto; setUser: (u: UserDto | null) 
           <span className="tb-brand">{activeLabel}</span>
           <div className="right"><ThemeToggle /></div>
         </header>
-        <div className="main-scroll">
+        <div className={'main-scroll' + (isChat ? ' full' : '')}>
           <Routes>
+            <Route path="/chat" element={<RequirePerm user={user} perm="CHAT_USE"><Chat onOpenNav={() => setDrawerOpen(true)} /></RequirePerm>} />
+            <Route path="/chat/:id" element={<RequirePerm user={user} perm="CHAT_USE"><Chat onOpenNav={() => setDrawerOpen(true)} /></RequirePerm>} />
             <Route path="/dashboard" element={<RequirePerm user={user} perm="ACCOUNTS_VIEW"><Dashboard user={user} /></RequirePerm>} />
             <Route path="/my/accounts" element={<RequirePerm user={user} perm="ACCOUNTS_OWN_MANAGE"><MyAccounts user={user} onUserChange={setUser} /></RequirePerm>} />
             <Route path="/my/stats" element={<RequirePerm user={user} perm="STATS_VIEW_OWN"><MyStats canReset={has(user, 'STATS_RESET_OWN')} /></RequirePerm>} />

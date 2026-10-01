@@ -138,6 +138,10 @@ fun Application.module(
     refresher.start(GlobalScope)
     scheduler.start(GlobalScope)
     startSessionMapPruner()
+    startAttachmentPruner()
+
+    val datapath = DatapathService(pool)
+    val chatEngine = org.claudeproxy.chat.ChatEngine(pool, config.upstreamBaseUrl, datapath)
 
     routing {
         get("/healthz") { call.respond(MessageResponse("ok")) }
@@ -145,11 +149,11 @@ fun Application.module(
         // Proxy datapath (Anthropic API passthrough).
         proxyRoutes(engine)
 
-        // Management REST API.
-        adminRoutes(pool, probe, config.publicBaseUrl)
+        // Management REST API (the chat UI's own API is mounted under /api by adminRoutes).
+        adminRoutes(pool, probe, config.publicBaseUrl, chatEngine, datapath, config.upstreamBaseUrl)
 
         // Private control API for the Go gateway (never routed publicly by nginx).
-        internalRoutes(DatapathService(pool), config.internalToken)
+        internalRoutes(datapath, config.internalToken)
 
         // The SPA is served by the nginx router (see deploy/), not by the service.
     }
@@ -159,6 +163,23 @@ fun Application.module(
  * Daily TTL sweep for session-id rotation state. Rows first seen more than
  * SESSION_MAP_TTL_DAYS ago (default 30) are dead — a Claude Code session never lives that long.
  */
+/**
+ * Hourly sweep for chat attachments that were uploaded but never sent — a user can attach a file
+ * and close the tab, and those bytes would otherwise sit in the DB forever. A day of slack is far
+ * more than any compose session needs.
+ */
+@OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+private fun startAttachmentPruner() = GlobalScope.launch {
+    while (isActive) {
+        runCatching {
+            val cutoff = java.time.Instant.now().minus(java.time.Duration.ofDays(1))
+            val n = org.claudeproxy.repo.ChatMemoryRepo.pruneOrphans(cutoff)
+            if (n > 0) log.info("Pruned {} unsent chat attachments", n)
+        }.onFailure { log.warn("attachment prune failed: {}", it.message) }
+        delay(java.time.Duration.ofHours(1).toMillis())
+    }
+}
+
 private fun startSessionMapPruner() = GlobalScope.launch {
     val ttl = java.time.Duration.ofDays(envOrProp("SESSION_MAP_TTL_DAYS")?.toLongOrNull() ?: 30L)
     while (isActive) {

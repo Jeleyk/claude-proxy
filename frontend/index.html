@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover pairs with the env(safe-area-inset-*) padding on the composer;
+         zoom is deliberately left enabled (accessibility) — fields are sized 16px instead, which
+         is what stops iOS from zooming on focus and staying there. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>claude-proxy</title>
   </head>
   <body>

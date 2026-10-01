@@ -50,6 +50,7 @@ object Db {
             SchemaUtils.createMissingTablesAndColumns(*ALL_TABLES)
             seedRoles()
             migrateGlobalPoolPermission()
+            migrateChatPermission()
             migrateWindowSnapshotCoefficient()
             seedAdmin(config)
         }
@@ -66,9 +67,9 @@ object Db {
     private fun seedRoles() {
         val defaults = mapOf(
             "admin" to Permission.entries.toList(),
-            "manager" to listOf(Permission.ACCOUNTS_MANAGE, Permission.ACCOUNTS_VIEW, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE, Permission.ROUTING_USE, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN, Permission.PROXY_USE),
+            "manager" to listOf(Permission.ACCOUNTS_MANAGE, Permission.ACCOUNTS_VIEW, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE, Permission.ROUTING_USE, Permission.CHAT_USE, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN, Permission.PROXY_USE),
             "viewer" to listOf(Permission.ACCOUNTS_VIEW, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN),
-            "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE, Permission.ROUTING_USE),
+            "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE, Permission.ROUTING_USE, Permission.CHAT_USE),
         )
         defaults.forEach { (roleName, perms) ->
             val exists = Roles.select(Roles.id).where { Roles.name eq roleName }.any()
@@ -103,6 +104,31 @@ object Db {
                 it[permission] = Permission.POOL_GLOBAL_USE.name
             }
         }
+        Settings.insert {
+            it[key] = markerKey
+            it[value] = Instant.now().toString()
+        }
+    }
+
+    /**
+     * One-time backfill for CHAT_USE, mirroring [migrateGlobalPoolPermission]: a role that could
+     * already spend on the pool (PROXY_USE) gets the chat UI too, so the feature is reachable
+     * right after an upgrade without hand-editing every role. Marked in the settings table so it
+     * runs exactly once — otherwise every restart would resurrect a permission an admin removed.
+     */
+    private fun migrateChatPermission() {
+        val markerKey = "migrated:chat_use"
+        if (Settings.selectAll().where { Settings.key eq markerKey }.any()) return
+        RolePermissions
+            .select(RolePermissions.roleId)
+            .where { RolePermissions.permission eq Permission.PROXY_USE.name }
+            .map { it[RolePermissions.roleId] }
+            .forEach { rid ->
+                RolePermissions.insertIgnore {
+                    it[roleId] = rid
+                    it[permission] = Permission.CHAT_USE.name
+                }
+            }
         Settings.insert {
             it[key] = markerKey
             it[value] = Instant.now().toString()

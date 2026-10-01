@@ -10,9 +10,11 @@ export interface UserDto {
   allGroups: boolean;
   dailyCostLimit: number | null;
   dailyRoutingCostLimit: number | null;
+  dailyChatCostLimit: number | null;
   preferGlobalPool: boolean;
   todayCost: number;
   todayRoutingCost: number;
+  todayChatCost: number;
   todayInputTokens: number;
   todayOutputTokens: number;
 }
@@ -146,8 +148,192 @@ export interface RoleDto {
   permissions: string[];
 }
 
-/** Datapath filter for the stats views: undefined = both sources. */
-export type StatsSource = 'proxy' | 'routing' | undefined;
+/** Datapath filter for the stats views: undefined = every source. */
+export type StatsSource = 'proxy' | 'routing' | 'chat' | undefined;
+
+/* ---------------------------------------------------------------- chat */
+
+export interface ChatDto {
+  id: number;
+  title: string;
+  model: string;
+  pinned: boolean;
+  archived: boolean;
+  useMemory: boolean;
+  systemPrompt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  preview: string | null;
+  messageCount: number;
+  cost: number;
+  // set on search results: the matching text in context
+  snippet: string | null;
+}
+
+export interface ChatAttachmentDto {
+  id: number;
+  name: string;
+  mimeType: string;
+  size: number;
+  kind: 'image' | 'document' | 'text';
+}
+
+export interface ChatMessageDto {
+  id: number;
+  role: 'user' | 'assistant';
+  content: string;
+  thinking: string | null;
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cost: number;
+  error: string | null;
+  createdAt: string;
+  attachments: ChatAttachmentDto[];
+}
+
+export interface ChatDetail { chat: ChatDto; messages: ChatMessageDto[]; }
+
+export interface ChatModelDto { id: string; label: string; note: string | null; }
+
+export interface ChatMemoryDto {
+  id: number;
+  content: string;
+  source: 'auto' | 'manual';
+  enabled: boolean;
+  chatId: number | null;
+  createdAt: string;
+}
+
+export interface ChatSettingsDto {
+  memoryEnabled: boolean;
+  defaultModel: string | null;
+  aboutYou: string | null;
+  responseStyle: string | null;
+  dailyChatCostLimit: number | null;
+  todayChatCost: number;
+}
+
+/** One turn of a temporary chat, replayed to the server (nothing about it is stored). */
+export interface ChatTurn { role: 'user' | 'assistant'; content: string; attachmentIds?: number[]; }
+
+export interface ChatStreamBody {
+  chatId?: number | null;
+  temporary?: boolean;
+  message: string;
+  attachmentIds?: number[];
+  model?: string;
+  webSearch?: boolean;
+  thinking?: boolean;
+  history?: ChatTurn[];
+  fromMessageId?: number;
+  /** viewer's IANA timezone — the server stamps each user turn with it for the model to read */
+  tz?: string;
+}
+
+/** Events the chat datapath emits, in the order they arrive. */
+export type ChatStreamEvent =
+  | { type: 'start'; chatId?: number; title?: string; userMessageId?: number; model: string; temporary: boolean }
+  | { type: 'delta'; t: string }
+  | { type: 'thinking'; t: string }
+  | { type: 'tool'; name: string; query?: string; results?: number }
+  // an account died mid-answer and another took over: drop whatever it had already produced
+  | { type: 'reset'; reason?: string }
+  | { type: 'done'; messageId?: number; model: string; inputTokens: number; outputTokens: number; cost: number; warning?: string }
+  | { type: 'error'; message: string; messageId?: number };
+
+/**
+ * POST a JSON body and read the SSE response. `fetch` rather than `EventSource`: these are POSTs
+ * with bodies, and an abort signal is what powers Stop.
+ *
+ * A failed request may answer with HTML rather than JSON — a proxy's own 502/504 page, say — so
+ * the error path never assumes the body parses.
+ */
+async function postSse(
+  path: string,
+  body: unknown,
+  onEvent: (e: { type: string } & Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(path, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => '');
+    let message = `HTTP ${res.status}`;
+    try { message = JSON.parse(text)?.message || message; } catch { /* an HTML error page */ }
+    throw new Error(message);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let event = '';
+  let data = '';
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).replace(/\r$/, '');
+      buffer = buffer.slice(nl + 1);
+      if (line === '') {
+        if (event && data) {
+          try { onEvent({ type: event, ...JSON.parse(data) }); } catch { /* skip a torn frame */ }
+        }
+        event = ''; data = '';
+      } else if (line.startsWith('event:')) event = line.slice(6).trim();
+      else if (line.startsWith('data:')) data += line.slice(5).trim();
+      // ':' comments are keep-alives — ignored, which is the whole point of them
+    }
+  }
+}
+
+/** Read the chat message stream. */
+export function streamChat(
+  body: ChatStreamBody,
+  onEvent: (e: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return postSse('/api/chat/stream', { tz: localTz(), ...body }, (e) => onEvent(e as ChatStreamEvent), signal);
+}
+
+/**
+ * Compact a conversation into a new chat. Streamed rather than a plain POST: the compaction is a
+ * model call over the whole transcript and outlives a proxy's read timeout, which surfaced as a
+ * 504 (and an HTML body where JSON was expected).
+ */
+export function continueChatStream(id: number, signal?: AbortSignal): Promise<number> {
+  let chatId: number | null = null;
+  let failure: string | null = null;
+  return postSse(`/api/chat/chats/${id}/continue`, {}, (e) => {
+    if (e.type === 'done') chatId = e.chatId as number;
+    else if (e.type === 'error') failure = String(e.message);
+  }, signal).then(() => {
+    if (failure) throw new Error(failure);
+    if (chatId == null) throw new Error('The compaction ended without producing a chat.');
+    return chatId;
+  });
+}
+
+/** Upload one attachment; the bytes are the body, the name rides in the query. */
+export async function uploadAttachment(file: File): Promise<ChatAttachmentDto> {
+  const res = await fetch(`/api/chat/attachments?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new Error(data?.message || `HTTP ${res.status}`);
+  return data as ChatAttachmentDto;
+}
 
 /** Own stats live under /api/stats/mine; the admin view of another user under /api/users/{id}/stats. */
 function statsBase(uid: number | null): string {
@@ -290,6 +476,34 @@ export const api = {
   tokenUsage: (source: 'proxy' | 'routing', days: number, end?: string) =>
     req<TokenUsage>('GET', `/api/stats/mine/token-usage${qs({ source, days, end, tz: localTz() })}`),
   setAccountOrder: (preferGlobalPool: boolean) => req<UserDto>('PATCH', '/api/my/account-order', { preferGlobalPool }),
+  // ---- chat ----
+  chats: (q?: string, archived?: boolean) =>
+    req<ChatDto[]>('GET', `/api/chat/chats${qs({ q, archived: archived ? 'true' : undefined })}`),
+  chat: (id: number) => req<ChatDetail>('GET', `/api/chat/chats/${id}`),
+  createChat: (b: { title?: string; model?: string }) => req<ChatDto>('POST', '/api/chat/chats', b),
+  updateChat: (id: number, b: Record<string, unknown>) => req<ChatDto>('PATCH', `/api/chat/chats/${id}`, b),
+  deleteChat: (id: number) => req<unknown>('DELETE', `/api/chat/chats/${id}`),
+  deleteAllChats: () => req<{ message: string }>('DELETE', '/api/chat/chats'),
+  // Duplicate a conversation (transcript + files) into an independent copy.
+  copyChat: (id: number) => req<ChatDetail>('POST', `/api/chat/chats/${id}/copy`),
+  // drop a message and everything after it (the same cut a retry makes)
+  truncateChat: (id: number, messageId: number) =>
+    req<ChatDetail>('DELETE', `/api/chat/chats/${id}/messages/${messageId}`),
+  chatModels: () => req<ChatModelDto[]>('GET', '/api/chat/models'),
+  // Promote an already-answered side question into the conversation (no upstream call).
+  appendExchange: (id: number, b: { question: string; answer: string; model?: string }) =>
+    req<ChatDetail>('POST', `/api/chat/chats/${id}/messages`, b),
+  deleteAttachment: (id: number) => req<unknown>('DELETE', `/api/chat/attachments/${id}`),
+  memories: () => req<ChatMemoryDto[]>('GET', '/api/chat/memories'),
+  addMemory: (content: string) => req<ChatMemoryDto[]>('POST', '/api/chat/memories', { content }),
+  updateMemory: (id: number, b: { content?: string; enabled?: boolean }) =>
+    req<ChatMemoryDto[]>('PATCH', `/api/chat/memories/${id}`, b),
+  deleteMemory: (id: number) => req<ChatMemoryDto[]>('DELETE', `/api/chat/memories/${id}`),
+  clearMemories: () => req<{ message: string }>('DELETE', '/api/chat/memories'),
+  chatSettings: () => req<ChatSettingsDto>('GET', '/api/chat/settings'),
+  saveChatSettings: (b: Partial<ChatSettingsDto>) => req<ChatSettingsDto>('PATCH', '/api/chat/settings', b),
+  importChat: (url: string) => req<ChatDetail>('POST', '/api/chat/import', { url }),
+
   resetAllStats: () => req<{ message: string }>('POST', '/api/stats/reset'),
   resetUserStats: (id: number) => req<{ message: string }>('POST', `/api/users/${id}/stats/reset`),
   resetMyStats: () => req<{ message: string }>('POST', '/api/stats/mine/reset'),
@@ -313,6 +527,8 @@ export interface MyStats {
   proxyTodayCost: number;             // spend counted against dailyCostLimit today
   dailyRoutingCostLimit: number | null;
   routingTodayCost: number;           // spend counted against dailyRoutingCostLimit today
+  dailyChatCostLimit: number | null;
+  chatTodayCost: number;              // spend counted against dailyChatCostLimit today
   activeProxySessions: number;        // this user's in-flight requests, by datapath
   activeRoutingSessions: number;
   perModel: ModelUsage[]; perModelToday: ModelUsage[]; recent: UsageEvent[];

@@ -1,4 +1,5 @@
 import { ReactNode, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ChartMode } from './Chart';
 
 /* ---------------------------------------------------------------- icons
@@ -23,6 +24,31 @@ const ICON_PATHS: Record<string, ReactNode> = {
   settings: (<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>),
   sparkle: (<path d="M12 3l1.9 5.6a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z" />),
   bars: (<><rect x="4" y="12" width="4" height="8" rx="1" /><rect x="10" y="7" width="4" height="13" rx="1" /><rect x="16" y="14" width="4" height="6" rx="1" /></>),
+  // ---- chat ----
+  chat: (<><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.6 9.6 0 0 1-2.8-.4L3 21l1.6-4.6A8.2 8.2 0 0 1 3.6 11.5 8.4 8.4 0 0 1 12 3.1a8.4 8.4 0 0 1 9 8.4z" /></>),
+  plus: (<><path d="M12 5v14M5 12h14" /></>),
+  search: (<><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></>),
+  send: (<><path d="M4 12 20 4l-8 16-2-6z" /><path d="m10 14 10-10" /></>),
+  stop: (<><rect x="6" y="6" width="12" height="12" rx="2" /></>),
+  clip: (<path d="M21 11.5 12.5 20a5 5 0 0 1-7-7l8.5-8.5a3.4 3.4 0 0 1 4.8 4.8L10.2 17.8a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" />),
+  globe: (<><circle cx="12" cy="12" r="9" /><path d="M3 12h18" /><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z" /></>),
+  brain: (<><path d="M9.5 4a2.5 2.5 0 0 0-2.4 3.2A2.6 2.6 0 0 0 5 9.8a2.6 2.6 0 0 0 1 2 2.6 2.6 0 0 0 1.4 4.7A2.5 2.5 0 0 0 12 17V6.5A2.5 2.5 0 0 0 9.5 4z" /><path d="M14.5 4A2.5 2.5 0 0 1 17 6.5a2.6 2.6 0 0 1 2 2.5 2.6 2.6 0 0 1-1 2 2.6 2.6 0 0 1-1.4 4.7A2.5 2.5 0 0 1 12 17" /></>),
+  ghost: (<><path d="M12 3a7 7 0 0 0-7 7v10l2.5-2 2.2 2 2.3-2 2.3 2 2.2-2 2.5 2V10a7 7 0 0 0-7-7z" /><path d="M9.5 10h.01M14.5 10h.01" /></>),
+  memory: (<><rect x="6" y="6" width="12" height="12" rx="2.5" /><path d="M9.5 3v3M14.5 3v3M9.5 18v3M14.5 18v3M3 9.5h3M3 14.5h3M18 9.5h3M18 14.5h3" /></>),
+  import: (<><path d="M12 3v11" /><path d="m8 10 4 4 4-4" /><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></>),
+  copy: (<><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V6a2 2 0 0 1 2-2h9" /></>),
+  edit: (<><path d="M4 20h4l10-10-4-4L4 16z" /><path d="m14.5 5.5 4 4" /></>),
+  retry: (<><path d="M4 12a8 8 0 1 1 2.6 5.9" /><path d="M4 20v-5h5" /></>),
+  trash: (<><path d="M4 7h16" /><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><path d="M6 7v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7" /></>),
+  pin: (<><path d="M9 3h6l-1 6 4 3v2H6v-2l4-3z" /><path d="M12 14v7" /></>),
+  file: (<><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /></>),
+  pdf: (<><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /><path d="M8.5 16v-3h1.2a1.1 1.1 0 0 1 0 2.2H8.5" /></>),
+  sidebar: (<><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></>),
+  warn: (<><path d="M12 4 2.5 20h19z" /><path d="M12 10v4M12 17.5h.01" /></>),
+  dots: (<><circle cx="5" cy="12" r="1.4" /><circle cx="12" cy="12" r="1.4" /><circle cx="19" cy="12" r="1.4" /></>),
+  rewind: (<><path d="m11 7-6 5 6 5z" /><path d="m19 7-6 5 6 5z" /></>),
+  ask: (<><circle cx="12" cy="12" r="9" /><path d="M9.6 9.2a2.5 2.5 0 1 1 3.3 2.9c-.6.2-.9.8-.9 1.4v.4" /><path d="M12 17h.01" /></>),
+  model: (<><path d="M12 3.2 14 8l4.8 2-4.8 2L12 16.8 10 12 5.2 10 10 8z" /><path d="M18.5 15.5 19 17l1.5.5L19 18l-.5 1.5L18 18l-1.5-.5L18 17z" /></>),
   area: (<><path d="M3 16c3 0 3-6 6-6s4 4 6 4 3-5 6-5" /><path d="M3 20h18" /></>),
 };
 
@@ -177,6 +203,14 @@ export function Switch({ checked, onChange }: { checked: boolean; onChange: (v: 
   );
 }
 
+/**
+ * A dialog, rendered into `document.body` through a portal.
+ *
+ * The portal is load-bearing, not tidiness: the chat page nests its dialogs inside a column that
+ * clips its own overflow and stacks a drawer, a scrim and a sticky header on top of each other.
+ * Left in place, a dialog opened from there ends up under that furniture — visible but unclickable.
+ * Rendering at the document root puts every dialog in the same, predictable stacking context.
+ */
 export function Modal({ title, onClose, children, footer, width }: {
   title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; width?: number;
 }) {
@@ -185,7 +219,15 @@ export function Modal({ title, onClose, children, footer, width }: {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
-  return (
+
+  // A dialog is modal: the page behind it must not scroll away under the user's finger.
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+
+  return createPortal(
     <div className="overlay" onMouseDown={onClose}>
       <div className="modal" style={width ? { width } : undefined} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
@@ -195,7 +237,45 @@ export function Modal({ title, onClose, children, footer, width }: {
         <div className="modal-body">{children}</div>
         {footer && <div className="modal-foot">{footer}</div>}
       </div>
-    </div>
+    </div>,
+    document.body,
+  );
+}
+
+/**
+ * A menu anchored to the element that opened it, rendered at the document root. Same reason as
+ * [Modal] — plus the chat list scrolls, and an in-flow menu would be clipped by it.
+ */
+export function AnchoredMenu({ anchor, onClose, children, align = 'right' }: {
+  anchor: HTMLElement | null; onClose: () => void; children: ReactNode; align?: 'left' | 'right';
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    // Any scroll moves the anchor out from under the menu; closing beats chasing it.
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', onClose, true);
+    window.addEventListener('resize', onClose);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onClose, true);
+      window.removeEventListener('resize', onClose);
+    };
+  }, [onClose]);
+
+  if (!anchor) return null;
+  const r = anchor.getBoundingClientRect();
+  const style: React.CSSProperties = align === 'right'
+    ? { top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) }
+    : { top: r.bottom + 6, left: Math.max(8, r.left) };
+
+  return createPortal(
+    <>
+      <div className="menu-backdrop" onMouseDown={onClose} />
+      <div className="row-menu floating" style={style} role="menu" onMouseDown={(e) => e.stopPropagation()}>
+        {children}
+      </div>
+    </>,
+    document.body,
   );
 }
 
