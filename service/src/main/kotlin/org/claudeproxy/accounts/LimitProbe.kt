@@ -40,7 +40,7 @@ class LimitProbe(
     /** Probe body framed like Claude Code, carrying this account's device-id + probe session. */
     private fun probeBody(account: AccountRuntime): String {
         val deviceId = account.deviceId ?: generateDeviceId()
-        val inner = """{"device_id":"$deviceId","account_uuid":"","session_id":"${probeSessionId(account.id)}"}"""
+        val inner = org.claudeproxy.proxy.RequestRewriter.userId(deviceId, account.upstreamAccountUuid, probeSessionId(account.id))
         val userId = kotlinx.serialization.json.Json.encodeToString(kotlinx.serialization.json.JsonPrimitive.serializer(), kotlinx.serialization.json.JsonPrimitive(inner))
         return """{"model":"$probeModel","max_tokens":1,"system":"$systemPrompt","messages":[{"role":"user","content":"."}],"metadata":{"user_id":$userId}}"""
     }
@@ -60,7 +60,7 @@ class LimitProbe(
             val resp: HttpResponse = Http.client.post("$upstreamBaseUrl$probePath") {
                 contentType(ContentType.Application.Json)
                 header("anthropic-version", "2023-06-01")
-                header("X-Claude-Code-Session-Id", probeSessionId(account.id))
+                org.claudeproxy.proxy.ClaudeCodeClient.applyHeaders(this, probeSessionId(account.id))
                 UpstreamAuth.apply(this, account.type, account.secret)
                 setBody(probeBody(account))
             }

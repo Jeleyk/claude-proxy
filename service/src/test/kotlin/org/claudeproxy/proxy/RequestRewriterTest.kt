@@ -34,6 +34,25 @@ class RequestRewriterTest {
     }
 
     @Test
+    fun `account_uuid is replaced with the upstream account's, never the client's`() {
+        val out = RequestRewriter.rewrite(body("d", "S", accountUuid = "client-uuid"), null, "d", accountUuid = "pool-uuid") { "R" }
+        assertEquals("pool-uuid", innerOf(out.body)["account_uuid"]!!.jsonPrimitive.content)
+        val blank = RequestRewriter.rewrite(body("d", "S", accountUuid = "client-uuid"), null, "d", accountUuid = "") { "R" }
+        assertEquals("", innerOf(blank.body)["account_uuid"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `stampIdentity replaces any metadata with a Claude Code shaped user_id`() {
+        val out = RequestRewriter.stampIdentity(
+            """{"model":"m","metadata":{"user_id":"sdk-user"},"messages":[]}""".encodeToByteArray(), "DEV", "UUID", "SID",
+        )
+        val inner = innerOf(out)
+        assertEquals(listOf("device_id", "account_uuid", "session_id"), inner.keys.toList())
+        assertEquals("UUID", inner["account_uuid"]!!.jsonPrimitive.content)
+        assertEquals("SID", inner["session_id"]!!.jsonPrimitive.content)
+    }
+
+    @Test
     fun `header session-id and body session-id stay in sync`() {
         // origin comes from the header; body's session_id must be rewritten to the same value.
         var seenOrigin: String? = null

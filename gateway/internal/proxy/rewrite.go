@@ -1,11 +1,11 @@
 package proxy
 
 import (
-	"crypto/sha1"
 	"encoding/json"
-	"fmt"
 	"regexp"
 	"strings"
+
+	"claudeproxy/gateway/internal/ccident"
 )
 
 // isTelemetryHeader reports whether a (lowercased) header name is Stainless SDK telemetry that
@@ -23,15 +23,17 @@ var (
 	sessionIDRe = regexp.MustCompile(`"session_id"\s*:\s*"[^"]*"`)
 )
 
-// sessionNamespace is a fixed UUID namespace for deriving per-account session ids (UUIDv5).
-var sessionNamespace = [16]byte{0xc1, 0xad, 0xe0, 0x9e, 0x50, 0x4b, 0x4a, 0x21, 0x9b, 0x3d, 0x7e, 0x11, 0x0c, 0x92, 0x0f, 0x0a}
+// accountUUIDRe matches the account_uuid inside the unescaped inner blob.
+var accountUUIDRe = regexp.MustCompile(`"account_uuid"\s*:\s*"[^"]*"`)
 
-// rewriteBody stamps the account's device-id into the request body and rotates the session id so
-// each upstream account presents its own identity. Port of the Kotlin RequestRewriter. The
+// rewriteBody stamps the account's device-id and account uuid into the request body and rotates
+// the session id so each upstream account presents its own identity. The account uuid is always
+// overwritten — with "" for API keys and subscriptions whose uuid is not known yet — because the
+// client's value names whoever runs the client, never the account that answers. Port of the Kotlin RequestRewriter. The
 // session id is derived deterministically per (origin-session, account) via UUIDv5, so it is
 // stable across retries without a database. Returns the (possibly rewritten) body and the value
 // to set on X-Claude-Code-Session-Id ("" when the request carried no session id).
-func rewriteBody(body []byte, deviceID, headerSessionID string) (out []byte, newSessionID string) {
+func rewriteBody(body []byte, deviceID, accountUUID, headerSessionID string) (out []byte, newSessionID string) {
 	if len(body) == 0 {
 		return body, ""
 	}
@@ -52,6 +54,7 @@ func rewriteBody(body []byte, deviceID, headerSessionID string) (out []byte, new
 	}
 	_, hasDev := inner["device_id"]
 	_, hasSid := inner["session_id"]
+	_, hasAcc := inner["account_uuid"]
 	if !hasDev && !hasSid {
 		return body, deriveSession(headerSessionID, deviceID)
 	}
@@ -67,6 +70,10 @@ func rewriteBody(body []byte, deviceID, headerSessionID string) (out []byte, new
 	newInner := innerText
 	if deviceID != "" && hasDev {
 		newInner = deviceIDRe.ReplaceAllString(newInner, `"device_id":"`+deviceID+`"`)
+	}
+	if hasAcc {
+		acc, _ := json.Marshal(accountUUID)
+		newInner = accountUUIDRe.ReplaceAllLiteralString(newInner, `"account_uuid":`+string(acc))
 	}
 	if newSessionID != "" && hasSid {
 		newInner = sessionIDRe.ReplaceAllString(newInner, `"session_id":"`+newSessionID+`"`)
@@ -89,16 +96,5 @@ func deriveSession(origin, deviceID string) string {
 	if origin == "" {
 		return ""
 	}
-	return uuidV5(origin + ":" + deviceID)
-}
-
-// uuidV5 computes an RFC 4122 v5 (SHA-1) UUID from the fixed session namespace and a name.
-func uuidV5(name string) string {
-	h := sha1.New()
-	h.Write(sessionNamespace[:])
-	h.Write([]byte(name))
-	s := h.Sum(nil)[:16]
-	s[6] = (s[6] & 0x0f) | 0x50 // version 5
-	s[8] = (s[8] & 0x3f) | 0x80 // RFC 4122 variant
-	return fmt.Sprintf("%x-%x-%x-%x-%x", s[0:4], s[4:6], s[6:8], s[8:10], s[10:16])
+	return ccident.UUIDv5(origin + ":" + deviceID)
 }

@@ -27,6 +27,7 @@ import org.claudeproxy.api.UsageReport
 import org.claudeproxy.datapath.ActiveSessions
 import org.claudeproxy.datapath.DatapathService
 import org.claudeproxy.model.Permission
+import org.claudeproxy.proxy.ClaudeCodeClient
 import org.claudeproxy.proxy.Http
 import org.claudeproxy.proxy.SseUsageScanner
 import org.claudeproxy.repo.AttachmentBlob
@@ -260,14 +261,17 @@ class ChatEngine(
         out: ByteWriteChannel, account: AccountRuntime, body: ByteArray, userId: Int, requestedModel: String,
         text: StringBuilder, thinking: StringBuilder,
     ): Attempt {
+        val sessionId = ClaudeCodeClient.dailySession("chat:$userId", account.id)
+        val stamped = ClaudeCodeClient.stamp(body, account, sessionId)
         val statement = Http.client.prepareRequest("$upstreamBaseUrl/v1/messages") {
             method = HttpMethod.Post
             header("anthropic-version", "2023-06-01")
+            ClaudeCodeClient.applyHeaders(this, sessionId)
             UpstreamAuth.apply(this, account.type, account.secret)
             setBody(object : OutgoingContent.ByteArrayContent() {
                 override val contentType = ContentType.Application.Json
-                override val contentLength = body.size.toLong()
-                override fun bytes() = body
+                override val contentLength = stamped.size.toLong()
+                override fun bytes() = stamped
             })
         }
 
@@ -504,14 +508,17 @@ class ChatEngine(
         else pool.selectionOrder(user.id, allowedGroups, !UserRepo.preferGlobalPoolOf(user.id), allowGlobal)
         val bytes = body.toString().toByteArray()
         for (account in order.take(2)) {
+            val sessionId = ClaudeCodeClient.dailySession("chat:${user.id}", account.id)
+            val stamped = ClaudeCodeClient.stamp(bytes, account, sessionId)
             val result = Http.client.prepareRequest("$upstreamBaseUrl/v1/messages") {
                 method = HttpMethod.Post
                 header("anthropic-version", "2023-06-01")
+                ClaudeCodeClient.applyHeaders(this, sessionId)
                 UpstreamAuth.apply(this, account.type, account.secret)
                 setBody(object : OutgoingContent.ByteArrayContent() {
                     override val contentType = ContentType.Application.Json
-                    override val contentLength = bytes.size.toLong()
-                    override fun bytes() = bytes
+                    override val contentLength = stamped.size.toLong()
+                    override fun bytes() = stamped
                 })
             }.execute { response ->
                 val headers = HashMap<String, String>()

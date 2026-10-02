@@ -194,6 +194,7 @@ class DatapathService(private val pool: AccountPool) {
         accountId = id,
         type = type.name,
         deviceId = deviceId,
+        accountUuid = accountUuid.takeIf { type != AccountType.API_KEY },
         authHeaders = authHeadersFor(this),
         fiveHourResetEpoch = limit.window(WindowKind.FIVE_HOUR)?.resetAt?.epochSecond,
         weeklyResetEpoch = limit.window(WindowKind.WEEKLY)?.resetAt?.epochSecond,

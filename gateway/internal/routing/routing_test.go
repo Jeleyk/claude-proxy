@@ -42,6 +42,8 @@ func TestRoutingEndToEnd(t *testing.T) {
 				"candidates": []map[string]any{{
 					"accountId":   7,
 					"type":        "OAUTH",
+					"deviceId":    "acct-device",
+					"accountUuid": "acct-uuid",
 					"authHeaders": map[string]string{"Authorization": "Bearer sk-test", "anthropic-beta": "oauth-2025-04-20"},
 				}},
 			})
@@ -68,22 +70,33 @@ func TestRoutingEndToEnd(t *testing.T) {
 		}
 		body, _ := io.ReadAll(r.Body)
 		var parsed struct {
-			System []map[string]string `json:"system"`
+			System   []map[string]string `json:"system"`
+			Metadata map[string]string   `json:"metadata"`
 		}
 		_ = json.Unmarshal(body, &parsed)
 		if len(parsed.System) == 0 || parsed.System[0]["text"] != ccident.SystemPrompt {
 			t.Errorf("Claude Code system prompt not injected: %s", body)
+		}
+		// The client's own metadata must not reach upstream; the account's identity must.
+		var ident map[string]string
+		_ = json.Unmarshal([]byte(parsed.Metadata["user_id"]), &ident)
+		sid := r.Header.Get("X-Claude-Code-Session-Id")
+		if ident["device_id"] != "acct-device" || ident["account_uuid"] != "acct-uuid" || sid == "" || ident["session_id"] != sid {
+			t.Errorf("identity not stamped: metadata=%v session header=%q", parsed.Metadata, sid)
+		}
+		if r.Header.Get("x-app") != "cli" || r.Header.Get("User-Agent") != "claude-cli/test" {
+			t.Errorf("client headers wrong: x-app=%q ua=%q", r.Header.Get("x-app"), r.Header.Get("User-Agent"))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"msg_1","model":"claude-sonnet-4-5","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":11,"output_tokens":3}}`))
 	}))
 	defer upstream.Close()
 
-	cfg := &config.Config{UpstreamBaseURL: upstream.URL}
+	cfg := &config.Config{UpstreamBaseURL: upstream.URL, ClaudeCodeUserAgent: "claude-cli/test"}
 	ctrl := control.New(controlSrv.URL, "secret").WithSource("routing")
 	h := routing.NewHandler(cfg, ctrl, anthropicgw.New())
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4-5","metadata":{"user_id":"sdk-caller"},"messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("x-api-key", "cxr_test")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)

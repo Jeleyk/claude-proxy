@@ -220,6 +220,13 @@ class AccountPool {
         }
     }
 
+    suspend fun setAccountUuid(id: Int, accountUuid: String) {
+        mutex.withLock {
+            val cur = accounts[id] ?: return@withLock
+            accounts = accounts + (id to cur.copy(accountUuid = accountUuid))
+        }
+    }
+
     suspend fun setHealth(id: Int, health: AccountHealth) {
         mutex.withLock {
             val cur = accounts[id] ?: return@withLock

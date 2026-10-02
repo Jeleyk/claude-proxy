@@ -10,6 +10,7 @@ package routing
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -196,20 +197,30 @@ func (h *Handler) forward(
 	model := prep.RequestedModel
 	report := control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Source: "routing"}
 
+	// Present each account the way its own logged-in CLI would: a session id, and on a Messages
+	// call the metadata naming this account's device and uuid in place of anything the API
+	// client sent.
+	sessionID := routingSession(tokenID, cand.AccountID, time.Now())
+	body := prep.Body
+	if len(body) > 0 && carriesMetadata(prep.UpstreamPath) {
+		body = ccident.StampUserID(body, cand.DeviceID, cand.AccountUUID, sessionID)
+	}
+
 	url := h.cfg.UpstreamBaseURL + prep.UpstreamPath
 	var reqBody io.Reader
-	if len(prep.Body) > 0 {
-		reqBody = bytes.NewReader(prep.Body)
+	if len(body) > 0 {
+		reqBody = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, prep.Method, url, reqBody)
 	if err != nil {
 		report.Status = 0
 		return forwardResult{retry: canRetry, report: report}
 	}
-	if len(prep.Body) > 0 {
+	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
-		req.ContentLength = int64(len(prep.Body))
+		req.ContentLength = int64(len(body))
 	}
+	ccident.SetClientHeaders(req.Header, h.cfg.ClaudeCodeUserAgent, sessionID)
 	// Per-account upstream credentials (already decrypted by the service). Merge anthropic-beta
 	// with any client-provided values so client betas (e.g. context-management, prompt-caching)
 	// survive alongside the account's oauth beta.
@@ -369,6 +380,24 @@ func (h *Handler) relayStream(
 			return sw.Usage(), false
 		}
 	}
+}
+
+// routingSession is the session id a routing request presents to one account: stable per
+// (token, account) for a UTC day, the way one CLI run spans many calls. A fresh id per request
+// would read as thousands of one-call sessions.
+func routingSession(tokenID *int, accountID int, now time.Time) string {
+	tok := 0
+	if tokenID != nil {
+		tok = *tokenID
+	}
+	return ccident.UUIDv5(fmt.Sprintf("routing:%d:%d:%s", tok, accountID, now.UTC().Format("2006-01-02")))
+}
+
+// carriesMetadata reports whether the upstream endpoint takes a `metadata` field. Only Messages
+// itself does: count_tokens rejects it as an extra input.
+func carriesMetadata(upstreamPath string) bool {
+	path, _, _ := strings.Cut(upstreamPath, "?")
+	return path == "/v1/messages"
 }
 
 func applyUsage(report *control.UsageReport, u Usage, fallbackModel string) {

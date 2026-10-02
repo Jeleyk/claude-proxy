@@ -4,7 +4,12 @@
 // block is exactly the Claude Code prompt (calibrated against live traffic — see CLAUDE.md).
 package ccident
 
-import "encoding/json"
+import (
+	"crypto/sha1"
+	"encoding/json"
+	"fmt"
+	"net/http"
+)
 
 // SystemPrompt is the exact first system block Anthropic requires for OAuth subscription auth.
 const SystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -131,4 +136,63 @@ func InsertStaticPrompt(body []byte, prompt string) []byte {
 		return body
 	}
 	return out
+}
+
+// sessionNamespace is a fixed UUID namespace for deriving session ids (UUIDv5). Changing it
+// would re-key every derived session at once.
+var sessionNamespace = [16]byte{0xc1, 0xad, 0xe0, 0x9e, 0x50, 0x4b, 0x4a, 0x21, 0x9b, 0x3d, 0x7e, 0x11, 0x0c, 0x92, 0x0f, 0x0a}
+
+// UUIDv5 computes an RFC 4122 v5 (SHA-1) UUID from the fixed session namespace and a name.
+func UUIDv5(name string) string {
+	h := sha1.New()
+	h.Write(sessionNamespace[:])
+	h.Write([]byte(name))
+	s := h.Sum(nil)[:16]
+	s[6] = (s[6] & 0x0f) | 0x50 // version 5
+	s[8] = (s[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", s[0:4], s[4:6], s[6:8], s[8:10], s[10:16])
+}
+
+// userID is metadata.user_id's inner object, fields in the order Claude Code writes them.
+type userID struct {
+	DeviceID    string `json:"device_id"`
+	AccountUUID string `json:"account_uuid"`
+	SessionID   string `json:"session_id"`
+}
+
+// UserID is the metadata.user_id string Claude Code sends: escaped JSON naming the device, the
+// logged-in account ("" in API-key mode) and the session.
+func UserID(deviceID, accountUUID, sessionID string) string {
+	b, _ := json.Marshal(userID{deviceID, accountUUID, sessionID})
+	return string(b)
+}
+
+// StampUserID sets the body's metadata to exactly Claude Code's {"user_id": …}, dropping whatever
+// metadata the client sent — an SDK's own user_id would name the caller, not the CLI. Malformed
+// bodies are returned unchanged.
+func StampUserID(body []byte, deviceID, accountUUID, sessionID string) []byte {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
+		return body
+	}
+	meta, err := json.Marshal(map[string]string{"user_id": UserID(deviceID, accountUUID, sessionID)})
+	if err != nil {
+		return body
+	}
+	obj["metadata"] = meta
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// SetClientHeaders adds the headers the CLI sends on every API call, for requests that did not
+// come from it: its user agent, `x-app: cli` and the session id the body's metadata repeats.
+func SetClientHeaders(h http.Header, userAgent, sessionID string) {
+	h.Set("User-Agent", userAgent)
+	h.Set("x-app", "cli")
+	if sessionID != "" {
+		h.Set("X-Claude-Code-Session-Id", sessionID)
+	}
 }

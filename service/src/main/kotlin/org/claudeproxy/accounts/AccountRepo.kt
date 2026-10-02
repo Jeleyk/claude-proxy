@@ -41,9 +41,18 @@ data class AccountRuntime(
     val health: AccountHealth,
     // per-account device fingerprint (64-hex) substituted into the upstream request body
     val deviceId: String?,
+    // Anthropic account uuid (OAuth only), stamped into metadata.user_id.account_uuid
+    val accountUuid: String? = null,
     val secret: AccountSecret,
     val limit: LimitState,
 ) {
+    /**
+     * What goes into metadata.user_id.account_uuid for this account: its own uuid for a
+     * subscription, "" for an API key (that is what Claude Code itself sends in API-key mode)
+     * and "" while a subscription's uuid is still unknown — never the client's.
+     */
+    val upstreamAccountUuid: String get() = if (type == AccountType.API_KEY) "" else accountUuid ?: ""
+
     fun toDto(createdAt: String, counts: Totals): AccountDto {
         val usage = limit.usageFraction()
         // "Capacity left" / effective-remaining reflects the SHORT-TERM (5-hour) budget — the
@@ -72,6 +81,7 @@ data class AccountRuntime(
             totalCost = counts.cost,
             totalRequests = counts.requests,
             deviceId = deviceId,
+            accountUuid = accountUuid,
             createdAt = createdAt,
         )
     }
@@ -156,6 +166,7 @@ object AccountRepo {
                 overThreshold = row[Accounts.overThreshold],
                 health = runCatching { AccountHealth.valueOf(row[Accounts.health]) }.getOrDefault(AccountHealth.OK),
                 deviceId = deviceId,
+                accountUuid = row[Accounts.accountUuid],
                 secret = secret,
                 limit = limit,
             )
@@ -195,6 +206,7 @@ object AccountRepo {
         name: String, type: AccountType, groupId: Int?, priority: Int, threshold: Double, coefficient: Double,
         secret: AccountSecret, createdBy: Int?, ownerId: Int? = null,
         deviceId: String = generateDeviceId(),
+        accountUuid: String? = null,
     ): Int = transaction {
         val id = Accounts.insert {
             it[Accounts.name] = name
@@ -208,6 +220,7 @@ object AccountRepo {
             it[enabled] = true
             it[health] = AccountHealth.OK.name
             it[Accounts.deviceId] = deviceId
+            it[Accounts.accountUuid] = accountUuid
             it[Accounts.createdBy] = createdBy
             it[createdAt] = Instant.now()
         }[Accounts.id]
@@ -221,6 +234,7 @@ object AccountRepo {
     fun updateConfig(
         id: Int, name: String?, groupId: Int?, priority: Int?, threshold: Double?, coefficient: Double?,
         enabled: Boolean?, deviceId: String?, clearGroup: Boolean = false, overThreshold: Boolean? = null,
+        accountUuid: String? = null,
     ) = transaction {
         Accounts.update({ Accounts.id eq id }) {
             if (name != null) it[Accounts.name] = name
@@ -231,7 +245,13 @@ object AccountRepo {
             if (enabled != null) it[Accounts.enabled] = enabled
             if (overThreshold != null) it[Accounts.overThreshold] = overThreshold
             if (deviceId != null) it[Accounts.deviceId] = deviceId
+            // "" clears it (an operator undoing a wrong value); null leaves it alone
+            if (accountUuid != null) it[Accounts.accountUuid] = accountUuid.trim().lowercase().ifBlank { null }
         }
+    }
+
+    fun updateAccountUuid(id: Int, accountUuid: String) = transaction {
+        Accounts.update({ Accounts.id eq id }) { it[Accounts.accountUuid] = accountUuid }
     }
 
     fun updateSecret(id: Int, secret: AccountSecret) = transaction {

@@ -36,6 +36,8 @@ data class CandidateDto(
     val accountId: Int,
     val type: String,
     val deviceId: String? = null,
+    // OAuth accounts only: the Anthropic account uuid for metadata.user_id.account_uuid
+    val accountUuid: String? = null,
     val authHeaders: Map<String, String> = emptyMap(),
     val fiveHourResetEpoch: Long? = null,
     val weeklyResetEpoch: Long? = null,

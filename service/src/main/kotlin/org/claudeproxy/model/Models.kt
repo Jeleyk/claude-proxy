@@ -156,6 +156,7 @@ data class AccountDto(
     val totalCost: Double,
     val totalRequests: Long,
     val deviceId: String?,
+    val accountUuid: String? = null,
     val createdAt: String,
 )
 

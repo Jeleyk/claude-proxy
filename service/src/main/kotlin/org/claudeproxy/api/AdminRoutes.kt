@@ -250,7 +250,8 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateAccountRequest>()
-        AccountRepo.updateConfig(id, req.name, req.groupId, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, req.clearGroup, req.overThreshold)
+        if (!validAccountUuid(req.accountUuid)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("account uuid must be a UUID"))
+        AccountRepo.updateConfig(id, req.name, req.groupId, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, req.clearGroup, req.overThreshold, accountUuid = req.accountUuid)
         pool.reload()
         call.respond(buildPoolStats(pool))
     }
@@ -303,7 +304,10 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
                 expiresAt = result.expiresAtMillis,
             )
             val type = if (result.refreshToken != null) AccountType.OAUTH else AccountType.OAUTH_STATIC
-            val id = AccountRepo.create(req.name, type, req.groupId, req.priority, req.threshold, req.coefficient, secret, user.id)
+            val id = AccountRepo.create(
+                req.name, type, req.groupId, req.priority, req.threshold, req.coefficient, secret, user.id,
+                accountUuid = accountUuidAtLogin(result),
+            )
             pool.reload()
             runCatching { probe.probe(id) }
             call.respond(buildPoolStats(pool))
@@ -353,7 +357,8 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
         if (!AccountRepo.isOwnedBy(id, user.id)) return@patch call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
         val req = call.receive<UpdateAccountRequest>()
         // personal accounts are never grouped
-        AccountRepo.updateConfig(id, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold)
+        if (!validAccountUuid(req.accountUuid)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("account uuid must be a UUID"))
+        AccountRepo.updateConfig(id, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold, accountUuid = req.accountUuid)
         pool.reload()
         call.respond(buildOwnedStats(pool, user.id))
     }
@@ -396,7 +401,10 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
             val result = ClaudeOAuth.exchangeCode(Http.client, code, verifier, stateFromCode ?: req.state)
             val secret = AccountSecret(accessToken = result.accessToken, refreshToken = result.refreshToken, expiresAt = result.expiresAtMillis)
             val type = if (result.refreshToken != null) AccountType.OAUTH else AccountType.OAUTH_STATIC
-            val id = AccountRepo.create(req.name, type, null, req.priority, req.threshold, req.coefficient, secret, createdBy = user.id, ownerId = user.id)
+            val id = AccountRepo.create(
+                req.name, type, null, req.priority, req.threshold, req.coefficient, secret, createdBy = user.id, ownerId = user.id,
+                accountUuid = accountUuidAtLogin(result),
+            )
             pool.reload()
             runCatching { probe.probe(id) }
             call.respond(buildOwnedStats(pool, user.id))
@@ -429,7 +437,8 @@ private fun Route.userAccountRoutes(pool: AccountPool, probe: LimitProbe) {
         if (uid == null || aid == null) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         if (!AccountRepo.isOwnedBy(aid, uid)) return@patch call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
         val req = call.receive<UpdateAccountRequest>()
-        AccountRepo.updateConfig(aid, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold)
+        if (!validAccountUuid(req.accountUuid)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("account uuid must be a UUID"))
+        AccountRepo.updateConfig(aid, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold, accountUuid = req.accountUuid)
         pool.reload()
         call.respond(buildOwnedStats(pool, uid))
     }
@@ -1312,3 +1321,12 @@ private fun io.ktor.server.application.ApplicationCall.rangeParams(): Triple<Int
  */
 private fun io.ktor.server.application.ApplicationCall.zoneParam(): java.time.ZoneId =
     parameters["tz"]?.let { runCatching { java.time.ZoneId.of(it) }.getOrNull() } ?: java.time.ZoneOffset.UTC
+
+/** The token response usually names the account; the profile is the fallback when it doesn't. */
+private suspend fun accountUuidAtLogin(result: ClaudeOAuth.TokenResult): String? =
+    result.accountUuid ?: runCatching { ClaudeOAuth.fetchAccountUuid(Http.client, result.accessToken) }.getOrNull()
+
+private val UUID_RE = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+/** null (untouched) and blank (clear) pass; anything else must be shaped like Anthropic's uuid. */
+private fun validAccountUuid(v: String?): Boolean = v == null || v.isBlank() || UUID_RE.matches(v.trim())

@@ -20,6 +20,7 @@ type Candidate struct {
 	AccountID          int               `json:"accountId"`
 	Type               string            `json:"type"`
 	DeviceID           string            `json:"deviceId"`
+	AccountUUID        string            `json:"accountUuid"` // subscription's account uuid for metadata.user_id; "" for API keys / not yet known
 	AuthHeaders        map[string]string `json:"authHeaders"`
 	FiveHourResetEpoch int64             `json:"fiveHourResetEpoch"`
 	WeeklyResetEpoch   int64             `json:"weeklyResetEpoch"`

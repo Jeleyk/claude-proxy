@@ -30,6 +30,8 @@ data class UpdateAccountRequest(
     val enabled: Boolean? = null,
     val overThreshold: Boolean? = null,
     val deviceId: String? = null,
+    // "" clears; null leaves it alone
+    val accountUuid: String? = null,
 )
 
 @Serializable

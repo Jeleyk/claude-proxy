@@ -189,6 +189,18 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   service writes one `mcp_tool_calls` row per (request, tool). Served by `/api/stats/mine/mcp` +
   `/api/users/{id}/stats/mcp`; "MCP tools" block in the shared `UserStatsView`. Proxy datapath
   only (routing gateways don't report it).
+- **Upstream identity** (`metadata.user_id` = escaped `{"device_id","account_uuid","session_id"}`):
+  each account presents its own. `device_id` is the per-account fingerprint; `account_uuid` is
+  the subscription's Anthropic account uuid (`accounts.account_uuid`), taken from the token
+  response at "Login with Claude", else backfilled from `/api/oauth/profile` by `TokenRefresher`,
+  else set by hand in the account's Edit dialog (inference-only `OAUTH_STATIC` tokens can't read
+  the profile). It is **always overwritten** — `""` for API keys and not-yet-known uuids — since
+  the client's value names whoever runs the client. The proxy datapath swaps values in place
+  (`rewriteBody` / `RequestRewriter`); requests that never came from the CLI — routing
+  (`ccident.StampUserID` + `SetClientHeaders`), chat and the limit probe (`ClaudeCodeClient`) —
+  get the whole blob plus CC's `User-Agent` (`CLAUDE_CODE_USER_AGENT`), `x-app: cli` and a
+  session id stable per (token/user, account, UTC day). Never on `count_tokens`: it rejects
+  `metadata`.
 - **Free paths** (`count_tokens`, `/v1/models`): no quota, no daily limit, and the resolve returns
   the *whole* try-list (`AccountPool.selectAnyOrder`) so one unhealthy account can't break Claude
   Code's context indicator. `ResolveResponse.free` rides back on the usage report: a **successful

@@ -18,7 +18,7 @@ func TestRewriteBodyReplacesDeviceAndSession(t *testing.T) {
 	inner := `{"device_id":"old_device","account_uuid":"","session_id":"origin-sess"}`
 	body := buildBody(t, inner)
 
-	out, newSid := rewriteBody(body, "new_device_fp", "")
+	out, newSid := rewriteBody(body, "new_device_fp", "", "")
 	if newSid == "" {
 		t.Fatal("expected a rotated session id")
 	}
@@ -48,7 +48,7 @@ func TestRewriteBodyReplacesDeviceAndSession(t *testing.T) {
 
 func TestRewriteBodyWithoutMetadataUnchanged(t *testing.T) {
 	body := []byte(`{"model":"m","max_tokens":8}`)
-	out, newSid := rewriteBody(body, "dev", "")
+	out, newSid := rewriteBody(body, "dev", "", "")
 	if string(out) != string(body) {
 		t.Errorf("body changed: %s", out)
 	}
@@ -59,7 +59,7 @@ func TestRewriteBodyWithoutMetadataUnchanged(t *testing.T) {
 
 func TestRewriteBodyHeaderSessionRotatedWithoutBlob(t *testing.T) {
 	body := []byte(`{"model":"m"}`)
-	out, newSid := rewriteBody(body, "dev", "client-session")
+	out, newSid := rewriteBody(body, "dev", "", "client-session")
 	if string(out) != string(body) {
 		t.Errorf("body should be unchanged: %s", out)
 	}
@@ -71,14 +71,34 @@ func TestRewriteBodyHeaderSessionRotatedWithoutBlob(t *testing.T) {
 func TestRewriteBodySessionStableAcrossCalls(t *testing.T) {
 	inner := `{"device_id":"d","session_id":"s1"}`
 	body := buildBody(t, inner)
-	_, sid1 := rewriteBody(body, "acctdev", "hdr-sess")
-	_, sid2 := rewriteBody(body, "acctdev", "hdr-sess")
+	_, sid1 := rewriteBody(body, "acctdev", "", "hdr-sess")
+	_, sid2 := rewriteBody(body, "acctdev", "", "hdr-sess")
 	if sid1 != sid2 || sid1 == "" {
 		t.Errorf("session id not stable: %q vs %q", sid1, sid2)
 	}
 	// Different account (device) → different session id.
-	_, sid3 := rewriteBody(body, "otherdev", "hdr-sess")
+	_, sid3 := rewriteBody(body, "otherdev", "", "hdr-sess")
 	if sid3 == sid1 {
 		t.Error("different account should yield a different session id")
+	}
+}
+
+func TestRewriteBodyStampsAccountUUID(t *testing.T) {
+	body := buildBody(t, `{"device_id":"d","account_uuid":"client-own-uuid","session_id":"s"}`)
+	for _, want := range []string{"pool-account-uuid", ""} {
+		out, _ := rewriteBody(body, "dev", want, "")
+		var top struct {
+			Metadata struct {
+				UserID string `json:"user_id"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(out, &top); err != nil {
+			t.Fatalf("output not valid JSON: %v", err)
+		}
+		var got map[string]any
+		_ = json.Unmarshal([]byte(top.Metadata.UserID), &got)
+		if got["account_uuid"] != want {
+			t.Errorf("account_uuid = %v, want %q", got["account_uuid"], want)
+		}
 	}
 }

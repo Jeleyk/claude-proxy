@@ -25,6 +25,9 @@ class TokenRefresher(private val pool: AccountPool) {
     private val refreshMarginMs = 5 * 60 * 1000L
     private val pollIntervalMs = 60 * 1000L
     private val backoff = RefreshBackoff()
+    // (account, access-token tag) pairs whose profile lookup already ran — a token without the
+    // user:profile scope answers 403 forever, so each token is asked once per process.
+    private val uuidLookups = ConcurrentHashMap.newKeySet<String>()
 
     fun start(scope: CoroutineScope): Job = scope.launch {
         while (isActive) {
@@ -35,6 +38,7 @@ class TokenRefresher(private val pool: AccountPool) {
 
     suspend fun tick() {
         val now = System.currentTimeMillis()
+        for (acc in pool.snapshot()) backfillAccountUuid(acc)
         for (acc in pool.snapshot()) {
             if (acc.type != AccountType.OAUTH) continue
             if (acc.health == AccountHealth.DEAD) continue
@@ -59,6 +63,7 @@ class TokenRefresher(private val pool: AccountPool) {
                 expiresAt = result.expiresAtMillis ?: cur.expiresAt,
             )
             AccountRepo.updateSecret(accountId, updated)
+            result.accountUuid?.let { storeAccountUuid(accountId, it) }
             AccountRepo.updateHealth(accountId, AccountHealth.OK)
             pool.updateSecretInMemory(accountId, updated, AccountHealth.OK)
             backoff.onSuccess(accountId)
@@ -80,6 +85,33 @@ class TokenRefresher(private val pool: AccountPool) {
             AccountRepo.updateHealth(accountId, AccountHealth.REFRESH_FAILED)
             pool.setHealth(accountId, AccountHealth.REFRESH_FAILED)
         }
+    }
+
+    /**
+     * OAuth accounts added before the uuid was kept (or pasted by hand) learn it from the profile
+     * endpoint. Without it the datapath can only send an empty account_uuid next to a
+     * subscription bearer, which genuine Claude Code never does.
+     */
+    private suspend fun backfillAccountUuid(acc: AccountRuntime) {
+        if (acc.type == AccountType.API_KEY || acc.accountUuid != null) return
+        if (acc.health == AccountHealth.DEAD) return
+        val token = acc.secret.accessToken ?: return
+        if (!uuidLookups.add("${acc.id}:${token.hashCode()}")) return
+        val uuid = runCatching { ClaudeOAuth.fetchAccountUuid(Http.client, token) }
+            .onFailure { log.warn("Profile lookup failed for account {}: {}", acc.id, it.message) }
+            .getOrNull()
+        if (uuid == null) {
+            log.info("Account {} has no account uuid and its token cannot read the profile; set it by hand", acc.id)
+            return
+        }
+        storeAccountUuid(acc.id, uuid)
+    }
+
+    private suspend fun storeAccountUuid(accountId: Int, uuid: String) {
+        if (pool.get(accountId)?.accountUuid == uuid) return
+        AccountRepo.updateAccountUuid(accountId, uuid)
+        pool.setAccountUuid(accountId, uuid)
+        log.info("Account {} identified as Anthropic account {}", accountId, uuid)
     }
 }
 

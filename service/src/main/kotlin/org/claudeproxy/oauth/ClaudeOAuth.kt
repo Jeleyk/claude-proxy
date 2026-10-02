@@ -1,6 +1,7 @@
 package org.claudeproxy.oauth
 
 import io.ktor.client.HttpClient
+import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -11,6 +12,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -38,7 +40,14 @@ object ClaudeOAuth {
     private val random = SecureRandom()
 
     data class Pkce(val verifier: String, val challenge: String)
-    data class TokenResult(val accessToken: String, val refreshToken: String?, val expiresAtMillis: Long?)
+    /** [accountUuid] is the Anthropic account the token belongs to, when the response names it. */
+    data class TokenResult(
+        val accessToken: String, val refreshToken: String?, val expiresAtMillis: Long?,
+        val accountUuid: String? = null,
+    )
+
+    val profileUrl: String get() = envOrProp("OAUTH_PROFILE_URL") ?: "https://api.anthropic.com/api/oauth/profile"
+
 
     fun newPkce(): Pkce {
         val verifierBytes = ByteArray(32).also { random.nextBytes(it) }
@@ -112,8 +121,29 @@ object ClaudeOAuth {
         val refresh = obj["refresh_token"]?.jsonPrimitive?.content
         val expiresIn = obj["expires_in"]?.jsonPrimitive?.content?.toLongOrNull()
         val expiresAt = expiresIn?.let { System.currentTimeMillis() + it * 1000 }
-        return TokenResult(access, refresh, expiresAt)
+        return TokenResult(access, refresh, expiresAt, accountUuidOf(obj))
     }
+
+    /**
+     * Looks up the account uuid behind an access token. Needs the `user:profile` scope, which our
+     * own login asks for; inference-only tokens (most OAUTH_STATIC pastes) get a 403 → null.
+     */
+    suspend fun fetchAccountUuid(client: HttpClient, accessToken: String): String? {
+        val resp: HttpResponse = client.get(profileUrl) {
+            header("Authorization", "Bearer $accessToken")
+            header("anthropic-beta", "oauth-2025-04-20")
+            header("anthropic-version", "2023-06-01")
+            header("Accept", "application/json")
+        }
+        val text = resp.bodyAsText()
+        if (resp.status != HttpStatusCode.OK) return null
+        return accountUuidOf(json.parseToJsonElement(text) as? JsonObject ?: return null)
+    }
+
+    /** `account.uuid` — the same shape in the token response and in the profile. */
+    internal fun accountUuidOf(obj: JsonObject): String? =
+        ((obj["account"] as? JsonObject)?.get("uuid") as? JsonPrimitive)
+            ?.takeIf { it.isString }?.content?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
 }
 
 class OAuthException(message: String) : RuntimeException(message)

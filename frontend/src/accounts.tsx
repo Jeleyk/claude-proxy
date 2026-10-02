@@ -360,6 +360,8 @@ export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }:
   const [overThreshold, setOverThreshold] = useState(a.overThreshold);
   const [group, setGroup] = useState<number | null>(a.groupId);
   const [deviceId, setDeviceId] = useState(a.deviceId ?? '');
+  const [accountUuid, setAccountUuid] = useState(a.accountUuid ?? '');
+  const isOAuth = a.type !== 'API_KEY';
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const isGlobal = scope === 'global';
@@ -369,6 +371,8 @@ export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }:
     try {
       const body: any = { name, priority: prio, threshold: thrPct / 100, coefficient: coef, overThreshold, deviceId: deviceId.trim() || undefined };
       if (isGlobal) { body.groupId = group; body.clearGroup = group == null; }
+      // "" clears it; the next token refresh looks it up again from the profile when it can.
+      if (isOAuth && accountUuid.trim() !== (a.accountUuid ?? '')) body.accountUuid = accountUuid.trim();
       onSaved(await update(a.id, body));
     } catch (e: any) { setErr(e.message); setBusy(false); }
   }
@@ -395,6 +399,11 @@ export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }:
       <label className="field"><span>Device ID (per-account fingerprint sent in request body)</span>
         <div className="row"><input className="mono" value={deviceId} onChange={(e) => setDeviceId(e.target.value)} placeholder="64 hex chars" /><button className="ghost sm" onClick={regen} type="button">Regenerate</button></div>
       </label>
+      {isOAuth && (
+        <label className="field"><span>Account UUID (Anthropic account sent in request metadata)<br /><small className="hint">Filled in at login or from the profile; set by hand for tokens without the profile scope.</small></span>
+          <input className="mono" value={accountUuid} onChange={(e) => setAccountUuid(e.target.value)} placeholder="not known yet" />
+        </label>
+      )}
       <p className="hint">Type <b>{a.type.toLowerCase()}</b> · created {new Date(a.createdAt).toLocaleString()}</p>
       {err && <div className="err">{err}</div>}
     </Modal>

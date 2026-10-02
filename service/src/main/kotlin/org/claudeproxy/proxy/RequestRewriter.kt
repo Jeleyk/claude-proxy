@@ -35,12 +35,15 @@ object RequestRewriter {
     /**
      * @param headerSessionId the client's `X-Claude-Code-Session-Id` (preferred origin source)
      * @param deviceId the account's device fingerprint; when null the body's device_id is left as-is
+     * @param accountUuid the account's uuid ("" when unknown or an API key); when null the body's
+     *   account_uuid is left as-is. Never the client's own: that one names whoever runs the client.
      * @param resolveSession maps an origin session-id to this account's replacement
      */
     fun rewrite(
         bodyBytes: ByteArray,
         headerSessionId: String?,
         deviceId: String?,
+        accountUuid: String? = null,
         resolveSession: (origin: String) -> String,
     ): Rewritten {
         val root = parseObject(bodyBytes)
@@ -61,6 +64,7 @@ object RequestRewriter {
                     when (k) {
                         "device_id" -> put("device_id", deviceId ?: (v as? JsonPrimitive)?.contentOrNull ?: "")
                         "session_id" -> put("session_id", newSid ?: (v as? JsonPrimitive)?.contentOrNull ?: "")
+                        "account_uuid" -> put("account_uuid", accountUuid ?: (v as? JsonPrimitive)?.contentOrNull ?: "")
                         else -> put(k, v)
                     }
                 }
@@ -78,6 +82,30 @@ object RequestRewriter {
         }
 
         return Rewritten(newBody, replaced)
+    }
+
+    /**
+     * The `metadata.user_id` string Claude Code sends, in its key order. Shared by every request
+     * the service makes upstream on its own (limit probes, chat), so they read like the CLI too.
+     */
+    fun userId(deviceId: String, accountUuid: String, sessionId: String): String =
+        json.encodeToString(JsonObject.serializer(), buildJsonObject {
+            put("device_id", deviceId)
+            put("account_uuid", accountUuid)
+            put("session_id", sessionId)
+        })
+
+    /**
+     * Sets `metadata.user_id` on a body the service built itself, replacing any metadata there.
+     * Returns the input untouched when it isn't a JSON object.
+     */
+    fun stampIdentity(bodyBytes: ByteArray, deviceId: String, accountUuid: String, sessionId: String): ByteArray {
+        val root = parseObject(bodyBytes) ?: return bodyBytes
+        val newRoot = buildJsonObject {
+            for ((k, v) in root) if (k != "metadata") put(k, v)
+            put("metadata", buildJsonObject { put("user_id", userId(deviceId, accountUuid, sessionId)) })
+        }
+        return json.encodeToString(JsonObject.serializer(), newRoot).encodeToByteArray()
     }
 
     private fun parseObject(bytes: ByteArray): JsonObject? {

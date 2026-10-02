@@ -108,3 +108,23 @@ func TestInsertStaticPromptEmptyOrMalformed(t *testing.T) {
 		t.Fatalf("malformed input must be returned unchanged")
 	}
 }
+
+func TestStampUserIDReplacesClientMetadata(t *testing.T) {
+	out := StampUserID([]byte(`{"model":"m","metadata":{"user_id":"sdk"},"max_tokens":5}`), "dev", "uuid", "sid")
+	var obj struct {
+		Metadata  map[string]string `json:"metadata"`
+		MaxTokens int               `json:"max_tokens"`
+	}
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if want := `{"device_id":"dev","account_uuid":"uuid","session_id":"sid"}`; obj.Metadata["user_id"] != want {
+		t.Errorf("user_id = %s, want %s", obj.Metadata["user_id"], want)
+	}
+	if len(obj.Metadata) != 1 || obj.MaxTokens != 5 {
+		t.Errorf("body mangled: %s", out)
+	}
+	if bad := []byte(`not json`); string(StampUserID(bad, "d", "u", "s")) != string(bad) {
+		t.Error("malformed body must pass through")
+	}
+}

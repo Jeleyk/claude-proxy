@@ -89,6 +89,7 @@ class UpstreamForwarder(
             bodyBytes,
             headerSessionId = call.request.headers["X-Claude-Code-Session-Id"],
             deviceId = account.deviceId,
+            accountUuid = account.upstreamAccountUuid,
         ) { origin -> org.claudeproxy.repo.SessionMapRepo.resolve(origin, account.id) }
         val outBody = rewritten.body
 

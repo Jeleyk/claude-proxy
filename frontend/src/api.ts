@@ -95,6 +95,7 @@ export interface AccountDto {
   totalCost: number;
   totalRequests: number;
   deviceId: string | null;
+  accountUuid?: string | null;
   createdAt: string;
 }
 

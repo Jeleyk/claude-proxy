@@ -132,6 +132,10 @@ object Accounts : Table("accounts") {
     // distinct per-account device fingerprint (64-hex) substituted into the request body's
     // metadata.user_id.device_id. DB column keeps its historical name `client_id`.
     val deviceId = varchar("client_id", 64).nullable()
+    // Anthropic account uuid of an OAuth subscription, learned at login (token response) or from
+    // /api/oauth/profile. Stamped into metadata.user_id.account_uuid: a genuine OAuth Claude Code
+    // sends its own there, so an empty one — or the client's — next to our bearer is a tell.
+    val accountUuid = varchar("account_uuid", 64).nullable()
     // null = global (shared pool); otherwise a personal account owned by this user, tried
     // before the global pool and excluded from global statistics.
     val ownerId = integer("owner_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE).nullable()
