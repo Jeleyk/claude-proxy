@@ -182,7 +182,7 @@ private fun Route.authRoutes() {
             call.respond(HttpStatusCode.Unauthorized, MessageResponse("Invalid credentials"))
             return@post
         }
-        call.setUserSession(user.id)
+        call.setUserSession(user)
         call.respond(userToDto(user))
     }
     post("/auth/logout") {
