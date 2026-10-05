@@ -7,10 +7,13 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.readRawBytes
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
+import kotlinx.coroutines.CancellationException
 import org.claudeproxy.envOrProp
 import org.claudeproxy.model.AccountHealth
+import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.proxy.Http
+import org.claudeproxy.oauth.OpenAIHttpException
 import org.slf4j.LoggerFactory
 
 /**
@@ -57,6 +60,17 @@ class LimitProbe(
     suspend fun probe(accountId: Int): Outcome {
         val account = pool.get(accountId) ?: return Outcome.FAILED
         return try {
+            if (account.provider == AccountProvider.OPENAI) {
+                // API keys have no subscription-quota endpoint; never spend tokens to probe.
+                if (account.type == AccountType.API_KEY) return Outcome.REACHED
+                val observed = OpenAILimits.probe(account) ?: return Outcome.FAILED
+                pool.updateLimit(accountId, observed)
+                if (account.health != AccountHealth.OK) {
+                    AccountRepo.updateHealth(accountId, AccountHealth.OK)
+                    pool.setHealth(accountId, AccountHealth.OK)
+                }
+                return Outcome.OBSERVED
+            }
             val resp: HttpResponse = Http.client.post("$upstreamBaseUrl$probePath") {
                 contentType(ContentType.Application.Json)
                 header("anthropic-version", "2023-06-01")
@@ -92,7 +106,13 @@ class LimitProbe(
             }
             log.info("Probed account {} -> status {} (rate-limit headers: {})", accountId, resp.status.value, observed)
             if (observed) Outcome.OBSERVED else Outcome.REACHED
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
+            if (e is OpenAIHttpException && e.status in setOf(401, 403)) {
+                AccountRepo.updateHealth(accountId, AccountHealth.REFRESH_FAILED)
+                pool.setHealth(accountId, AccountHealth.REFRESH_FAILED)
+            }
             log.warn("Probe failed for account {}: {}", accountId, e.message)
             Outcome.FAILED
         }

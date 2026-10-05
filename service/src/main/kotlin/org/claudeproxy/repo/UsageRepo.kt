@@ -2,6 +2,7 @@ package org.claudeproxy.repo
 
 import kotlinx.serialization.Serializable
 import org.claudeproxy.db.Accounts
+import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.db.UsageEvents
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
@@ -25,6 +26,7 @@ data class UsageEventDto(
     // cache writes (priced ~1.6× the 5m rate), server-side web searches (billed per call) and
     // fast mode (a premium tier on the same model).
     val cacheWrite1hTokens: Long = 0, val webSearchRequests: Long = 0, val fast: Boolean = false,
+    val costKnown: Boolean = true,
 )
 
 @Serializable
@@ -73,8 +75,10 @@ object UsageRepo {
         accountId: Int, userId: Int?, usage: BilledUsage,
         status: Int, model: String?, source: String = "proxy", tokenId: Int? = null,
         webFetchRequests: Long = 0,
+        provider: AccountProvider = AccountProvider.ANTHROPIC,
     ): Double {
-        val cost = ModelPriceRepo.costOf(model, usage)
+        val cost = ModelPriceRepo.costOf(model, usage, provider)
+        val costKnown = provider != AccountProvider.OPENAI || usage.isEmpty() || ModelPriceRepo.hasPrice(model, provider)
         runCatching {
             transaction {
                 UsageEvents.insert {
@@ -91,6 +95,7 @@ object UsageRepo {
                     it[UsageEvents.webFetchRequests] = webFetchRequests
                     it[fast] = usage.fast
                     it[UsageEvents.cost] = cost
+                    it[UsageEvents.costKnown] = costKnown
                     it[httpStatus] = status
                     it[UsageEvents.model] = model
                     it[UsageEvents.sourceCol] = source
@@ -388,6 +393,7 @@ object UsageRepo {
             cacheReadTokens = this[UsageEvents.cacheReadTokens], cacheWriteTokens = this[UsageEvents.cacheWriteTokens],
             cacheWrite1hTokens = this[UsageEvents.cacheWrite1hTokens],
             webSearchRequests = this[UsageEvents.webSearchRequests], fast = this[UsageEvents.fast],
+            costKnown = this[UsageEvents.costKnown],
             cost = this[UsageEvents.cost], httpStatus = this[UsageEvents.httpStatus], model = this[UsageEvents.model],
             source = this[UsageEvents.sourceCol],
         )

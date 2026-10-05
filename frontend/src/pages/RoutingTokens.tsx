@@ -3,16 +3,41 @@ import { api, fmtUntilUtcMidnight, fmtUsd, ProxyTokenDto, UserDto } from '../api
 import { CodeBlock, Copy, Modal, Segmented, Switch } from '../ui';
 import { TokenUsageSection } from './tokenUsage';
 
-// The routing gateways are fronted by nginx: OpenAI at /routing/openai (SDK appends /v1/...),
-// Anthropic at /routing/anthropic (SDK appends /v1/messages).
+// Keep Claude's compatibility endpoint distinct from the native OpenAI account pool.
 function bases(origin: string) {
   return {
     openai: origin + '/routing/openai/v1',
     anthropic: origin + '/routing/anthropic',
+    native: origin + '/openai/v1',
   };
 }
 
 const MODEL = 'claude-sonnet-5';
+const OPENAI_MODEL = '<openai-model>';
+
+function nativePython(base: string, token: string) {
+  return `from openai import OpenAI\n` +
+    `client = OpenAI(base_url="${base}", api_key="${token}")\n` +
+    `# Choose a model from client.models.list()\n` +
+    `resp = client.responses.create(\n` +
+    `    model="${OPENAI_MODEL}", input="Hello", store=False,\n` +
+    `)\nprint(resp.output_text)`;
+}
+function nativeCurl(base: string, token: string) {
+  return `# List models first: GET ${base}/models\n` +
+    `curl ${base}/responses \\\n` +
+    `  -H "Authorization: Bearer ${token}" \\\n` +
+    `  -H "Content-Type: application/json" \\\n` +
+    `  -d '{"model":"${OPENAI_MODEL}","input":"Hello","store":false}'`;
+}
+function nativeCodex(base: string) {
+  return `# Set OPENAI_PROXY_TOKEN to a routing token in your shell.\n` +
+    `# Add to ~/.codex/config.toml (choose a model from /models):\n` +
+    `model_provider = "proxy_openai"\nmodel = "${OPENAI_MODEL}"\n\n` +
+    `[model_providers.proxy_openai]\nname = "OpenAI via proxy"\n` +
+    `base_url = "${base}"\nenv_key = "OPENAI_PROXY_TOKEN"\n` +
+    `wire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false`;
+}
 
 function openaiPython(base: string, token: string) {
   return `from openai import OpenAI\n` +
@@ -52,8 +77,8 @@ export function RoutingTokens() {
   const [revealed, setRevealed] = useState<ProxyTokenDto | null>(null);
   const [editing, setEditing] = useState<ProxyTokenDto | null>(null);
   const [origin, setOrigin] = useState(window.location.origin);
-  const [provider, setProvider] = useState<'openai' | 'anthropic'>('openai');
-  const [lang, setLang] = useState<'python' | 'curl'>('python');
+  const [provider, setProvider] = useState<'openai' | 'anthropic' | 'native'>('openai');
+  const [lang, setLang] = useState<'python' | 'curl' | 'codex'>('python');
   const [me, setMe] = useState<UserDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -87,17 +112,19 @@ export function RoutingTokens() {
   }
 
   const b = bases(origin);
-  const base = provider === 'openai' ? b.openai : b.anthropic;
+  const base = b[provider];
   const tok = revealed?.token;
   const snippet = (t: string) =>
-    provider === 'openai'
+    provider === 'native'
+      ? (lang === 'codex' ? nativeCodex(base) : lang === 'python' ? nativePython(base, t) : nativeCurl(base, t))
+      : provider === 'openai'
       ? (lang === 'python' ? openaiPython(base, t) : openaiCurl(base, t))
       : (lang === 'python' ? anthropicPython(base, t) : anthropicCurl(base, t));
 
   return (
     <div className="main-inner">
       <h1>API Routing</h1>
-      <p className="sub">Use the OpenAI &amp; Anthropic APIs backed by this proxy's Claude accounts. Point any OpenAI/Anthropic SDK at the base URL below with a routing token.</p>
+      <p className="sub">Connect with a routing token. Claude endpoints use Anthropic accounts; native OpenAI Responses uses OpenAI / Codex accounts.</p>
 
       {me && (
         <div className="panel narrow">
@@ -122,13 +149,15 @@ export function RoutingTokens() {
       <div className="panel narrow">
         <h2 style={{ marginTop: 0 }}>Endpoints</h2>
         <div className="connect-tabs">
-          <Segmented<'openai' | 'anthropic'> value={provider} onChange={setProvider} options={[
-            { value: 'openai', label: 'OpenAI' },
-            { value: 'anthropic', label: 'Anthropic' },
+          <Segmented<'openai' | 'anthropic' | 'native'> value={provider} onChange={(p) => { setProvider(p); if (p !== 'native' && lang === 'codex') setLang('python'); }} options={[
+            { value: 'openai', label: 'Claude · OpenAI format' },
+            { value: 'anthropic', label: 'Claude · Anthropic format' },
+            { value: 'native', label: 'Native OpenAI / Codex' },
           ]} />
-          <Segmented<'python' | 'curl'> value={lang} onChange={setLang} options={[
+          <Segmented<'python' | 'curl' | 'codex'> value={lang} onChange={setLang} options={[
             { value: 'python', label: 'Python' },
             { value: 'curl', label: 'curl' },
+            ...(provider === 'native' ? [{ value: 'codex' as const, label: 'Codex CLI' }] : []),
           ]} />
         </div>
         <div className="row" style={{ justifyContent: 'space-between', margin: '10px 0 4px' }}>
@@ -136,6 +165,11 @@ export function RoutingTokens() {
           <Copy text={base} label="Copy base URL" />
         </div>
         <div className="mono" style={{ wordBreak: 'break-all' }}>{base}</div>
+        {provider === 'native' && <>
+          <p className="hint">Responses API over HTTP / SSE. Send the full input history on each request. Stored responses, previous_response_id, background mode and WebSockets are not supported.</p>
+          <p className="hint">Encrypted history stays on its original account. Codex supplies a session ID automatically; SDK clients should send a stable X-Proxy-Session-ID from the first request. After a gateway restart, start a new conversation.</p>
+          <p className="hint">Current account limits: <code>{origin}/gateway/v1/usage?provider=OPENAI&amp;model={OPENAI_MODEL}</code>, using the same routing token.</p>
+        </>}
 
         <div className="row" style={{ marginTop: 14 }}>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="token name (e.g. my-app)" onKeyDown={(e) => e.key === 'Enter' && create()} />

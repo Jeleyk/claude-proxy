@@ -2,6 +2,7 @@ package org.claudeproxy.repo
 
 import kotlinx.serialization.Serializable
 import org.claudeproxy.db.ModelPrices
+import org.claudeproxy.model.AccountProvider
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insertIgnore
@@ -186,11 +187,19 @@ object ModelPriceRepo {
         invalidate()
     }
 
-    private fun priceFor(model: String?): ModelPriceDto? {
+    private fun priceFor(model: String?, provider: AccountProvider = AccountProvider.ANTHROPIC): ModelPriceDto? {
         if (model.isNullOrBlank()) return null
         val m = model.lowercase()
-        return list().firstOrNull { m.contains(it.pattern) }
+        return if (provider == AccountProvider.OPENAI) list().firstOrNull {
+            // A namespace supports new OpenAI model families without ever matching a Claude
+            // fallback. Existing GPT/o-series/Codex entries can keep their plain model pattern.
+            val pattern = it.pattern.lowercase()
+            if (pattern.startsWith("openai/")) m.contains(pattern.removePrefix("openai/").takeIf(String::isNotBlank) ?: return@firstOrNull false)
+            else (pattern.startsWith("gpt-") || pattern.startsWith("codex-") || Regex("^o[1-9][0-9]*($|-)").containsMatchIn(pattern)) && m.contains(pattern)
+        } else list().firstOrNull { !it.pattern.startsWith("openai/") && m.contains(it.pattern) }
     }
+
+    fun hasPrice(model: String?, provider: AccountProvider = AccountProvider.ANTHROPIC): Boolean = priceFor(model, provider) != null
 
     /**
      * USD cost of one response. Each token kind is priced separately (per 1M), cache writes at
@@ -201,8 +210,8 @@ object ModelPriceRepo {
      * This is the single place a response turns into money — [UsageRepo.record] stores what it
      * returns and the per-user daily limit counts the same number.
      */
-    fun costOf(model: String?, u: BilledUsage): Double {
-        val p = priceFor(model) ?: return 0.0
+    fun costOf(model: String?, u: BilledUsage, provider: AccountProvider = AccountProvider.ANTHROPIC): Double {
+        val p = priceFor(model, provider) ?: return 0.0
         val tokens = (
             u.input * p.inputPrice +
                 u.output * p.outputPrice +

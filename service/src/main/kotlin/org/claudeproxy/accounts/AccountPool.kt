@@ -3,6 +3,7 @@ package org.claudeproxy.accounts
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.claudeproxy.model.AccountHealth
+import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.model.LimitState
 import org.claudeproxy.model.LimitStatus
@@ -47,8 +48,8 @@ class AccountPool {
      * preferred over the shared global pool; within each tier, under-threshold beats
      * over-threshold (fallback). Returns null if nothing is usable.
      */
-    suspend fun select(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true, now: Instant = Instant.now()): AccountRuntime? = mutex.withLock {
-        orderedCandidates(userId, allowedGroups, personalFirst, allowGlobal, now).firstOrNull()?.also { activeAccountId = it.id }
+    suspend fun select(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true, now: Instant = Instant.now(), provider: AccountProvider = AccountProvider.ANTHROPIC): AccountRuntime? = mutex.withLock {
+        orderedCandidates(userId, allowedGroups, personalFirst, allowGlobal, now, provider).firstOrNull()?.also { activeAccountId = it.id }
     }
 
     /**
@@ -57,16 +58,16 @@ class AccountPool {
      * personal accounts (default) or the global pool. Excludes disabled/unhealthy/
      * hard-limited/out-of-scope accounts.
      */
-    suspend fun selectionOrder(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true, now: Instant = Instant.now()): List<AccountRuntime> =
-        mutex.withLock { orderedCandidates(userId, allowedGroups, personalFirst, allowGlobal, now) }
+    suspend fun selectionOrder(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true, now: Instant = Instant.now(), provider: AccountProvider = AccountProvider.ANTHROPIC): List<AccountRuntime> =
+        mutex.withLock { orderedCandidates(userId, allowedGroups, personalFirst, allowGlobal, now, provider) }
 
     /**
      * Personal-accounts-only selection order. Used when the shared-pool daily spend limit is
      * reached: the user's own accounts are their own quota and remain usable.
      */
-    suspend fun selectionOrderOwned(userId: Int, now: Instant = Instant.now()): List<AccountRuntime> = mutex.withLock {
+    suspend fun selectionOrderOwned(userId: Int, now: Instant = Instant.now(), provider: AccountProvider = AccountProvider.ANTHROPIC): List<AccountRuntime> = mutex.withLock {
         tierOrder(accounts.values.filter {
-            it.enabled && it.health == AccountHealth.OK && !it.isHardLimited(now) && it.ownerId == userId
+            it.provider == provider && it.enabled && it.health == AccountHealth.OK && !it.isHardLimited(now) && it.ownerId == userId
         }, SelectionStrategy.current(), now)
     }
 
@@ -77,8 +78,8 @@ class AccountPool {
      * accounts are preferred. Used for requests that don't consume subscription quota
      * (token counting, model list).
      */
-    suspend fun selectAny(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true): AccountRuntime? =
-        selectAnyOrder(userId, allowedGroups, personalFirst, allowGlobal).firstOrNull()
+    suspend fun selectAny(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true, provider: AccountProvider = AccountProvider.ANTHROPIC): AccountRuntime? =
+        selectAnyOrder(userId, allowedGroups, personalFirst, allowGlobal, provider).firstOrNull()
 
     /**
      * Every enabled+healthy account in scope, in the order [selectAny] would pick them, so a
@@ -86,8 +87,8 @@ class AccountPool {
      * one that happens to be broken. Threshold and rate-limit are ignored for the same reason
      * they are in [selectAny]: these requests consume no subscription usage.
      */
-    suspend fun selectAnyOrder(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true): List<AccountRuntime> = mutex.withLock {
-        val usable = accounts.values.filter { it.enabled && it.health == AccountHealth.OK }
+    suspend fun selectAnyOrder(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true, provider: AccountProvider = AccountProvider.ANTHROPIC): List<AccountRuntime> = mutex.withLock {
+        val usable = accounts.values.filter { it.provider == provider && it.enabled && it.health == AccountHealth.OK }
         val personal = if (userId == null) emptyList() else usable.filter { it.ownerId == userId }
         val global = if (!allowGlobal) emptyList() else usable.filter { it.ownerId == null && canUseGlobal(it, allowedGroups) }
         val byPriority = compareBy<AccountRuntime>({ it.priority }, { it.id })
@@ -99,8 +100,8 @@ class AccountPool {
     /** Why the pool couldn't serve, for choosing a client-facing status. */
     data class Availability(val enabledInScope: Int, val healthy: Int, val rateLimited: Int, val lostAccess: Int)
 
-    suspend fun availability(userId: Int?, allowedGroups: Set<Int>?, now: Instant = Instant.now()): Availability = mutex.withLock {
-        val inScope = accounts.values.filter { it.enabled && inUserScope(it, userId, allowedGroups) }
+    suspend fun availability(userId: Int?, allowedGroups: Set<Int>?, now: Instant = Instant.now(), provider: AccountProvider = AccountProvider.ANTHROPIC): Availability = mutex.withLock {
+        val inScope = accounts.values.filter { it.provider == provider && it.enabled && inUserScope(it, userId, allowedGroups) }
         Availability(
             enabledInScope = inScope.size,
             healthy = inScope.count { it.health == AccountHealth.OK && !it.isHardLimited(now) },
@@ -110,8 +111,8 @@ class AccountPool {
     }
 
     /** Ordered candidates for a request: the preferred tier first, then the other. */
-    private fun orderedCandidates(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean, allowGlobal: Boolean, now: Instant): List<AccountRuntime> {
-        val healthy = accounts.values.filter { it.enabled && it.health == AccountHealth.OK && !it.isHardLimited(now) }
+    private fun orderedCandidates(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean, allowGlobal: Boolean, now: Instant, provider: AccountProvider): List<AccountRuntime> {
+        val healthy = accounts.values.filter { it.provider == provider && it.enabled && it.health == AccountHealth.OK && !it.isHardLimited(now) }
         val personal = if (userId == null) emptyList() else healthy.filter { it.ownerId == userId }
         // The shared pool is only a candidate tier when the caller may use it (POOL_GLOBAL_USE).
         val global = if (!allowGlobal) emptyList() else healthy.filter { it.ownerId == null && canUseGlobal(it, allowedGroups) }
@@ -160,8 +161,8 @@ class AccountPool {
     }
 
     /** Earliest reset time across hard-limited accounts (for the client-facing 429 hint). */
-    suspend fun earliestReset(now: Instant = Instant.now()): Instant? = mutex.withLock {
-        accounts.values.mapNotNull { rt ->
+    suspend fun earliestReset(now: Instant = Instant.now(), provider: AccountProvider = AccountProvider.ANTHROPIC): Instant? = mutex.withLock {
+        accounts.values.filter { it.provider == provider }.mapNotNull { rt ->
             rt.limit.rateLimitedUntil ?: rt.limit.windows.values.mapNotNull { it.resetAt }.minOrNull()
         }.filter { it.isAfter(now) }.minOrNull()
     }

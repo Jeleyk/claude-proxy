@@ -17,6 +17,8 @@ data class CreateAccountRequest(
     val accessToken: String? = null,
     val refreshToken: String? = null,
     val expiresAt: Long? = null,    // epoch millis
+    val provider: String = "ANTHROPIC",
+    val accountUuid: String? = null, // ChatGPT account id for OpenAI OAuth
 )
 
 @Serializable

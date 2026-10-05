@@ -26,7 +26,16 @@ enum class Permission {
     }
 }
 
-/** How an upstream account authenticates to Anthropic. */
+/** Upstream credential namespace; provider selection is never inferred from model names. */
+enum class AccountProvider {
+    ANTHROPIC, OPENAI;
+
+    companion object {
+        fun fromString(s: String): AccountProvider? = entries.firstOrNull { it.name.equals(s, ignoreCase = true) }
+    }
+}
+
+/** How an upstream account authenticates. */
 enum class AccountType {
     OAUTH,         // access_token + refresh_token, auto-refreshed
     OAUTH_STATIC,  // access_token only (no refresh), works until expiry
@@ -158,6 +167,7 @@ data class AccountDto(
     val deviceId: String?,
     val accountUuid: String? = null,
     val createdAt: String,
+    val provider: String = "ANTHROPIC",
 )
 
 @Serializable

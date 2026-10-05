@@ -11,6 +11,12 @@ import (
 type Config struct {
 	// Port the gateway listens on (env PORT, default "9000").
 	Port string
+	// BindHost optionally restricts the listener (env GATEWAY_BIND_HOST).
+	BindHost string
+	// Native OpenAI upstreams are operator configuration, never client-controlled.
+	OpenAIAPIBaseURL    string
+	OpenAICodexBaseURL  string
+	OpenAIClientVersion string
 	// ServiceURL is the base URL of the Kotlin service's control API (env SERVICE_URL).
 	ServiceURL string
 	// InternalToken is the shared secret sent as X-Internal-Token to the control API.
@@ -37,6 +43,10 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		Port:                 envOr("PORT", "9000"),
+		BindHost:             os.Getenv("GATEWAY_BIND_HOST"),
+		OpenAIAPIBaseURL:     envOr("OPENAI_API_BASE_URL", "https://api.openai.com/v1"),
+		OpenAICodexBaseURL:   envOr("OPENAI_CODEX_BASE_URL", "https://chatgpt.com/backend-api/codex"),
+		OpenAIClientVersion:  envOr("OPENAI_CLIENT_VERSION", "0.114.0"),
 		ServiceURL:           envOr("SERVICE_URL", "http://service:8787"),
 		InternalToken:        os.Getenv("INTERNAL_TOKEN"),
 		UpstreamBaseURL:      envOr("UPSTREAM_BASE_URL", "https://api.anthropic.com"),

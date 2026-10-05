@@ -19,6 +19,7 @@ import org.claudeproxy.auth.currentUser
 import org.claudeproxy.auth.requirePermission
 import org.claudeproxy.auth.requireUser
 import org.claudeproxy.auth.setUserSession
+import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.model.Permission
 import org.claudeproxy.model.PoolStatsDto
@@ -229,17 +230,22 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
         val req = call.receive<CreateAccountRequest>()
         val type = AccountType.fromString(req.type)
             ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Unknown type ${req.type}"))
+        val provider = AccountProvider.fromString(req.provider)
+            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Unknown provider"))
+        if (!validAccountUuid(req.accountUuid, provider) ||
+            (provider == AccountProvider.OPENAI && type != AccountType.API_KEY && req.accountUuid.isNullOrBlank()))
+            return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Valid account id required for OpenAI OAuth"))
         val secret = when (type) {
             AccountType.API_KEY -> {
-                val key = req.apiKey ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("apiKey required"))
+                val key = req.apiKey?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) } ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("apiKey required"))
                 AccountSecret(apiKey = key)
             }
             AccountType.OAUTH, AccountType.OAUTH_STATIC -> {
-                val access = req.accessToken ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("accessToken required"))
+                val access = req.accessToken?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) } ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("accessToken required"))
                 AccountSecret(accessToken = access, refreshToken = req.refreshToken, expiresAt = req.expiresAt)
             }
         }
-        val id = AccountRepo.create(req.name, type, req.groupId, req.priority, req.threshold, req.coefficient, secret, user.id)
+        val id = AccountRepo.create(req.name, type, req.groupId, req.priority, req.threshold, req.coefficient, secret, user.id, accountUuid = req.accountUuid?.trim(), provider = provider)
         pool.reload()
         runCatching { probe.probe(id) } // scrape limits on add (best effort)
         call.respond(buildPoolStats(pool))
@@ -250,7 +256,7 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateAccountRequest>()
-        if (!validAccountUuid(req.accountUuid)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("account uuid must be a UUID"))
+        if (!validAccountUuid(req.accountUuid, pool.get(id)?.provider ?: AccountProvider.ANTHROPIC)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("Invalid upstream account ID"))
         AccountRepo.updateConfig(id, req.name, req.groupId, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, req.clearGroup, req.overThreshold, accountUuid = req.accountUuid)
         pool.reload()
         call.respond(buildPoolStats(pool))
@@ -335,17 +341,22 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
         val req = call.receive<CreateAccountRequest>()
         val type = AccountType.fromString(req.type)
             ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Unknown type ${req.type}"))
+        val provider = AccountProvider.fromString(req.provider)
+            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Unknown provider"))
+        if (!validAccountUuid(req.accountUuid, provider) ||
+            (provider == AccountProvider.OPENAI && type != AccountType.API_KEY && req.accountUuid.isNullOrBlank()))
+            return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Valid account id required for OpenAI OAuth"))
         val secret = when (type) {
             AccountType.API_KEY -> {
-                val key = req.apiKey ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("apiKey required"))
+                val key = req.apiKey?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) } ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("apiKey required"))
                 AccountSecret(apiKey = key)
             }
             AccountType.OAUTH, AccountType.OAUTH_STATIC -> {
-                val access = req.accessToken ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("accessToken required"))
+                val access = req.accessToken?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) } ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("accessToken required"))
                 AccountSecret(accessToken = access, refreshToken = req.refreshToken, expiresAt = req.expiresAt)
             }
         }
-        val id = AccountRepo.create(req.name, type, null, req.priority, req.threshold, req.coefficient, secret, createdBy = user.id, ownerId = user.id)
+        val id = AccountRepo.create(req.name, type, null, req.priority, req.threshold, req.coefficient, secret, createdBy = user.id, ownerId = user.id, accountUuid = req.accountUuid?.trim(), provider = provider)
         pool.reload()
         runCatching { probe.probe(id) }
         call.respond(buildOwnedStats(pool, user.id))
@@ -357,7 +368,7 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
         if (!AccountRepo.isOwnedBy(id, user.id)) return@patch call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
         val req = call.receive<UpdateAccountRequest>()
         // personal accounts are never grouped
-        if (!validAccountUuid(req.accountUuid)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("account uuid must be a UUID"))
+        if (!validAccountUuid(req.accountUuid, pool.get(id)?.provider ?: AccountProvider.ANTHROPIC)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("Invalid upstream account ID"))
         AccountRepo.updateConfig(id, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold, accountUuid = req.accountUuid)
         pool.reload()
         call.respond(buildOwnedStats(pool, user.id))
@@ -437,7 +448,7 @@ private fun Route.userAccountRoutes(pool: AccountPool, probe: LimitProbe) {
         if (uid == null || aid == null) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         if (!AccountRepo.isOwnedBy(aid, uid)) return@patch call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
         val req = call.receive<UpdateAccountRequest>()
-        if (!validAccountUuid(req.accountUuid)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("account uuid must be a UUID"))
+        if (!validAccountUuid(req.accountUuid, pool.get(aid)?.provider ?: AccountProvider.ANTHROPIC)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("Invalid upstream account ID"))
         AccountRepo.updateConfig(aid, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold, accountUuid = req.accountUuid)
         pool.reload()
         call.respond(buildOwnedStats(pool, uid))
@@ -1329,4 +1340,6 @@ private suspend fun accountUuidAtLogin(result: ClaudeOAuth.TokenResult): String?
 private val UUID_RE = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 /** null (untouched) and blank (clear) pass; anything else must be shaped like Anthropic's uuid. */
-private fun validAccountUuid(v: String?): Boolean = v == null || v.isBlank() || UUID_RE.matches(v.trim())
+private fun validAccountUuid(v: String?, provider: AccountProvider = AccountProvider.ANTHROPIC): Boolean =
+    v == null || if (provider == AccountProvider.OPENAI) Regex("^[A-Za-z0-9_-]{1,64}$").matches(v.trim())
+    else v.isBlank() || UUID_RE.matches(v.trim())

@@ -101,6 +101,24 @@ class TokenUsageRoutesTest {
         assertEquals(1,body["available_accounts"]!!.jsonPrimitive.int)
         assertEquals("personal",body["accounts"]!!.jsonArray[0].jsonObject["scope"]!!.jsonPrimitive.content)
     }
+    @Test fun `provider query filters snapshots and refuses invalid or proxy-token OpenAI access`() = testApplication {
+        val openai = AccountRepo.create("openai-secret-name", AccountType.OAUTH, null, 0, 0.9, 1.0,
+            AccountSecret(accessToken="secret"), null, ownerId=user, accountUuid="chatgpt-id", provider=AccountProvider.OPENAI)
+        pool.reload()
+        application { mount() }
+        suspend fun query(provider: String, key: String=routingToken) = client.get("/gateway/v1/usage?provider=$provider") {
+            header("Authorization","Bearer $key")
+        }
+        assertEquals(HttpStatusCode.BadRequest,query("typo").status)
+        assertEquals(HttpStatusCode.Forbidden,query("OPENAI",token).status)
+        val body=Json.parseToJsonElement(query("OPENAI").bodyAsText()).jsonObject
+        assertEquals("OPENAI",body["provider"]!!.jsonPrimitive.content)
+        assertEquals(1,body["accounts"]!!.jsonArray.size)
+        assertEquals(1,body["available_accounts"]!!.jsonPrimitive.int)
+        assertFalse(body.toString().contains("openai-secret-name"))
+        val claude=Json.parseToJsonElement(query("ANTHROPIC").bodyAsText()).jsonObject
+        assertEquals(2,claude["accounts"]!!.jsonArray.size)
+    }
     @Test fun `unknown and expired readings are explicitly stale`() {
         val now=Instant.now()
         assertNull(tokenUsageWindow(null,now))

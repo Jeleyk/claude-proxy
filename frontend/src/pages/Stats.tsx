@@ -287,7 +287,7 @@ export function Stats({ user }: { user: UserDto }) {
                     <td className="num">{e.outputTokens}</td>
                     <td className="num">{e.cacheReadTokens}</td>
                     <td className="num"><CacheWriteCell e={e} /></td>
-                    <td className="num">{fmtUsd(e.cost)}</td>
+                    <td className="num">{e.costKnown === false ? <span className="hint" title="No price configured for this model; excluded from cost totals.">unpriced</span> : fmtUsd(e.cost)}</td>
                     <td><span className={`badge ${e.httpStatus >= 200 && e.httpStatus < 300 ? 'ok' : e.httpStatus === 429 ? 'warn' : 'bad'}`}>{e.httpStatus}</span></td>
                   </tr>
                 ))}

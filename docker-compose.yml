@@ -77,6 +77,9 @@ services:
       SERVICE_URL: "http://service:8787"
       INTERNAL_TOKEN: ${INTERNAL_TOKEN}
       UPSTREAM_BASE_URL: "https://api.anthropic.com"
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_CODEX_BASE_URL: ${OPENAI_CODEX_BASE_URL:-https://chatgpt.com/backend-api/codex}
+      OPENAI_CLIENT_VERSION: ${OPENAI_CLIENT_VERSION:-0.114.0}
       # How long an open stream may go without a single upstream byte before the relay gives up
       # on it (0 disables). Our keep-alives make a dead upstream look alive, so without this a
       # stream that dies mid-answer hangs until the user gives up.

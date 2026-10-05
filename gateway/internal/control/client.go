@@ -18,6 +18,7 @@ import (
 // Candidate is one ordered try-list entry with decrypted upstream auth headers.
 type Candidate struct {
 	AccountID          int               `json:"accountId"`
+	Provider           string            `json:"provider"`
 	Type               string            `json:"type"`
 	DeviceID           string            `json:"deviceId"`
 	AccountUUID        string            `json:"accountUuid"` // subscription's account uuid for metadata.user_id; "" for API keys / not yet known
@@ -31,6 +32,7 @@ type ResolveResp struct {
 	UserID        *int        `json:"userId"`
 	TokenID       *int        `json:"tokenId"`
 	OverLimit     bool        `json:"overLimit"`
+	PriceMissing  bool        `json:"priceMissing"`
 	DailyLimitUSD *float64    `json:"dailyLimitUsd"`
 	UsedUSD       *float64    `json:"usedUsd"`
 	Candidates    []Candidate `json:"candidates"`
@@ -49,13 +51,13 @@ type ResolveResp struct {
 
 // UsageReport is one upstream attempt's outcome, posted to /internal/usage.
 type UsageReport struct {
-	AccountID  int    `json:"accountId"`
-	UserID     *int   `json:"userId"`
-	TokenID    *int   `json:"tokenId,omitempty"`
-	Input      int64  `json:"input"`
-	Output     int64  `json:"output"`
-	CacheRead  int64  `json:"cacheRead"`
-	CacheWrite int64  `json:"cacheWrite"`
+	AccountID  int   `json:"accountId"`
+	UserID     *int  `json:"userId"`
+	TokenID    *int  `json:"tokenId,omitempty"`
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cacheRead"`
+	CacheWrite int64 `json:"cacheWrite"`
 	// CacheWrite1h is the 1-hour-TTL slice of CacheWrite, priced at 2× input instead of 1.25×.
 	CacheWrite1h int64 `json:"cacheWrite1h,omitempty"`
 	// Server-side tool calls Anthropic bills per invocation (web search) — token counts alone
@@ -81,6 +83,8 @@ type resolveReq struct {
 	Method    string `json:"method"`
 	Path      string `json:"path"`
 	Source    string `json:"source,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Model     string `json:"model,omitempty"`
 	RequestID string `json:"requestId,omitempty"`
 }
 
@@ -104,6 +108,7 @@ type Client struct {
 	serviceURL    string
 	internalToken string
 	source        string
+	provider      string
 	http          *http.Client
 }
 
@@ -125,11 +130,22 @@ func (c *Client) WithSource(source string) *Client {
 	return c
 }
 
+// WithProvider isolates native provider pools. Empty preserves the Anthropic default.
+func (c *Client) WithProvider(provider string) *Client {
+	c.provider = provider
+	return c
+}
+
 // Resolve turns a proxy token + request line into an ordered candidate list. The returned int
 // is the HTTP status so the caller can map 401/403 straight to the client.
 func (c *Client) Resolve(ctx context.Context, token, method, path string) (*ResolveResp, int, error) {
+	return c.ResolveWithModel(ctx, token, method, path, "")
+}
+
+// ResolveWithModel permits provider-specific pricing checks before shared quota is spent.
+func (c *Client) ResolveWithModel(ctx context.Context, token, method, path, model string) (*ResolveResp, int, error) {
 	sessionID := newSessionID()
-	body, _ := json.Marshal(resolveReq{Token: token, Method: method, Path: path, Source: c.source, RequestID: sessionID})
+	body, _ := json.Marshal(resolveReq{Token: token, Method: method, Path: path, Source: c.source, Provider: c.provider, Model: model, RequestID: sessionID})
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.serviceURL+"/internal/resolve", bytes.NewReader(body))

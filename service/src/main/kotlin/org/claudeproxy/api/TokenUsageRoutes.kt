@@ -7,9 +7,11 @@ import io.ktor.server.routing.get
 import kotlinx.serialization.Serializable
 import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.datapath.DatapathService
+import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.model.Permission
 import org.claudeproxy.model.WindowKind
 import org.claudeproxy.model.WindowLimit
+import org.claudeproxy.repo.ModelPriceRepo
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.RoutingTokenRepo
 import org.claudeproxy.repo.UserRepo
@@ -34,6 +36,8 @@ data class TokenUsageSnapshot(
     val rate_limits: TokenRateLimits?,
     val daily: TokenDailyLimit,
     val accounts: List<TokenAccountLimits>,
+    val provider: String = "ANTHROPIC",
+    val price_missing: Boolean = false,
 )
 
 /** A reset passing never proves a zero reading: retain the last value and mark it stale. */
@@ -57,6 +61,10 @@ fun Route.tokenUsageRoutes(pool: AccountPool, datapath: DatapathService) {
             ?: return@get call.respond(HttpStatusCode.Unauthorized, MessageResponse("Invalid API token"))
         val required = if (routing) Permission.ROUTING_USE else Permission.PROXY_USE
         if (required !in user.permissions) return@get call.respond(HttpStatusCode.Forbidden, MessageResponse("Missing permission"))
+        val provider = AccountProvider.fromString(call.request.queryParameters["provider"] ?: "ANTHROPIC")
+            ?: return@get call.respond(HttpStatusCode.BadRequest, MessageResponse("Unknown provider"))
+        if (provider == AccountProvider.OPENAI && !routing)
+            return@get call.respond(HttpStatusCode.Forbidden, MessageResponse("OpenAI requires a routing token"))
         val now = Instant.now()
         val source = if (routing) "routing" else "proxy"
         val cap = if (routing) UserRepo.dailyRoutingLimitOf(user.id) else UserRepo.dailyLimitOf(user.id)
@@ -64,14 +72,16 @@ fun Route.tokenUsageRoutes(pool: AccountPool, datapath: DatapathService) {
         val exhausted = cap != null && spent >= cap
         val groups = if (Permission.ADMIN in user.permissions) null else UserRepo.allowedGroupsOf(user.id)
         val allowGlobal = Permission.ADMIN in user.permissions || Permission.POOL_GLOBAL_USE in user.permissions
-        val eligible = if (exhausted) pool.selectionOrderOwned(user.id, now)
-            else pool.selectionOrder(user.id, groups, !UserRepo.preferGlobalPoolOf(user.id), allowGlobal, now)
+        val priceMissing = provider == AccountProvider.OPENAI && cap != null &&
+            !ModelPriceRepo.hasPrice(call.request.queryParameters["model"], provider)
+        val eligible = if (exhausted || priceMissing) pool.selectionOrderOwned(user.id, now, provider)
+            else pool.selectionOrder(user.id, groups, !UserRepo.preferGlobalPoolOf(user.id), allowGlobal, now, provider)
         val availableIds = eligible.map { it.id }.toSet()
         // Include exhausted/unhealthy accounts for visibility, but never other users' personal
         // accounts or groups. No account IDs, names, email, device IDs or credentials are emitted.
         val scoped = pool.snapshot().filter {
-            it.enabled && if (it.ownerId != null) it.ownerId == user.id
-            else allowGlobal && (groups == null || it.groupId == null || it.groupId in groups)
+            it.provider == provider && it.enabled && (if (it.ownerId != null) it.ownerId == user.id
+            else allowGlobal && (groups == null || it.groupId == null || it.groupId in groups))
         }.sortedWith(compareBy({ if (it.id == eligible.firstOrNull()?.id) 0 else 1 }, { it.priority }, { it.id }))
         val accounts = scoped.map { a -> TokenAccountLimits(
             scope = if (a.ownerId == null) "shared" else "personal", available = a.id in availableIds,
@@ -81,6 +91,6 @@ fun Route.tokenUsageRoutes(pool: AccountPool, datapath: DatapathService) {
         call.respond(TokenUsageSnapshot(snapshot_at=now.epochSecond, source=source, next_account_index=next,
             available_accounts=accounts.count { it.available }, rate_limits=next?.let { accounts[it].rate_limits },
             daily=TokenDailyLimit(spent, cap, exhausted, now.atZone(ZoneOffset.UTC).toLocalDate().plusDays(1)
-                .atStartOfDay(ZoneOffset.UTC).toEpochSecond()), accounts=accounts))
+                .atStartOfDay(ZoneOffset.UTC).toEpochSecond()), accounts=accounts, provider=provider.name, price_missing=priceMissing))
     }
 }

@@ -4,10 +4,12 @@ import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.accounts.AccountRepo
 import org.claudeproxy.accounts.AccountRuntime
 import org.claudeproxy.accounts.RateLimitHeaders
+import org.claudeproxy.accounts.OpenAILimits
 import org.claudeproxy.api.CandidateDto
 import org.claudeproxy.api.UsageReport
 import org.claudeproxy.cache.MemoryCache
 import org.claudeproxy.model.AccountHealth
+import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.model.LimitState
 import org.claudeproxy.model.Permission
@@ -47,6 +49,7 @@ data class ResolveResult(
     // the request is on a free path (token counting, model listing): no quota, no limit, and a
     // successful zero-token outcome is not recorded as usage.
     val free: Boolean = false,
+    val priceMissing: Boolean = false,
 )
 
 /**
@@ -71,8 +74,11 @@ class DatapathService(private val pool: AccountPool) {
      */
     suspend fun resolve(
         token: String, method: String, path: String, source: String = "proxy", requestId: String? = null,
+        provider: AccountProvider = AccountProvider.ANTHROPIC, model: String? = null,
     ): ResolveResult {
         val routing = source == "routing"
+        if (provider == AccountProvider.OPENAI && !routing)
+            return ResolveResult(null, null, ResolveError.NO_PERMISSION, false, null, null, emptyList())
         val auth = (if (routing) RoutingTokenRepo.resolveAuth(token) else ProxyTokenRepo.resolveAuth(token))
             ?: return ResolveResult(null, null, ResolveError.BAD_TOKEN, false, null, null, emptyList())
         val userId = auth.userId
@@ -101,7 +107,7 @@ class DatapathService(private val pool: AccountPool) {
         // tokens on every turn, and one unhealthy account shouldn't break the context indicator
         // when the pool has others that would answer.
         if (isFreePath(path)) {
-            val order = pool.selectAnyOrder(userId, allowedGroups, personalFirst, allowGlobal)
+            val order = pool.selectAnyOrder(userId, allowedGroups, personalFirst, allowGlobal, provider)
             return ResolveResult(userId, tokenId, null, false, null, null, order.map { it.toCandidate() }, sysPrompt, forcedModel, free = true)
         }
 
@@ -110,17 +116,21 @@ class DatapathService(private val pool: AccountPool) {
         val usedCost = if (costLimit != null) cachedDailySpend(userId, if (routing) "routing" else "proxy") else 0.0
         val overLimit = costLimit != null && usedCost >= costLimit
 
-        val order = if (overLimit) pool.selectionOrderOwned(userId) else pool.selectionOrder(userId, allowedGroups, personalFirst, allowGlobal)
+        // Unknown OpenAI rates cannot silently bypass a shared-pool USD budget. Personal
+        // subscriptions remain usable: their usage is already exempt from that budget.
+        val priceMissing = provider == AccountProvider.OPENAI && costLimit != null &&
+            !ModelPriceRepo.hasPrice(model, provider)
+        val order = if (overLimit || priceMissing) pool.selectionOrderOwned(userId, provider = provider) else pool.selectionOrder(userId, allowedGroups, personalFirst, allowGlobal, provider = provider)
         // An empty plan becomes a 503 at the gateway and records no usage at all — without this
         // line the failure leaves no trace anywhere, neither in the log nor in the stats.
-        if (order.isEmpty() && !overLimit) logNoCandidate(userId, source)
-        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() }, sysPrompt, forcedModel)
+        if (order.isEmpty() && !overLimit) logNoCandidate(userId, source, provider)
+        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() }, sysPrompt, forcedModel, priceMissing = priceMissing)
     }
 
     /** Why the pool had nothing to offer, per account in the user's reach. */
-    private suspend fun logNoCandidate(userId: Int, source: String) {
+    private suspend fun logNoCandidate(userId: Int, source: String, provider: AccountProvider) {
         val now = Instant.now()
-        val reasons = pool.snapshot().filter { it.ownerId == null || it.ownerId == userId }.joinToString("; ") { a ->
+        val reasons = pool.snapshot().filter { it.provider == provider && (it.ownerId == null || it.ownerId == userId) }.joinToString("; ") { a ->
             val util = a.limit.usageFraction()
             val why = when {
                 !a.enabled -> "disabled"
@@ -149,7 +159,7 @@ class DatapathService(private val pool: AccountPool) {
         // Failures still land: a broken count_tokens is exactly what you want to see.
         val silent = o.free && o.status in 200..299 && billed.isEmpty()
         val cost = if (silent) 0.0 else {
-            UsageRepo.record(o.accountId, o.userId, billed, o.status, o.model, source, o.tokenId, o.webFetchRequests)
+            UsageRepo.record(o.accountId, o.userId, billed, o.status, o.model, source, o.tokenId, o.webFetchRequests, provider = pool.get(o.accountId)?.provider ?: AccountProvider.ANTHROPIC)
         }
         if (o.mcpCalls.isNotEmpty()) McpUsageRepo.record(o.userId, o.tokenId, o.mcpCalls)
 
@@ -166,7 +176,8 @@ class DatapathService(private val pool: AccountPool) {
 
         val headers = o.ratelimitHeaders.orEmpty()
         val prev = pool.get(o.accountId)?.limit ?: LimitState()
-        val newLimit = RateLimitHeaders.parse(headers, prev)
+        val newLimit = if (pool.get(o.accountId)?.provider == AccountProvider.OPENAI)
+            OpenAILimits.parseHeaders(headers, prev) else RateLimitHeaders.parse(headers, prev)
         pool.updateLimit(o.accountId, newLimit)
 
         when {
@@ -193,6 +204,7 @@ class DatapathService(private val pool: AccountPool) {
     private fun AccountRuntime.toCandidate(): CandidateDto = CandidateDto(
         accountId = id,
         type = type.name,
+        provider = provider.name,
         deviceId = deviceId,
         accountUuid = accountUuid.takeIf { type != AccountType.API_KEY },
         authHeaders = authHeadersFor(this),
@@ -205,6 +217,12 @@ class DatapathService(private val pool: AccountPool) {
      * `Authorization: Bearer <access>` + `anthropic-beta: oauth-2025-04-20`; API_KEY → `x-api-key`.
      */
     private fun authHeadersFor(a: AccountRuntime): Map<String, String> = buildMap {
+        if (a.provider == AccountProvider.OPENAI) {
+            val bearer = if (a.type == AccountType.API_KEY) a.secret.apiKey else a.secret.accessToken
+            bearer?.let { put("Authorization", "Bearer $it") }
+            if (a.type != AccountType.API_KEY) a.accountUuid?.let { put("ChatGPT-Account-Id", it) }
+            return@buildMap
+        }
         when (a.type) {
             AccountType.API_KEY -> a.secret.apiKey?.let { put("x-api-key", it) }
             AccountType.OAUTH, AccountType.OAUTH_STATIC -> {

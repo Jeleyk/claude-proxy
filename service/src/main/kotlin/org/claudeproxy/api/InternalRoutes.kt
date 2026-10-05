@@ -8,6 +8,7 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import org.claudeproxy.datapath.DatapathService
 import org.claudeproxy.datapath.ResolveError
+import org.claudeproxy.model.AccountProvider
 
 /**
  * The private control API consumed by the Go gateway. Never routed publicly by nginx
@@ -25,7 +26,11 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
         post("/resolve") {
             if (!call.authorized()) return@post call.respond(HttpStatusCode.Unauthorized)
             val req = call.receive<ResolveRequest>()
-            val r = datapath.resolve(req.token, req.method, req.path, req.source, req.requestId)
+            val provider = AccountProvider.fromString(req.provider)
+                ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Unknown provider"))
+            if (provider == AccountProvider.OPENAI && req.source != "routing")
+                return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("OpenAI requires routing"))
+            val r = datapath.resolve(req.token, req.method, req.path, req.source, req.requestId, provider, req.model)
             when (r.error) {
                 ResolveError.BAD_TOKEN -> call.respond(HttpStatusCode.Unauthorized)
                 ResolveError.NO_PERMISSION -> call.respond(HttpStatusCode.Forbidden)
@@ -40,6 +45,7 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
                         systemPrompt = r.systemPrompt,
                         defaultModel = r.defaultModel,
                         free = r.free,
+                        priceMissing = r.priceMissing,
                     ),
                 )
             }

@@ -1,13 +1,18 @@
 package org.claudeproxy.accounts
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.claudeproxy.model.AccountHealth
+import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.oauth.ClaudeOAuth
+import org.claudeproxy.oauth.OpenAIOAuth
 import org.claudeproxy.proxy.Http
 import org.slf4j.LoggerFactory
 import java.time.Instant
@@ -25,6 +30,7 @@ class TokenRefresher(private val pool: AccountPool) {
     private val refreshMarginMs = 5 * 60 * 1000L
     private val pollIntervalMs = 60 * 1000L
     private val backoff = RefreshBackoff()
+    private val refreshLocks = ConcurrentHashMap<Int, Mutex>()
     // (account, access-token tag) pairs whose profile lookup already ran — a token without the
     // user:profile scope answers 403 forever, so each token is asked once per process.
     private val uuidLookups = ConcurrentHashMap.newKeySet<String>()
@@ -44,7 +50,7 @@ class TokenRefresher(private val pool: AccountPool) {
             if (acc.health == AccountHealth.DEAD) continue
             val refreshToken = acc.secret.refreshToken ?: continue
             val expiresAt = acc.secret.expiresAt
-            val dueSoon = expiresAt == null || expiresAt - now <= refreshMarginMs
+            val dueSoon = acc.health == AccountHealth.REFRESH_FAILED || expiresAt == null || expiresAt - now <= refreshMarginMs
             if (!dueSoon) continue
             // A failing account waits out its backoff. Re-authorizing it (a new refresh token)
             // clears the wait immediately — that's the operator fixing it.
@@ -54,20 +60,47 @@ class TokenRefresher(private val pool: AccountPool) {
     }
 
     suspend fun refreshOne(accountId: Int, refreshToken: String) {
+        refreshLocks.computeIfAbsent(accountId) { Mutex() }.withLock {
+            val account = pool.get(accountId) ?: return@withLock
+            // OAuth refresh tokens rotate. A queued tick must not exchange an already-used
+            // token, and a new login must not be overwritten by an old refresh attempt.
+            if (account.secret.refreshToken != refreshToken) return@withLock
+            refreshAccount(account, refreshToken)
+        }
+    }
+
+    private suspend fun refreshAccount(account: AccountRuntime, refreshToken: String) {
+        val accountId = account.id
         try {
-            val result = ClaudeOAuth.refresh(Http.client, refreshToken)
-            val cur = pool.get(accountId)?.secret ?: AccountSecret()
-            val updated = cur.copy(
-                accessToken = result.accessToken,
-                refreshToken = result.refreshToken ?: cur.refreshToken,
-                expiresAt = result.expiresAtMillis ?: cur.expiresAt,
-            )
+            val cur = account.secret
+            val updated: AccountSecret
+            val accountUuid: String?
+            if (account.provider == AccountProvider.OPENAI) {
+                val result = OpenAIOAuth.refresh(Http.client, refreshToken)
+                // A refresh must not silently switch a stored ChatGPT workspace/account.
+                require(result.accountId == null || account.accountUuid == null || result.accountId == account.accountUuid) {
+                    "OpenAI account changed during refresh"
+                }
+                updated = cur.copy(accessToken = result.accessToken,
+                    refreshToken = result.refreshToken ?: cur.refreshToken,
+                    expiresAt = result.expiresAtMillis ?: cur.expiresAt)
+                accountUuid = result.accountId
+            } else {
+                val result = ClaudeOAuth.refresh(Http.client, refreshToken)
+                updated = cur.copy(accessToken = result.accessToken,
+                    refreshToken = result.refreshToken ?: cur.refreshToken,
+                    expiresAt = result.expiresAtMillis ?: cur.expiresAt)
+                accountUuid = result.accountUuid
+            }
+            if (pool.get(accountId)?.secret?.refreshToken != refreshToken) return
             AccountRepo.updateSecret(accountId, updated)
-            result.accountUuid?.let { storeAccountUuid(accountId, it) }
+            accountUuid?.let { storeAccountUuid(accountId, it) }
             AccountRepo.updateHealth(accountId, AccountHealth.OK)
             pool.updateSecretInMemory(accountId, updated, AccountHealth.OK)
             backoff.onSuccess(accountId)
             log.info("Refreshed token for account {}", accountId)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             val message = e.message ?: ""
             // `invalid_grant` means the refresh token itself is gone (expired or revoked): no
@@ -93,7 +126,7 @@ class TokenRefresher(private val pool: AccountPool) {
      * subscription bearer, which genuine Claude Code never does.
      */
     private suspend fun backfillAccountUuid(acc: AccountRuntime) {
-        if (acc.type == AccountType.API_KEY || acc.accountUuid != null) return
+        if (acc.provider != AccountProvider.ANTHROPIC || acc.type == AccountType.API_KEY || acc.accountUuid != null) return
         if (acc.health == AccountHealth.DEAD) return
         val token = acc.secret.accessToken ?: return
         if (!uuidLookups.add("${acc.id}:${token.hashCode()}")) return
@@ -111,7 +144,7 @@ class TokenRefresher(private val pool: AccountPool) {
         if (pool.get(accountId)?.accountUuid == uuid) return
         AccountRepo.updateAccountUuid(accountId, uuid)
         pool.setAccountUuid(accountId, uuid)
-        log.info("Account {} identified as Anthropic account {}", accountId, uuid)
+        log.info("Updated upstream identity for account {}", accountId)
     }
 }
 

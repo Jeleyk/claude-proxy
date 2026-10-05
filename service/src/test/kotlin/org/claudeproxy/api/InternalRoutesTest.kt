@@ -111,6 +111,19 @@ class InternalRoutesTest {
     }
 
     @Test
+    fun `unknown provider and OpenAI proxy source fail closed`() = testApplication {
+        application { mount() }
+        for (provider in listOf("unknown", "OPENAI")) {
+            val res = client.post("/internal/resolve") {
+                header("X-Internal-Token", token)
+                contentType(ContentType.Application.Json)
+                setBody("""{"token":"$seededToken","method":"POST","path":"/v1/responses","provider":"$provider"}""")
+            }
+            assertEquals(HttpStatusCode.BadRequest, res.status)
+        }
+    }
+
+    @Test
     fun `usage endpoint returns 204`() = testApplication {
         application { mount() }
         val res = client.post("/internal/usage") {

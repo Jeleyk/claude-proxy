@@ -1,25 +1,21 @@
 // Command gateway is claude-proxy's Go data plane: one binary, one container, one listener.
 //
-// It serves three things that were once three deployments but have always been one codebase:
-//
-//	/v1/…                  the Claude Code datapath (nginx strips the public /gateway prefix)
-//	/routing/openai/…      the OpenAI Chat Completions gateway
-//	/routing/anthropic/…   the native Anthropic Messages gateway
-//
-// They differ only in the translator in front and the usage `source` they report; everything
-// underneath — account resolution, upstream forwarding, SSE relay, usage reporting — is shared.
-// All state lives in the Kotlin service, reached over its private /internal/* control API; the
-// gateway never touches the database.
+// Routes Anthropic proxy traffic, Claude-backed API translation and native OpenAI Responses.
+// Durable state lives in the Kotlin service, reached over its private /internal/* control API.
+// The gateway never touches the database. Native OpenAI retains bounded conversation/account
+// affinity in memory; losing a binding rejects encrypted continuation rather than rotating it.
 package main
 
 import (
 	"log"
+	"net"
 	"net/http"
 	"time"
 
 	"claudeproxy/gateway/internal/anthropicgw"
 	"claudeproxy/gateway/internal/config"
 	"claudeproxy/gateway/internal/control"
+	"claudeproxy/gateway/internal/nativeopenai"
 	"claudeproxy/gateway/internal/openaigw"
 	"claudeproxy/gateway/internal/proxy"
 	"claudeproxy/gateway/internal/routing"
@@ -45,6 +41,8 @@ func newMux(cfg *config.Config) *http.ServeMux {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"message":"ok"}`))
 	})
+	mux.Handle("/openai/", http.StripPrefix("/openai", nativeopenai.NewHandler(cfg,
+		control.New(cfg.ServiceURL, cfg.InternalToken).WithSource("routing").WithProvider("OPENAI"))))
 	mux.Handle(openAIPrefix+"/",
 		http.StripPrefix(openAIPrefix, routing.NewHandler(cfg, routingCtrl, openaigw.New())))
 	mux.Handle(anthropicPrefix+"/",
@@ -58,7 +56,7 @@ func newMux(cfg *config.Config) *http.ServeMux {
 func main() {
 	cfg := config.Load()
 	srv := &http.Server{
-		Addr:              ":" + cfg.Port,
+		Addr:              net.JoinHostPort(cfg.BindHost, cfg.Port),
 		Handler:           newMux(cfg),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

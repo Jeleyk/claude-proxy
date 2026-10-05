@@ -12,6 +12,7 @@ import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.accounts.UpstreamAuth
 import org.claudeproxy.api.ChatModelDto
 import org.claudeproxy.proxy.Http
+import org.claudeproxy.model.AccountProvider
 import org.slf4j.LoggerFactory
 
 /**
@@ -77,7 +78,7 @@ object ChatModels {
     private suspend fun fetch(pool: AccountPool, upstreamBaseUrl: String): List<String> {
         // Any healthy account will do: model listing consumes no subscription quota.
         val account = pool.snapshot().firstOrNull {
-            it.enabled && it.health == org.claudeproxy.model.AccountHealth.OK
+            it.provider == AccountProvider.ANTHROPIC && it.enabled && it.health == org.claudeproxy.model.AccountHealth.OK
         } ?: return emptyList()
         val statement = Http.client.prepareGet("$upstreamBaseUrl/v1/models?limit=100") {
             header("anthropic-version", "2023-06-01")

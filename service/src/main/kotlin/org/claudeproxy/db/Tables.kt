@@ -120,6 +120,7 @@ object Accounts : Table("accounts") {
     val id = integer("id").autoIncrement()
     val name = varchar("name", 128)
     val type = varchar("type", 32)
+    val provider = varchar("provider", 32).default("ANTHROPIC")
     val groupId = integer("group_id").references(AccountGroups.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.SET_NULL).nullable()
     val priority = integer("priority").default(100)
     val threshold = double("threshold").default(0.9)
@@ -184,6 +185,7 @@ object UsageEvents : Table("usage_events") {
     val fast = bool("fast").default(false)
     // computed USD cost of this request from model pricing at record time
     val cost = double("cost").default(0.0)
+    val costKnown = bool("cost_known").default(true)
     val httpStatus = integer("http_status").default(0)
     val model = varchar("model", 128).nullable()
     // datapath that produced this event: "proxy" (Claude Code) or "routing" (OpenAI/Anthropic

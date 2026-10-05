@@ -2,6 +2,10 @@
 
 A self-hosted, multi-account rotating proxy for **Claude Code** and the Anthropic API.
 
+This branch also supports **OpenAI API keys and ChatGPT/Codex OAuth accounts** through a separate
+native Responses endpoint. See [Native OpenAI setup](docs/OPENAI.md) for login, clients, quota
+tracking, pricing, and protocol limitations.
+
 Store several Anthropic accounts (Claude subscriptions via OAuth, and/or API keys). Every request
 is routed to the highest-priority account that still has headroom in its rate-limit window; once
 that account crosses its configured **threshold**, traffic moves to the next one. When *all*
@@ -73,6 +77,7 @@ One nginx router fronts every component on a single origin:
 | `/gateway/…`           | **gateway** (Go)           | The Claude Code datapath |
 | `/routing/openai/…`    | **gateway** (same container) | OpenAI Chat Completions over your pool |
 | `/routing/anthropic/…` | **gateway** (same container) | Anthropic Messages over your pool |
+| `/openai/v1/…`         | **gateway** (same container) | Native OpenAI Responses and model discovery |
 
 The Go gateways are a stateless data plane: they resolve each request against the service's
 private `/internal/*` control API (which owns selection, crypto and bookkeeping), forward to

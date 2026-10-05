@@ -41,3 +41,14 @@ func TestLoadOverrides(t *testing.T) {
 		t.Errorf("InternalToken = %q", c.InternalToken)
 	}
 }
+
+func TestNativeOpenAIOverridesAndLocalBinding(t *testing.T) {
+	t.Setenv("GATEWAY_BIND_HOST", "127.0.0.1")
+	t.Setenv("OPENAI_API_BASE_URL", "http://127.0.0.1:1234/api/v1")
+	t.Setenv("OPENAI_CODEX_BASE_URL", "http://127.0.0.1:1234/codex")
+	t.Setenv("OPENAI_CLIENT_VERSION", "1.2.3")
+	cfg := Load()
+	if cfg.BindHost != "127.0.0.1" || cfg.OpenAIAPIBaseURL != "http://127.0.0.1:1234/api/v1" || cfg.OpenAICodexBaseURL != "http://127.0.0.1:1234/codex" || cfg.OpenAIClientVersion != "1.2.3" {
+		t.Fatal("native config overrides not honored")
+	}
+}

@@ -5,6 +5,7 @@ import org.claudeproxy.db.AccountSecrets
 import org.claudeproxy.db.Accounts
 import org.claudeproxy.model.AccountDto
 import org.claudeproxy.model.AccountHealth
+import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.model.LimitState
 import org.claudeproxy.model.LimitStatus
@@ -45,6 +46,7 @@ data class AccountRuntime(
     val accountUuid: String? = null,
     val secret: AccountSecret,
     val limit: LimitState,
+    val provider: AccountProvider = AccountProvider.ANTHROPIC,
 ) {
     /**
      * What goes into metadata.user_id.account_uuid for this account: its own uuid for a
@@ -83,6 +85,7 @@ data class AccountRuntime(
             deviceId = deviceId,
             accountUuid = accountUuid,
             createdAt = createdAt,
+            provider = provider.name,
         )
     }
 }
@@ -157,6 +160,7 @@ object AccountRepo {
                 id = id,
                 name = row[Accounts.name],
                 type = AccountType.fromString(row[Accounts.type]) ?: AccountType.API_KEY,
+                provider = AccountProvider.valueOf(row[Accounts.provider]),
                 groupId = row[Accounts.groupId],
                 ownerId = row[Accounts.ownerId],
                 priority = row[Accounts.priority],
@@ -207,10 +211,12 @@ object AccountRepo {
         secret: AccountSecret, createdBy: Int?, ownerId: Int? = null,
         deviceId: String = generateDeviceId(),
         accountUuid: String? = null,
+        provider: AccountProvider = AccountProvider.ANTHROPIC,
     ): Int = transaction {
         val id = Accounts.insert {
             it[Accounts.name] = name
             it[Accounts.type] = type.name
+            it[Accounts.provider] = provider.name
             // personal accounts are owner-scoped, never grouped
             it[Accounts.groupId] = if (ownerId != null) null else groupId
             it[Accounts.ownerId] = ownerId

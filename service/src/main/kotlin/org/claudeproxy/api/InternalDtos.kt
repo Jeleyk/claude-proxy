@@ -20,6 +20,8 @@ data class ResolveRequest(
     // active-session entry that /internal/session-end closes. Absent = no liveness tracking
     // (older gateways), which costs nothing but the "active now" gauge.
     val requestId: String? = null,
+    val provider: String = "ANTHROPIC",
+    val model: String? = null,
 )
 
 /** Closes the active session opened by a resolve carrying the same [requestId]. */
@@ -41,6 +43,7 @@ data class CandidateDto(
     val authHeaders: Map<String, String> = emptyMap(),
     val fiveHourResetEpoch: Long? = null,
     val weeklyResetEpoch: Long? = null,
+    val provider: String = "ANTHROPIC",
 )
 
 @Serializable
@@ -61,6 +64,7 @@ data class ResolveResponse(
     // free path (token counting, model listing): the gateway echoes this back on the usage
     // report so a successful zero-token attempt stays out of the statistics.
     val free: Boolean = false,
+    val priceMissing: Boolean = false,
 )
 
 /**

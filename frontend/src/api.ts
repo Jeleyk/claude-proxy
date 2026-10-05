@@ -69,10 +69,26 @@ export interface GraceDto {
   weeklyUtilization: number | null;
 }
 
+export type AccountProvider = 'ANTHROPIC' | 'OPENAI';
+
+export interface OpenAIDeviceFlow {
+  flowId: string;
+  verificationUri: string;
+  userCode: string;
+  expiresAt: string;
+  intervalSeconds: number;
+}
+
+export interface OpenAIDevicePoll {
+  status: 'pending' | 'complete' | 'expired';
+  accountId?: number;
+}
+
 export interface AccountDto {
   id: number;
   name: string;
   type: string;
+  provider?: AccountProvider;
   groupId: number | null;
   ownerId: number | null;
   priority: number;
@@ -357,10 +373,11 @@ export function localTz(): string {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
 }
 
-async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function req<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method,
     credentials: 'include',
+    signal,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -390,6 +407,8 @@ export const api = {
   refreshOne: (id: number) => req<PoolStats>('POST', `/api/accounts/${id}/refresh-limits`),
   refreshAll: () => req<PoolStats>('POST', '/api/accounts/refresh-limits'),
   oauthStart: () => req<{ authorizeUrl: string; state: string }>('POST', '/api/accounts/oauth/start'),
+  openaiOauthStart: () => req<OpenAIDeviceFlow>('POST', '/api/accounts/openai/oauth/start'),
+  openaiOauthPoll: (b: unknown, signal?: AbortSignal) => req<OpenAIDevicePoll>('POST', '/api/accounts/openai/oauth/poll', b, signal),
   oauthComplete: (b: unknown) => req<PoolStats>('POST', '/api/accounts/oauth/complete', b),
 
   // personal (per-user) accounts — tried before the global pool, excluded from global stats
@@ -401,6 +420,8 @@ export const api = {
   refreshMyOne: (id: number) => req<PoolStats>('POST', `/api/my/accounts/${id}/refresh-limits`),
   refreshMyAll: () => req<PoolStats>('POST', '/api/my/accounts/refresh-limits'),
   myOauthStart: () => req<{ authorizeUrl: string; state: string }>('POST', '/api/my/accounts/oauth/start'),
+  myOpenaiOauthStart: () => req<OpenAIDeviceFlow>('POST', '/api/my/accounts/openai/oauth/start'),
+  myOpenaiOauthPoll: (b: unknown, signal?: AbortSignal) => req<OpenAIDevicePoll>('POST', '/api/my/accounts/openai/oauth/poll', b, signal),
   myOauthComplete: (b: unknown) => req<PoolStats>('POST', '/api/my/accounts/oauth/complete', b),
 
   // admin oversight of a user's personal accounts
@@ -515,6 +536,7 @@ export interface UsageEvent {
   id: number; accountId: number; accountName: string | null; ts: string;
   inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number;
   cost: number; httpStatus: number; model: string | null; source: string;
+  costKnown?: boolean;
   // The parts of the bill the token columns don't show: the 1h slice of the cache writes
   // (priced ~1.6× the 5m rate), server-side web searches (billed per call), and fast mode.
   cacheWrite1hTokens: number; webSearchRequests: number; fast: boolean;

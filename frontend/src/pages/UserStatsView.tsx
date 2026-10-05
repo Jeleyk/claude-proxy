@@ -313,7 +313,7 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
                 <td className="num">{e.outputTokens}</td>
                 <td className="num">{e.cacheReadTokens}</td>
                 <td className="num"><CacheWriteCell e={e} /></td>
-                <td className="num">{fmtUsd(e.cost)}</td>
+                <td className="num">{e.costKnown === false ? <span className="hint" title="No price configured for this model; excluded from cost totals.">unpriced</span> : fmtUsd(e.cost)}</td>
                 <td>{statusBadge(e.httpStatus)}</td>
               </tr>
             ))}

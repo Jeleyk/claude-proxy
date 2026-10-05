@@ -41,6 +41,7 @@ func TestPathPrefixSelectsTheHandler(t *testing.T) {
 	}{
 		// OpenAI errors carry {"error":{...,"type":"invalid_request_error"}} with a "message".
 		{"openai routing", "/routing/openai/v1/chat/completions", `"error"`},
+		{"native openai", "/openai/v1/responses", `"error"`},
 		// Anthropic errors carry {"type":"error","error":{...}}.
 		{"anthropic routing", "/routing/anthropic/v1/messages", `"type"`},
 		// Everything else is the Claude Code datapath (nginx has already stripped /gateway).
