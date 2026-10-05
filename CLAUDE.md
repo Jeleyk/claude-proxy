@@ -414,3 +414,5 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   Postgres. On delete, clear referencing rows first (Postgres enforces FKs).
 - Don't add dependencies without a clear reason. Don't commit secrets — they live in the
   server `.env`.
+
+A successful 2xx limit probe clears the previous persisted 429 cooldown. Error responses, even with rate-limit headers, must preserve it. This permits recovery after an upstream manual quota reset before the old reset time.

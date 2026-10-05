@@ -69,7 +69,10 @@ class LimitProbe(
             runCatching { resp.readRawBytes() } // drain
 
             val prev = pool.get(accountId)?.limit ?: account.limit
-            val newLimit = RateLimitHeaders.parse(headerMap, prev)
+            val parsedLimit = RateLimitHeaders.parse(headerMap, prev)
+            // A successful inference probe invalidates the old 429 cooldown; error headers do not.
+            val newLimit = if (resp.status.value in 200..299 && parsedLimit.rateLimitedUntil != null)
+                parsedLimit.copy(rateLimitedUntil = null) else parsedLimit
             val observed = headerMap.keys.any { it.lowercase().startsWith("anthropic-ratelimit") }
             if (newLimit !== prev) pool.updateLimit(accountId, newLimit)
             when (resp.status.value) {
