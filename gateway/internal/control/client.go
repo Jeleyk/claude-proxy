@@ -29,13 +29,14 @@ type Candidate struct {
 
 // ResolveResp is the /internal/resolve response.
 type ResolveResp struct {
-	UserID        *int        `json:"userId"`
-	TokenID       *int        `json:"tokenId"`
-	OverLimit     bool        `json:"overLimit"`
-	PriceMissing  bool        `json:"priceMissing"`
-	DailyLimitUSD *float64    `json:"dailyLimitUsd"`
-	UsedUSD       *float64    `json:"usedUsd"`
-	Candidates    []Candidate `json:"candidates"`
+	UserID              *int        `json:"userId"`
+	TokenID             *int        `json:"tokenId"`
+	OverLimit           bool        `json:"overLimit"`
+	PriceMissing        bool        `json:"priceMissing"`
+	MeteringUnsupported bool        `json:"meteringUnsupported"`
+	DailyLimitUSD       *float64    `json:"dailyLimitUsd"`
+	UsedUSD             *float64    `json:"usedUsd"`
+	Candidates          []Candidate `json:"candidates"`
 	// Routing only: the token's static system prompt, to inject ahead of client system content.
 	SystemPrompt *string `json:"systemPrompt"`
 	// Proxy only: the model the token forces onto every request, in Claude Code's notation
@@ -65,11 +66,13 @@ type UsageReport struct {
 	WebSearchRequests int64 `json:"webSearchRequests,omitempty"`
 	WebFetchRequests  int64 `json:"webFetchRequests,omitempty"`
 	// Fast marks a response served in fast mode, a premium price tier on the same model.
-	Fast             bool              `json:"fast,omitempty"`
-	Status           int               `json:"status"`
-	Model            *string           `json:"model"`
-	RatelimitHeaders map[string]string `json:"ratelimitHeaders"`
-	Source           string            `json:"source,omitempty"`
+	Fast bool `json:"fast,omitempty"`
+	// Native OpenAI did not supply complete usage or used unmetered billable features.
+	AccountingIncomplete bool              `json:"accountingIncomplete,omitempty"`
+	Status               int               `json:"status"`
+	Model                *string           `json:"model"`
+	RatelimitHeaders     map[string]string `json:"ratelimitHeaders"`
+	Source               string            `json:"source,omitempty"`
 	// Free echoes the resolve's free-path flag (token counting, model listing): the service
 	// leaves a successful zero-token attempt out of the statistics.
 	Free bool `json:"free,omitempty"`

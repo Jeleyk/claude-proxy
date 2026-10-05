@@ -65,6 +65,7 @@ data class ResolveResponse(
     // report so a successful zero-token attempt stays out of the statistics.
     val free: Boolean = false,
     val priceMissing: Boolean = false,
+    val meteringUnsupported: Boolean = false,
 )
 
 /**
@@ -105,6 +106,9 @@ data class UsageReport(
     // MCP tool invocations seen in the response (client-side "mcp__…" tool_use blocks and
     // server-side mcp_tool_use blocks, both keyed by "mcp__server__tool"), by tool name.
     val mcpCalls: Map<String, Long> = emptyMap(),
+    // Missing terminal usage or unsupported billable dimensions make OpenAI cost incomplete,
+    // including a cancelled response whose observed token counts are still zero.
+    val accountingIncomplete: Boolean = false,
 ) {
     /** 1h slice clamped to the total it belongs to, so pricing can never exceed the writes. */
     private val cacheWrite1hClamped: Long get() = cacheWrite1h.coerceIn(0, cacheWrite.coerceAtLeast(0))

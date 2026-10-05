@@ -82,18 +82,28 @@ copy Codex's own account credentials. The API Routing page includes client examp
 routing token. It returns the next candidate's cached limits plus the caller's
 anonymous accessible pool. This is a prediction, not a reservation.
 
-The existing daily routing spend cap covers routing through both providers. Subscription
-percentages do not combine across providers or accounts. `five_hour` and `seven_day`
+Users with a daily routing USD cap currently cannot consume shared OpenAI accounts,
+even if model prices are configured. They can still use their own personal accounts
+and discover models. Native Responses usage arrives at the end of a response; a client
+disconnect can prevent complete accounting, and the proxy does not yet reserve and
+reconcile budgets. Rather than silently bypass a cap, resolution excludes shared
+OpenAI accounts and returns `metering_unsupported` if no personal account is available.
+The quota snapshot exposes `metering_unsupported: true` under the same condition.
+Uncapped users can use the shared pool. Anthropic daily-cap behavior is unchanged.
+
+Subscription percentages do not combine across providers or accounts. `five_hour` and `seven_day`
 are populated only when the upstream explicitly identifies those window durations.
 Unknown readings are `null`; stale readings remain marked stale rather than becoming zero.
 OAuth limits come from the Codex quota endpoint and response headers/events. API keys
 have no subscription-window probe; absence of quota data does not mean unlimited access.
 
-Configure explicit OpenAI model prices under **Pricing** before using a shared pool
-with a USD cap. Patterns such as `gpt-…`, `codex-…`, `o3`, or `openai/<model-pattern>`
+Configure explicit OpenAI model prices under **Pricing** for token-cost estimates.
+Patterns such as `gpt-…`, `codex-…`, `o3`, or `openai/<model-pattern>`
 are recognized. Claude prices never serve as an OpenAI fallback. With no matching price,
-usage is marked `costKnown=false`; the UI shows an unknown cost. Capped users cannot
-consume shared OpenAI accounts at an unknown price, but can use their personal accounts.
+usage is marked `costKnown=false`; the UI shows an unknown cost. Missing final usage,
+hosted tools, and non-default service tiers are also marked unknown because the current
+price table cannot account for every billable dimension. Observed token counts are kept;
+missing counts are never fabricated or presented as a confirmed zero-cost request.
 For a model-specific availability prediction, include `model` in the quota request.
 
 Input, output and cached input tokens are recorded; cached input is removed from regular
@@ -104,8 +114,14 @@ The monetary value is configured metering, not a separate charge for a subscript
 
 - Responses only: no native Chat Completions, WebSocket, Files, Batches, Realtime or
   response-retrieval endpoint. The existing Claude compatibility routes are unchanged.
-  References to stored items, files, vector stores, containers and saved prompts are
+  References to stored items, files, vector stores, containers, uploaded skills and saved prompts are
   rejected because the shared account has no per-user ownership boundary for those resources.
+  Tool definitions use an explicit allowlist, including definitions in namespaces and
+  dynamic tool-result input. Function/custom tools, client-executed shell/apply-patch/computer
+  tools, web search and fresh automatic code-interpreter containers are supported.
+  Hosted shell, tool search, MCP connectors and unknown tool kinds are rejected pending
+  separate resource-ownership review. Standard MCP tools exposed by clients as function
+  definitions remain supported.
 - Send the complete conversation input each time. `previous_response_id`, `conversation`,
   `store=true`, and `background=true` are rejected. The gateway uses `store=false`.
   This avoids relying on stored responses owned by an account that may rotate.

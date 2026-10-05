@@ -18,7 +18,6 @@ import org.claudeproxy.repo.McpUsageRepo
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.RoutingTokenRepo
 import org.claudeproxy.repo.UsageRepo
-import org.claudeproxy.repo.ModelPriceRepo
 import org.claudeproxy.repo.UserRepo
 import java.time.Instant
 import java.time.LocalDate
@@ -50,6 +49,7 @@ data class ResolveResult(
     // successful zero-token outcome is not recorded as usage.
     val free: Boolean = false,
     val priceMissing: Boolean = false,
+    val meteringUnsupported: Boolean = false,
 )
 
 /**
@@ -116,15 +116,15 @@ class DatapathService(private val pool: AccountPool) {
         val usedCost = if (costLimit != null) cachedDailySpend(userId, if (routing) "routing" else "proxy") else 0.0
         val overLimit = costLimit != null && usedCost >= costLimit
 
-        // Unknown OpenAI rates cannot silently bypass a shared-pool USD budget. Personal
-        // subscriptions remain usable: their usage is already exempt from that budget.
-        val priceMissing = provider == AccountProvider.OPENAI && costLimit != null &&
-            !ModelPriceRepo.hasPrice(model, provider)
-        val order = if (overLimit || priceMissing) pool.selectionOrderOwned(userId, provider = provider) else pool.selectionOrder(userId, allowedGroups, personalFirst, allowGlobal, provider = provider)
+        // OpenAI reports may lack final usage after a disconnect and some billable dimensions
+        // are not metered. Known token prices alone cannot enforce a shared-pool USD cap.
+        // Keep capped callers on their personal accounts until reservation/reconciliation exists.
+        val meteringUnsupported = provider == AccountProvider.OPENAI && costLimit != null
+        val order = if (overLimit || meteringUnsupported) pool.selectionOrderOwned(userId, provider = provider) else pool.selectionOrder(userId, allowedGroups, personalFirst, allowGlobal, provider = provider)
         // An empty plan becomes a 503 at the gateway and records no usage at all — without this
         // line the failure leaves no trace anywhere, neither in the log nor in the stats.
         if (order.isEmpty() && !overLimit) logNoCandidate(userId, source, provider)
-        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() }, sysPrompt, forcedModel, priceMissing = priceMissing)
+        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() }, sysPrompt, forcedModel, meteringUnsupported = meteringUnsupported)
     }
 
     /** Why the pool had nothing to offer, per account in the user's reach. */
@@ -153,13 +153,15 @@ class DatapathService(private val pool: AccountPool) {
         // (the built-in UI). Each meters its own daily limit, so the tag has to survive verbatim.
         val source = o.source.ifBlank { "proxy" }
         val billed = o.billed()
+        val provider = pool.get(o.accountId)?.provider ?: AccountProvider.ANTHROPIC
+        val accountingIncomplete = provider == AccountProvider.OPENAI && o.accountingIncomplete
         // A free-path request (token counting, model listing) that succeeded without consuming
         // anything is not a data point — recording it would pad the request counters and the
         // "recent requests" list with zero-token noise for every keystroke's context estimate.
         // Failures still land: a broken count_tokens is exactly what you want to see.
-        val silent = o.free && o.status in 200..299 && billed.isEmpty()
+        val silent = o.free && o.status in 200..299 && billed.isEmpty() && !accountingIncomplete
         val cost = if (silent) 0.0 else {
-            UsageRepo.record(o.accountId, o.userId, billed, o.status, o.model, source, o.tokenId, o.webFetchRequests, provider = pool.get(o.accountId)?.provider ?: AccountProvider.ANTHROPIC)
+            UsageRepo.record(o.accountId, o.userId, billed, o.status, o.model, source, o.tokenId, o.webFetchRequests, provider = provider, accountingIncomplete = accountingIncomplete)
         }
         if (o.mcpCalls.isNotEmpty()) McpUsageRepo.record(o.userId, o.tokenId, o.mcpCalls)
 

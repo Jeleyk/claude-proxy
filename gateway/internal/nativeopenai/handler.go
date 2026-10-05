@@ -47,6 +47,7 @@ type prepared struct {
 	stream        bool
 	models        bool
 	clientVersion string
+	unmetered     bool
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -138,6 +139,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "unsupported_parameter", field+" is unsupported on a shared account; resend inline input and use function/custom tools")
 			return
 		}
+		p.unmetered = unmeteredRequest(p.body)
 	}
 	plan, status, err := h.ctrl.ResolveWithModel(r.Context(), token, r.Method, path, p.model)
 	if err != nil {
@@ -207,6 +209,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(candidates) == 0 {
+		if plan.MeteringUnsupported {
+			writeError(w, 403, "metering_unsupported", "Shared OpenAI accounts cannot enforce a USD cap yet; use a personal account or ask an administrator to review the cap")
+			return
+		}
 		if plan.PriceMissing {
 			writeError(w, 403, "pricing_not_configured", "No OpenAI model price is configured for the shared pool; ask an administrator to configure pricing")
 			return
@@ -328,6 +334,9 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, c control.
 		}
 		return canRetry, report
 	}
+	// Dispatch may consume quota even if the connection is later lost. Only a
+	// complete priced usage result can turn this into known accounting.
+	report.AccountingIncomplete = !p.models
 	resp, err := h.do(ctx, w, req, p.stream, head)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -342,6 +351,9 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, c control.
 	report.Status = resp.StatusCode
 	report.RatelimitHeaders = rateHeaders(resp.Header)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode < 500 {
+			report.AccountingIncomplete = false
+		}
 		errorBody, _ := readBounded(resp.Body, 64<<10)
 		if canRetry && (retryable(resp.StatusCode) || modelUnavailable(errorBody)) {
 			return true, report
@@ -413,7 +425,7 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, c control.
 		}
 		return canRetry, report
 	}
-	scanResponse(data, &report)
+	report.AccountingIncomplete = !scanResponse(data, &report) || p.unmetered
 	var outcome struct {
 		Status string `json:"status"`
 	}

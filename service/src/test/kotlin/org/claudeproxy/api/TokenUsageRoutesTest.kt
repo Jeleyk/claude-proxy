@@ -127,4 +127,25 @@ class TokenUsageRoutesTest {
         assertEquals(100.0,expired.used_percentage)
         assertTrue(tokenUsageWindow(WindowLimit(),now)!!.stale)
     }
+
+    @Test fun `capped OpenAI snapshot excludes shared accounts with a metering reason despite known price`() = testApplication {
+        AccountRepo.create("openai-personal",AccountType.API_KEY,null,0,0.9,1.0,
+            AccountSecret(apiKey="fake-personal-key"),null,ownerId=user,provider=AccountProvider.OPENAI)
+        AccountRepo.create("openai-shared",AccountType.API_KEY,null,1,0.9,1.0,
+            AccountSecret(apiKey="fake-shared-key"),null,provider=AccountProvider.OPENAI)
+        ModelPriceRepo.set("gpt-test",2.0,8.0,0.5,0.0,0.0,1.0,0.0)
+        UserRepo.update(user,null,null,null,null,null,false,dailyRoutingCostLimit=10.0)
+        pool.reload()
+        application { mount() }
+        val response=client.get("/gateway/v1/usage?provider=OPENAI&model=gpt-test") { header("Authorization","Bearer $routingToken") }
+        assertEquals(HttpStatusCode.OK,response.status)
+        val body=Json.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals(1,body["available_accounts"]!!.jsonPrimitive.int)
+        assertEquals(true,body["metering_unsupported"]?.jsonPrimitive?.boolean)
+        assertFalse(body["price_missing"]!!.jsonPrimitive.boolean)
+        assertFalse(body["daily"]!!.jsonObject["exhausted"]!!.jsonPrimitive.boolean)
+        val accounts=body["accounts"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(accounts.single { it["scope"]!!.jsonPrimitive.content == "personal" }["available"]!!.jsonPrimitive.boolean)
+        assertFalse(accounts.single { it["scope"]!!.jsonPrimitive.content == "shared" }["available"]!!.jsonPrimitive.boolean)
+    }
 }

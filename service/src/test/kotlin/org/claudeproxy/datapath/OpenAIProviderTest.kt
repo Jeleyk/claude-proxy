@@ -3,6 +3,7 @@ package org.claudeproxy.datapath
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.serialization.json.Json
 import org.claudeproxy.Config
 import org.claudeproxy.accounts.*
 import org.claudeproxy.api.UsageReport
@@ -60,6 +61,7 @@ class OpenAIProviderTest {
         assertEquals(listOf(claude), old.candidates.map { it.accountId })
         val native = service.resolve(token,"POST","/v1/responses", source="routing", provider=AccountProvider.OPENAI)
         assertEquals(listOf(personal,shared), native.candidates.map { it.accountId })
+        assertFalse(native.meteringUnsupported)
         assertTrue(native.candidates.all { it.provider == "OPENAI" })
         assertEquals(mapOf("Authorization" to "Bearer access-openai-personal", "ChatGPT-Account-Id" to "account-openai-personal"), native.candidates.first().authHeaders)
         assertEquals(listOf(claude), pool.selectAnyOrder(user,emptySet()).map { it.id })
@@ -177,21 +179,57 @@ class OpenAIProviderTest {
         assertEquals(ResolveError.BAD_TOKEN,service.resolve(proxy,"POST","/v1/responses", source="routing", provider=AccountProvider.OPENAI).error)
     }
 
-    @Test fun `capped shared usage requires known price while personal fallback stays available`() = runBlocking {
+    @Test fun `capped OpenAI generation never selects shared accounts even with configured prices`() = runBlocking {
         UserRepo.update(user,null,null,null,null,null,false,dailyRoutingCostLimit=10.0)
         val service = DatapathService(pool)
         suspend fun resolve() = service.resolve(token,"POST","/v1/responses",source="routing",provider=AccountProvider.OPENAI,model="gpt-test")
         val noPrice = resolve()
-        assertTrue(noPrice.priceMissing)
+        assertFalse(noPrice.priceMissing)
+        assertTrue(noPrice.meteringUnsupported)
         assertEquals(listOf(personal),noPrice.candidates.map { it.accountId })
         ModelPriceRepo.set("gpt-test",2.0,8.0,0.5,0.0,0.0,1.0,0.0)
         val priced = resolve()
         assertFalse(priced.priceMissing)
-        assertEquals(listOf(personal,shared),priced.candidates.map { it.accountId })
+        assertTrue(priced.meteringUnsupported)
+        assertEquals(listOf(personal),priced.candidates.map { it.accountId })
+        val catalog = service.resolve(token,"GET","/v1/models",source="routing",provider=AccountProvider.OPENAI)
+        assertEquals(listOf(personal,shared),catalog.candidates.map { it.accountId })
+        assertTrue(catalog.free)
+        assertFalse(catalog.meteringUnsupported)
+        val claudePlan = service.resolve(token,"POST","/v1/messages",source="routing",model="claude-opus-5")
+        assertEquals(listOf(claude),claudePlan.candidates.map { it.accountId })
+        assertFalse(claudePlan.meteringUnsupported)
         service.applyOutcome(UsageReport(accountId=shared,userId=user,source="routing",status=200,model="gpt-test",input=1_000_000,output=1_000_000,cacheRead=1_000_000))
         assertEquals(10.5,service.cachedDailySpend(user,"routing"))
         assertTrue(resolve().overLimit)
         assertEquals(listOf(personal),resolve().candidates.map { it.accountId })
+    }
+
+    @Test fun `incomplete OpenAI accounting keeps zero usage unknown and preserves observed token costs`() = runBlocking {
+        ModelPriceRepo.set("gpt-test",2.0,8.0,0.5,0.0,0.0,1.0,0.0)
+        val service = DatapathService(pool)
+        val wire = Json { ignoreUnknownKeys = true }
+        for (input in listOf(0L, 1_000_000L)) {
+            val report = wire.decodeFromString<UsageReport>("""{"accountId":$shared,"userId":$user,"source":"routing","status":200,"model":"gpt-test","input":$input,"accountingIncomplete":true}""")
+            service.applyOutcome(report)
+        }
+        transaction {
+            val rows = UsageEvents.selectAll().toList().sortedBy { it[UsageEvents.inputTokens] }
+            assertEquals(listOf(0L,1_000_000L),rows.map { it[UsageEvents.inputTokens] })
+            assertTrue(rows.none { it[UsageEvents.costKnown] })
+            assertEquals(listOf(0.0,2.0),rows.map { it[UsageEvents.cost] })
+        }
+    }
+
+    @Test fun `incomplete accounting marker preserves Anthropic billing behavior`() = runBlocking {
+        ModelPriceRepo.set("claude-review",2.0,8.0,0.5,0.0,0.0,1.0,0.0)
+        DatapathService(pool).applyOutcome(UsageReport(accountId=claude,userId=user,source="routing",
+            status=200,model="claude-review",input=1_000_000,accountingIncomplete=true))
+        transaction {
+            val row=UsageEvents.selectAll().single()
+            assertTrue(row[UsageEvents.costKnown])
+            assertEquals(2.0,row[UsageEvents.cost])
+        }
     }
 
     @Test fun `unknown OpenAI costs are marked and do not inherit Claude substring rates`() = runBlocking {

@@ -46,6 +46,7 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
                         defaultModel = r.defaultModel,
                         free = r.free,
                         priceMissing = r.priceMissing,
+                        meteringUnsupported = r.meteringUnsupported,
                     ),
                 )
             }
@@ -65,4 +66,3 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
         }
     }
 }
-

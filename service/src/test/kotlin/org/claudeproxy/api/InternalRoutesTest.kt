@@ -12,7 +12,7 @@ import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.testApplication
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.*
 import org.claudeproxy.Config
 import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.accounts.AccountRepo
@@ -22,8 +22,13 @@ import org.claudeproxy.datapath.DatapathService
 import org.claudeproxy.db.Crypto
 import org.claudeproxy.db.Db
 import org.claudeproxy.db.Users
+import org.claudeproxy.db.UsageEvents
+import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.repo.ProxyTokenRepo
+import org.claudeproxy.repo.RoutingTokenRepo
+import org.claudeproxy.repo.UserRepo
+import org.claudeproxy.repo.ModelPriceRepo
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import kotlinx.coroutines.runBlocking
@@ -33,6 +38,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 class InternalRoutesTest {
     private val token = "devtok"
@@ -182,5 +188,46 @@ class InternalRoutesTest {
             setBody("""{"accountId":1,"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"status":200,"model":"opus","ratelimitHeaders":{}}""")
         }
         assertEquals(HttpStatusCode.NoContent, res.status)
+    }
+
+    @Test
+    fun `OpenAI capped resolve emits metering unsupported with no shared credentials`() = testApplication {
+        AccountRepo.create("openai",AccountType.API_KEY,null,0,0.9,1.0,
+            AccountSecret(apiKey="fake-openai-key"),adminId,provider=AccountProvider.OPENAI)
+        ModelPriceRepo.set("gpt-test",2.0,8.0,0.5,0.0,0.0,1.0,0.0)
+        UserRepo.update(adminId,null,null,null,null,null,false,dailyRoutingCostLimit=10.0)
+        val routing=RoutingTokenRepo.create(adminId,"test-openai").token!!
+        pool.reload()
+        application { mount() }
+        val res=client.post("/internal/resolve") {
+            header("X-Internal-Token",token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"token":"$routing","method":"POST","path":"/v1/responses","source":"routing","provider":"OPENAI","model":"gpt-test"}""")
+        }
+        assertEquals(HttpStatusCode.OK,res.status)
+        val body=Json.parseToJsonElement(res.bodyAsText()).jsonObject
+        assertTrue(body["candidates"]!!.jsonArray.isEmpty())
+        assertEquals(true,body["meteringUnsupported"]?.jsonPrimitive?.boolean)
+        assertFalse(body["priceMissing"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun `incomplete OpenAI usage wire report records unknown cost even with zero tokens`() = testApplication {
+        val account=AccountRepo.create("openai",AccountType.API_KEY,null,0,0.9,1.0,
+            AccountSecret(apiKey="fake-openai-key"),adminId,provider=AccountProvider.OPENAI)
+        ModelPriceRepo.set("gpt-test",2.0,8.0,0.5,0.0,0.0,1.0,0.0)
+        pool.reload()
+        application { mount() }
+        val res=client.post("/internal/usage") {
+            header("X-Internal-Token",token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"accountId":$account,"userId":$adminId,"source":"routing","status":200,"model":"gpt-test","accountingIncomplete":true}""")
+        }
+        assertEquals(HttpStatusCode.NoContent,res.status)
+        transaction {
+            val row=UsageEvents.selectAll().single()
+            assertFalse(row[UsageEvents.costKnown])
+            assertEquals(0.0,row[UsageEvents.cost])
+        }
     }
 }

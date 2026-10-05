@@ -284,24 +284,35 @@ def run(args, temp):
         row=next(r for r in mgmt('/api/stats/recent') if r.get('model')=='gpt-smoke')
         assert row['costKnown'] is True and abs(row['cost']-0.00011)<1e-9
         print('PASS real usage persistence, cached-token accounting and explicit/unknown model pricing',flush=True)
-        # Shared subscriptions must not bypass a daily cap through missing model prices.
+        expect(gateway,'/openai/v1/responses','POST',dict(payload,tools=[{'type':'web_search'}]),token=token)
+        row=next(r for r in mgmt('/api/stats/recent') if r.get('model')=='gpt-smoke')
+        assert row['costKnown'] is False and row['inputTokens']==40 and row['outputTokens']==20
+        print('PASS unsupported billable dimensions preserve tokens but never claim complete cost',flush=True)
+        # Shared native Responses cannot enforce a USD cap until reservation/reconciliation exists.
         user_password=secrets.token_urlsafe(24)
         limited=mgmt('/api/users','POST',{'username':'limited-smoke','password':user_password,'roles':['user'],'dailyRoutingCostLimit':1})
         limited_client=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
         expect(service,'/api/auth/login','POST',{'username':'limited-smoke','password':user_password},client=limited_client)
         limited_token=expect(service,'/api/routing-tokens','POST',{'name':'limited'},client=limited_client)[0]['token']
-        expect(gateway,'/openai/v1/responses','POST',dict(payload,model='gpt-unpriced'),token=limited_token,status=403)
-        expect(gateway,'/openai/v1/responses','POST',payload,token=limited_token)
+        before=len(FakeUpstream.events)
+        for model in ('gpt-unpriced','gpt-smoke'):
+            blocked,_=expect(gateway,'/openai/v1/responses','POST',dict(payload,model=model),token=limited_token,status=403)
+            assert blocked['error']['code']=='metering_unsupported'
+        assert len(FakeUpstream.events)==before
+        quota,_=expect(service,'/gateway/v1/usage?provider=OPENAI&model=gpt-smoke',token=limited_token)
+        assert quota['metering_unsupported'] is True and quota['available_accounts']==0
+        expect(gateway,'/openai/v1/models',token=limited_token)
         mgmt(f'/api/users/{limited["id"]}','PATCH',{'enabled':False})
         disabled_status=request(gateway,'/openai/v1/models',token=limited_token)[0]
         assert disabled_status in (401,403), f'Disabled user remained authorized: {disabled_status}'
-        print('PASS capped users require configured model prices and disabled-user cached token is rejected',flush=True)
+        print('PASS capped shared OpenAI fails closed even with configured prices; catalog/quota consistent; disabled-user token rejected',flush=True)
         # Unsupported stateful features are rejected before any upstream request.
         before=len(FakeUpstream.events)
         for patch in ({'previous_response_id':'resp_other'},{'background':True},{'store':True},
                       {'input':[{'type':'item_reference','id':'msg_other'}]},
                       {'input':[{'role':'user','content':[{'type':'input_file','file_id':'file_other'}]}]},
-                      {'tools':[{'type':'file_search','vector_store_ids':['vs_other']}]}):
+                      {'tools':[{'type':'file_search','vector_store_ids':['vs_other']}]},
+                      {'tools':[{'type':'shell','environment':{'type':'container_auto','skills':[{'type':'skill_reference','skill_id':'skill_other'}]}}]}):
             expect(gateway,'/openai/v1/responses','POST',dict(payload,**patch),token=token,status=400)
         assert len(FakeUpstream.events)==before
         expect(gateway,'/openai/v1/models',token=proxy,status=401)

@@ -76,9 +76,11 @@ object UsageRepo {
         status: Int, model: String?, source: String = "proxy", tokenId: Int? = null,
         webFetchRequests: Long = 0,
         provider: AccountProvider = AccountProvider.ANTHROPIC,
+        accountingIncomplete: Boolean = false,
     ): Double {
         val cost = ModelPriceRepo.costOf(model, usage, provider)
-        val costKnown = provider != AccountProvider.OPENAI || usage.isEmpty() || ModelPriceRepo.hasPrice(model, provider)
+        val costKnown = provider != AccountProvider.OPENAI ||
+            (!accountingIncomplete && (usage.isEmpty() || ModelPriceRepo.hasPrice(model, provider)))
         runCatching {
             transaction {
                 UsageEvents.insert {

@@ -11,7 +11,6 @@ import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.model.Permission
 import org.claudeproxy.model.WindowKind
 import org.claudeproxy.model.WindowLimit
-import org.claudeproxy.repo.ModelPriceRepo
 import org.claudeproxy.repo.ProxyTokenRepo
 import org.claudeproxy.repo.RoutingTokenRepo
 import org.claudeproxy.repo.UserRepo
@@ -38,6 +37,7 @@ data class TokenUsageSnapshot(
     val accounts: List<TokenAccountLimits>,
     val provider: String = "ANTHROPIC",
     val price_missing: Boolean = false,
+    val metering_unsupported: Boolean = false,
 )
 
 /** A reset passing never proves a zero reading: retain the last value and mark it stale. */
@@ -72,9 +72,8 @@ fun Route.tokenUsageRoutes(pool: AccountPool, datapath: DatapathService) {
         val exhausted = cap != null && spent >= cap
         val groups = if (Permission.ADMIN in user.permissions) null else UserRepo.allowedGroupsOf(user.id)
         val allowGlobal = Permission.ADMIN in user.permissions || Permission.POOL_GLOBAL_USE in user.permissions
-        val priceMissing = provider == AccountProvider.OPENAI && cap != null &&
-            !ModelPriceRepo.hasPrice(call.request.queryParameters["model"], provider)
-        val eligible = if (exhausted || priceMissing) pool.selectionOrderOwned(user.id, now, provider)
+        val meteringUnsupported = provider == AccountProvider.OPENAI && cap != null
+        val eligible = if (exhausted || meteringUnsupported) pool.selectionOrderOwned(user.id, now, provider)
             else pool.selectionOrder(user.id, groups, !UserRepo.preferGlobalPoolOf(user.id), allowGlobal, now, provider)
         val availableIds = eligible.map { it.id }.toSet()
         // Include exhausted/unhealthy accounts for visibility, but never other users' personal
@@ -91,6 +90,6 @@ fun Route.tokenUsageRoutes(pool: AccountPool, datapath: DatapathService) {
         call.respond(TokenUsageSnapshot(snapshot_at=now.epochSecond, source=source, next_account_index=next,
             available_accounts=accounts.count { it.available }, rate_limits=next?.let { accounts[it].rate_limits },
             daily=TokenDailyLimit(spent, cap, exhausted, now.atZone(ZoneOffset.UTC).toLocalDate().plusDays(1)
-                .atStartOfDay(ZoneOffset.UTC).toEpochSecond()), accounts=accounts, provider=provider.name, price_missing=priceMissing))
+                .atStartOfDay(ZoneOffset.UTC).toEpochSecond()), accounts=accounts, provider=provider.name, metering_unsupported=meteringUnsupported))
     }
 }

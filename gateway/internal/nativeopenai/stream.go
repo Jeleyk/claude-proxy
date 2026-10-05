@@ -202,7 +202,8 @@ func (h *Handler) relay(ctx context.Context, w http.ResponseWriter, resp *http.R
 				return failure(502, "Invalid terminal OpenAI response")
 			}
 			if len(e.Response) > 0 {
-				scanResponse(e.Response, report)
+				complete := scanResponse(e.Response, report)
+				report.AccountingIncomplete = !terminal || !complete || p.unmetered
 			}
 			if failed {
 				report.Status = streamErrorStatus(e.Code, e.Error.Code, e.Response)
@@ -278,33 +279,52 @@ func streamErrorStatus(codes ...any) int {
 	return 502
 }
 
-func scanResponse(data []byte, report *control.UsageReport) {
+// Returns whether all accepted billing dimensions are known for this response.
+func scanResponse(data []byte, report *control.UsageReport) bool {
 	var response struct {
-		Model string `json:"model"`
+		Model       string `json:"model"`
+		ServiceTier string `json:"service_tier"`
+		Output      []struct {
+			Type string `json:"type"`
+		} `json:"output"`
 		Usage *struct {
-			Input   int64 `json:"input_tokens"`
-			Output  int64 `json:"output_tokens"`
+			Input   *int64 `json:"input_tokens"`
+			Output  *int64 `json:"output_tokens"`
 			Details struct {
 				Cached int64 `json:"cached_tokens"`
 			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(data, &response) != nil {
-		return
+		return false
 	}
 	if report.Model == nil && response.Model != "" {
 		report.Model = &response.Model
 	}
-	if response.Usage == nil {
-		return
+	if response.Usage == nil || response.Usage.Input == nil || response.Usage.Output == nil {
+		return false
 	}
 	u := response.Usage
+	if *u.Input < 0 || *u.Output < 0 || u.Details.Cached < 0 || u.Details.Cached > *u.Input {
+		return false
+	}
 	// OpenAI input_tokens includes cached tokens; this service prices the two buckets separately.
-	cached := max(int64(0), min(u.Details.Cached, u.Input))
-	report.Input = max(int64(0), u.Input-cached)
+	cached := u.Details.Cached
+	report.Input = *u.Input - cached
 	report.CacheRead = cached
-	report.Output = max(int64(0), u.Output)
+	report.Output = *u.Output
 	// Output already includes reasoning_tokens. Never bill that detail a second time.
+	if response.ServiceTier != "" && response.ServiceTier != "default" {
+		return false
+	}
+	for _, item := range response.Output {
+		switch item.Type {
+		case "message", "reasoning", "compaction", "function_call", "custom_tool_call", "local_shell_call", "shell_call", "apply_patch_call", "computer_call":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func scanRateEvent(data []byte, report *control.UsageReport) {
