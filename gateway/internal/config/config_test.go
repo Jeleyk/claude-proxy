@@ -7,7 +7,11 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("SERVICE_URL", "")
 	t.Setenv("UPSTREAM_BASE_URL", "")
 	t.Setenv("INTERNAL_TOKEN", "")
+	t.Setenv("OPENAI_CLIENT_VERSION", "")
 	c := Load()
+	if c.OpenAIClientVersion != "0.159.2" {
+		t.Errorf("OpenAIClientVersion default = %q, want 0.159.2", c.OpenAIClientVersion)
+	}
 	if c.Port != "9000" {
 		t.Errorf("Port default = %q, want 9000", c.Port)
 	}

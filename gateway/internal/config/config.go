@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// DefaultOpenAIClientVersion is the tested fallback for Codex catalog compatibility.
+const DefaultOpenAIClientVersion = "0.159.2"
+
 // Config is the gateway's runtime configuration.
 type Config struct {
 	// Port the gateway listens on (env PORT, default "9000").
@@ -46,7 +49,7 @@ func Load() *Config {
 		BindHost:             os.Getenv("GATEWAY_BIND_HOST"),
 		OpenAIAPIBaseURL:     envOr("OPENAI_API_BASE_URL", "https://api.openai.com/v1"),
 		OpenAICodexBaseURL:   envOr("OPENAI_CODEX_BASE_URL", "https://chatgpt.com/backend-api/codex"),
-		OpenAIClientVersion:  envOr("OPENAI_CLIENT_VERSION", "0.114.0"),
+		OpenAIClientVersion:  envOr("OPENAI_CLIENT_VERSION", DefaultOpenAIClientVersion),
 		ServiceURL:           envOr("SERVICE_URL", "http://service:8787"),
 		InternalToken:        os.Getenv("INTERNAL_TOKEN"),
 		UpstreamBaseURL:      envOr("UPSTREAM_BASE_URL", "https://api.anthropic.com"),

@@ -270,7 +270,7 @@ func (h *Handler) request(ctx context.Context, c control.Candidate, p prepared) 
 				v = h.cfg.OpenAIClientVersion
 			}
 			if v == "" {
-				v = "0.114.0"
+				v = config.DefaultOpenAIClientVersion
 			}
 			suffix += "?client_version=" + url.QueryEscape(v)
 		}
@@ -380,7 +380,22 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, c control.
 		_, _ = w.Write(result)
 		return false, report
 	}
-	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+	streamResponse, err := h.responseIsSSE(ctx, w, resp, p.stream, head)
+	if err != nil {
+		report.Status = 502
+		if errors.Is(err, errSSESniffTimeout) {
+			report.Status = 504
+		}
+		if ctx.Err() != nil {
+			report.Status = 499
+			return false, report
+		}
+		if !canRetry {
+			fail(w, head, p.stream, report.Status, "Cannot read OpenAI response stream")
+		}
+		return canRetry, report
+	}
+	if streamResponse {
 		return h.relay(ctx, w, resp, p, canRetry, head, delivered, &report), report
 	}
 	if p.stream || isOAuth(c.Type) {

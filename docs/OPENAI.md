@@ -14,6 +14,11 @@ added under **My Accounts** with the same flow.
   enter the short code, and approve the account. The proxy receives access/refresh
   tokens, encrypts them with the existing `MASTER_KEY`, and refreshes them as needed.
   Account login may require enabling device-code authorization in the OpenAI account.
+  If that beta sign-in option is unavailable, use the ordinary browser OAuth flow
+  on a trusted local machine and import the resulting credentials using **OAuth**.
+  Keep the login isolated from existing Codex credentials; never paste credentials
+  into a chat or commit an authentication cache. OpenAI documents browser login as
+  a [fallback for unavailable device authorization](https://learn.chatgpt.com/docs/auth).
 - **API key** uses an OpenAI Platform API key and the ordinary Responses API.
 - **OAuth / OAuth static** can import existing credentials. Supply the matching
   ChatGPT account ID as well as the access token, and a refresh token for renewable OAuth.

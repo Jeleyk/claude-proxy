@@ -64,7 +64,7 @@ makes clients abort → nginx 502 + retry loops. Don't regress it.
 | `UPSTREAM_BASE_URL` | `https://api.anthropic.com` | Anthropic API base. |
 | `OPENAI_API_BASE_URL` | `https://api.openai.com/v1` | Operator-owned API-key upstream. |
 | `OPENAI_CODEX_BASE_URL` | `https://chatgpt.com/backend-api/codex` | Operator-owned OAuth upstream. |
-| `OPENAI_CLIENT_VERSION` | `0.114.0` | Fallback catalog compatibility version (operator override; not a latest-version claim). |
+| `OPENAI_CLIENT_VERSION` | `0.159.2` | Tested fallback catalog compatibility version (operator override; not a latest-version claim). |
 
 ## Build / run / test
 
