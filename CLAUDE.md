@@ -416,3 +416,4 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   server `.env`.
 
 A successful 2xx limit probe clears the previous persisted 429 cooldown. Error responses, even with rate-limit headers, must preserve it. This permits recovery after an upstream manual quota reset before the old reset time.
+`GET /gateway/v1/usage` is an exact nginx route to the service, authenticated by a proxy/routing API token. It returns the next candidate and anonymous in-scope pool quotas without inference or active-session side effects. See docs/TOKEN_USAGE.md.
