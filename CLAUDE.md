@@ -414,3 +414,5 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   Postgres. On delete, clear referencing rows first (Postgres enforces FKs).
 - Don't add dependencies without a clear reason. Don't commit secrets — they live in the
   server `.env`.
+
+`GET /gateway/v1/usage` is an exact nginx route to the service, authenticated by a proxy/routing API token. It returns the next candidate and anonymous in-scope pool quotas without inference or active-session side effects. See docs/TOKEN_USAGE.md.
