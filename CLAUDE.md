@@ -414,3 +414,5 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   Postgres. On delete, clear referencing rows first (Postgres enforces FKs).
 - Don't add dependencies without a clear reason. Don't commit secrets — they live in the
   server `.env`.
+
+Browser cookies carry a signed server-enforced 30-day expiry and `users.session_version`. Password changes, account disable and logout revoke all existing sessions in that generation; stale logout cannot revoke a newer generation. Existing cookies are invalid on upgrade and users must log in again. The additive session_version column is initialized by the existing schema setup. API tokens remain independently managed.

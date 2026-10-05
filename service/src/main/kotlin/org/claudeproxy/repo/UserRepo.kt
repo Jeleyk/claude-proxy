@@ -12,6 +12,7 @@ import org.claudeproxy.model.UserDto
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
@@ -20,7 +21,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import java.time.Instant
 
-data class UserAuth(val id: Int, val username: String, val enabled: Boolean, val permissions: Set<Permission>)
+data class UserAuth(val id: Int, val username: String, val enabled: Boolean, val permissions: Set<Permission>, val sessionVersion: Long = 0L)
 
 object UserRepo {
 
@@ -31,6 +32,13 @@ object UserRepo {
         toAuth(row)
     }
 
+    /** Logout revokes all sessions from this generation; a stale cookie cannot revoke newer ones. */
+    fun revokeSessions(userId: Int, version: Long) = transaction {
+        Users.update({ (Users.id eq userId) and (Users.sessionVersion eq version) }) {
+            it[sessionVersion] = Users.sessionVersion + 1L
+        }
+    }
+
     fun findAuth(userId: Int): UserAuth? = transaction {
         val row = Users.selectAll().where { Users.id eq userId }.firstOrNull() ?: return@transaction null
         toAuth(row)
@@ -38,7 +46,7 @@ object UserRepo {
 
     private fun toAuth(row: ResultRow): UserAuth {
         val uid = row[Users.id]
-        return UserAuth(uid, row[Users.username], row[Users.enabled], permissionsOf(uid))
+        return UserAuth(uid, row[Users.username], row[Users.enabled], permissionsOf(uid), row[Users.sessionVersion])
     }
 
     fun permissionsOf(userId: Int): Set<Permission> = transaction {
@@ -106,7 +114,10 @@ object UserRepo {
     fun updateSelf(userId: Int, username: String?, password: String?) = transaction {
         Users.update({ Users.id eq userId }) {
             if (username != null) it[Users.username] = username
-            if (password != null) it[passwordHash] = Passwords.hash(password)
+            if (password != null) {
+                it[passwordHash] = Passwords.hash(password)
+                it[sessionVersion] = Users.sessionVersion + 1L
+            }
         }
     }
 
@@ -193,6 +204,7 @@ object UserRepo {
         transaction {
             Users.update({ Users.id eq userId }) {
                 if (password != null) it[passwordHash] = Passwords.hash(password)
+                if (password != null || enabled == false) it[sessionVersion] = Users.sessionVersion + 1L
                 if (enabled != null) it[Users.enabled] = enabled
                 if (clearDailyLimit) it[Users.dailyCostLimit] = null else if (dailyCostLimit != null) it[Users.dailyCostLimit] = dailyCostLimit
                 if (clearRoutingLimit) it[Users.dailyRoutingCostLimit] = null else if (dailyRoutingCostLimit != null) it[Users.dailyRoutingCostLimit] = dailyRoutingCostLimit

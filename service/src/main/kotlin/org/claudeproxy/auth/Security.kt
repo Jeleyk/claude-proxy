@@ -11,32 +11,43 @@ import io.ktor.server.sessions.sessions
 import io.ktor.server.sessions.set
 import io.ktor.server.sessions.clear
 import kotlinx.serialization.Serializable
+import java.time.Instant
 import org.claudeproxy.model.Permission
 import org.claudeproxy.repo.UserAuth
 import org.claudeproxy.repo.UserRepo
 
 @Serializable
-data class UserSession(val userId: Int)
+data class UserSession(val userId: Int, val sessionVersion: Long = -1L, val expiresAt: Long = 0L)
+
+internal const val SESSION_TTL_SECONDS = 60L * 60 * 24 * 30
 
 fun Application.installSecurity(sessionSecret: String) {
     install(Sessions) {
         cookie<UserSession>("CLAUDE_PROXY_SESSION") {
             cookie.path = "/"
             cookie.httpOnly = true
-            cookie.maxAgeInSeconds = 60L * 60 * 24 * 30
+            cookie.maxAgeInSeconds = SESSION_TTL_SECONDS
             transform(SessionTransportTransformerMessageAuthentication(sessionSecret.toByteArray()))
         }
     }
 }
 
-fun ApplicationCall.setUserSession(userId: Int) = sessions.set(UserSession(userId))
-fun ApplicationCall.clearUserSession() = sessions.clear<UserSession>()
+fun ApplicationCall.setUserSession(user: UserAuth) = sessions.set(
+    UserSession(user.id, user.sessionVersion, Instant.now().epochSecond + SESSION_TTL_SECONDS),
+)
+fun ApplicationCall.clearUserSession() {
+    currentUser()?.let { UserRepo.revokeSessions(it.id, it.sessionVersion) }
+    sessions.clear<UserSession>()
+}
 fun ApplicationCall.userSession(): UserSession? = sessions.get<UserSession>()
 
 /** Loads the currently authenticated user (with permissions), or null. */
 fun ApplicationCall.currentUser(): UserAuth? {
-    val uid = userSession()?.userId ?: return null
-    return UserRepo.findAuth(uid)?.takeIf { it.enabled }
+    val session = userSession() ?: return null
+    if (session.expiresAt <= Instant.now().epochSecond) return null
+    return UserRepo.findAuth(session.userId)?.takeIf {
+        it.enabled && it.sessionVersion == session.sessionVersion
+    }
 }
 
 class UnauthorizedException(message: String) : RuntimeException(message)
