@@ -42,6 +42,10 @@ object UserRepo {
     }
 
     fun permissionsOf(userId: Int): Set<Permission> = transaction {
+        // Cache eviction can race with an in-flight token lookup. Authorization must use live state.
+        if (Users.selectAll().where { (Users.id eq userId) and (Users.enabled eq true) }.empty()) {
+            return@transaction emptySet()
+        }
         val roleIds = UserRoles.selectAll().where { UserRoles.userId eq userId }.map { it[UserRoles.roleId] }
         if (roleIds.isEmpty()) return@transaction emptySet()
         val perms = RolePermissions.selectAll().where { RolePermissions.roleId inList roleIds }
