@@ -13,6 +13,7 @@ import org.claudeproxy.model.AccountProvider
 import org.claudeproxy.model.AccountType
 import org.claudeproxy.oauth.ClaudeOAuth
 import org.claudeproxy.oauth.OpenAIOAuth
+import org.claudeproxy.oauth.OpenAIHttp
 import org.claudeproxy.proxy.Http
 import org.slf4j.LoggerFactory
 import java.time.Instant
@@ -76,7 +77,7 @@ class TokenRefresher(private val pool: AccountPool) {
             val updated: AccountSecret
             val accountUuid: String?
             if (account.provider == AccountProvider.OPENAI) {
-                val result = OpenAIOAuth.refresh(Http.client, refreshToken)
+                val result = OpenAIOAuth.refresh(OpenAIHttp.client, refreshToken)
                 // A refresh must not silently switch a stored ChatGPT workspace/account.
                 require(result.accountId == null || account.accountUuid == null || result.accountId == account.accountUuid) {
                     "OpenAI account changed during refresh"

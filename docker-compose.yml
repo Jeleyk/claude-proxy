@@ -77,6 +77,7 @@ services:
       SERVICE_URL: "http://service:8787"
       INTERNAL_TOKEN: ${INTERNAL_TOKEN}
       UPSTREAM_BASE_URL: "https://api.anthropic.com"
+      ANTHROPIC_PROXY_URL: ${ANTHROPIC_PROXY_URL:-}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
       OPENAI_CODEX_BASE_URL: ${OPENAI_CODEX_BASE_URL:-https://chatgpt.com/backend-api/codex}
       OPENAI_CLIENT_VERSION: ${OPENAI_CLIENT_VERSION:-0.159.2}
