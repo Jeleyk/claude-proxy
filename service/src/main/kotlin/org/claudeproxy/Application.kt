@@ -26,6 +26,7 @@ import org.claudeproxy.accounts.LimitScheduler
 import org.claudeproxy.accounts.TokenRefresher
 import org.claudeproxy.api.MessageResponse
 import org.claudeproxy.api.adminRoutes
+import org.claudeproxy.api.tokenUsageRoutes
 import org.claudeproxy.api.internalRoutes
 import org.claudeproxy.datapath.DatapathService
 import org.claudeproxy.auth.ForbiddenException
@@ -155,6 +156,7 @@ fun Application.module(
 
         // Private control API for the Go gateway (never routed publicly by nginx).
         internalRoutes(datapath, config.internalToken)
+        tokenUsageRoutes(pool, datapath)
 
         // The SPA is served by the nginx router (see deploy/), not by the service.
     }
