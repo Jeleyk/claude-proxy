@@ -4,6 +4,7 @@ import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.timestamp
 
 object Users : Table("users") {
+    val sessionVersion = long("session_version").default(0L)
     val id = integer("id").autoIncrement()
     val username = varchar("username", 128).uniqueIndex()
     val passwordHash = varchar("password_hash", 256)
