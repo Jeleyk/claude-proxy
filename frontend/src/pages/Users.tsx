@@ -46,7 +46,7 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
           <tbody>
             {users.map((u) => (
               <tr key={u.id}>
-                <td><b>{u.username}</b></td>
+                <td><b>{u.username}</b>{u.ssoLinked && <span className="badge accent" style={{ marginLeft: 6 }} title="Linked to an SSO identity">SSO</span>}</td>
                 <td><div className="pillrow">{u.roles.length ? u.roles.map((r) => <span key={r} className="grouptag">{r}</span>) : <span className="hint">none</span>}</div></td>
                 <td>
                   {u.allGroups ? <span className="badge accent">all groups</span>
@@ -62,6 +62,9 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
                     <button className="sm ghost" onClick={() => navigate(`/user-stats/${u.id}`)}>Stats</button>
                     <button className="sm ghost" onClick={() => setAccountsFor(u)}>Accounts</button>
                     <button className="sm ghost" onClick={async () => { if (confirm(`Reset ${u.username}'s statistics?`)) { const r = await api.resetUserStats(u.id); alert(r.message); load(); } }}>Reset stats</button>
+                    <button className="sm ghost" title="Disable the user, end all panel sessions and delete every proxy/routing token"
+                      onClick={async () => { if (confirm(`Offboard ${u.username}? This disables the user, signs them out everywhere and permanently revokes all their proxy and routing tokens.`)) { try { const r = await api.offboardUser(u.id); alert(`Offboarded: ${r.proxyTokensRevoked} proxy and ${r.routingTokensRevoked} routing tokens revoked.`); } catch (e: any) { alert(e.message); } load(); } }}>Offboard</button>
+                    {u.ssoLinked && <button className="sm ghost" onClick={async () => { if (confirm(`Unlink ${u.username}'s SSO identity? Their next SSO sign-in goes through the linking rules again.`)) { await api.unlinkUserSso(u.id); load(); } }}>Unlink SSO</button>}
                     <button className="sm danger" onClick={async () => { if (confirm(`Delete ${u.username}?`)) { await api.deleteUser(u.id); load(); } }}>Delete</button>
                   </div>
                 </td>
@@ -163,6 +166,7 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
   const isNew = user == null;
   const [username, setUsername] = useState(user?.username ?? '');
   const [password, setPassword] = useState('');
+  const [email, setEmail] = useState(user?.email ?? '');
   const [selRoles, setSelRoles] = useState<string[]>(user?.roles ?? []);
   const [selGroups, setSelGroups] = useState<number[]>(user?.allowedGroups ?? []);
   const [limitOn, setLimitOn] = useState(user?.dailyCostLimit != null);
@@ -184,7 +188,7 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
       const common = { roles: selRoles, allowedGroups: selGroups };
       if (isNew) {
         await api.createUser({
-          ...common, username, password,
+          ...common, username, password, email: email.trim() || null,
           dailyCostLimit: limitOn ? limitVal : null,
           dailyRoutingCostLimit: rLimitOn ? rLimitVal : null,
           dailyChatCostLimit: cLimitOn ? cLimitVal : null,
@@ -192,6 +196,7 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
       } else {
         const body: any = { ...common };
         if (password) body.password = password;
+        if (email.trim()) body.email = email.trim(); else body.clearEmail = true;
         if (limitOn) body.dailyCostLimit = limitVal; else body.clearDailyLimit = true;
         if (rLimitOn) body.dailyRoutingCostLimit = rLimitVal; else body.clearRoutingLimit = true;
         if (cLimitOn) body.dailyChatCostLimit = cLimitVal; else body.clearChatLimit = true;
@@ -206,6 +211,7 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
       footer={<><button className="ghost" onClick={onClose}>Cancel</button><button disabled={busy} onClick={save}>{busy ? '…' : 'Save'}</button></>}>
       {isNew && <label className="field"><span>Username</span><input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus /></label>}
       <label className="field"><span>{isNew ? 'Password' : 'New password (leave blank to keep)'}</span><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+      <label className="field"><span>Email <span className="hint">· optional; lets a first SSO sign-in with this verified email link to this user (if enabled)</span></span><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></label>
 
       <div className="field"><span>Roles</span>
         <div className="checks">{roles.map((r) => <Check key={r.id} checked={selRoles.includes(r.name)} onChange={() => toggleRole(r.name)} label={r.name} />)}</div>

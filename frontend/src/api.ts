@@ -12,11 +12,22 @@ export interface UserDto {
   dailyRoutingCostLimit: number | null;
   dailyChatCostLimit: number | null;
   preferGlobalPool: boolean;
+  // admin-set; only used to link a first SSO login
+  email?: string | null;
+  ssoLinked?: boolean;
   todayCost: number;
   todayRoutingCost: number;
   todayChatCost: number;
   todayInputTokens: number;
   todayOutputTokens: number;
+}
+
+/** Login-page hints for the optional OIDC sign-in. */
+export interface OidcPublicConfig {
+  enabled: boolean;
+  passwordLogin: boolean;
+  buttonLabel?: string | null;
+  startUrl?: string | null;
 }
 
 export interface ModelPrice {
@@ -380,6 +391,7 @@ export const api = {
     req<UserDto>('POST', '/api/auth/login', { username, password }),
   logout: () => req<unknown>('POST', '/api/auth/logout'),
   me: () => req<UserDto>('GET', '/api/auth/me'),
+  oidcConfig: () => req<OidcPublicConfig>('GET', '/api/auth/oidc/config'),
   updateProfile: (b: { currentPassword: string; username?: string; password?: string }) =>
     req<UserDto>('PATCH', '/api/account', b),
 
@@ -417,6 +429,9 @@ export const api = {
   createUser: (b: unknown) => req<UserDto>('POST', '/api/users', b),
   updateUser: (id: number, b: unknown) => req<UserDto>('PATCH', `/api/users/${id}`, b),
   deleteUser: (id: number) => req<unknown>('DELETE', `/api/users/${id}`),
+  offboardUser: (id: number) =>
+    req<{ userId: number; proxyTokensRevoked: number; routingTokensRevoked: number }>('POST', `/api/users/${id}/offboard`),
+  unlinkUserSso: (id: number) => req<{ userId: number; identitiesUnlinked: number }>('DELETE', `/api/users/${id}/identities`),
 
   roles: () => req<{ roles: RoleDto[]; allPermissions: string[] }>('GET', '/api/roles'),
   createRole: (b: unknown) => req<unknown>('POST', '/api/roles', b),
