@@ -34,6 +34,8 @@ internal fun oidcConfig(
     allowedEmailDomains: Set<String> = emptySet(),
     linkByEmail: Boolean = false,
     jit: Boolean = false,
+    jitRole: String? = null,
+    blockPasswordForLinked: Boolean = true,
     disablePasswordLogin: Boolean = false,
     clientSecret: String = "test-client-secret",
 ) = OidcConfig(
@@ -49,5 +51,7 @@ internal fun oidcConfig(
     disablePasswordLogin = disablePasswordLogin,
     linkByEmail = linkByEmail,
     jitProvisioning = jit,
+    jitRole = jitRole,
+    blockPasswordForLinked = blockPasswordForLinked,
     sessionTtlSeconds = 3600,
 )

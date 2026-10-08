@@ -51,6 +51,7 @@ enum class OidcError(val code: String) {
     TOKEN_ERROR("token_error"),
     FORBIDDEN("forbidden"),
     NO_ACCOUNT("no_account"),
+    PENDING("pending"),
     UNAVAILABLE("unavailable"),
 }
 
@@ -65,26 +66,40 @@ class OidcClient(
     private val config: OidcConfig,
     private val connectTimeoutMs: Int = 5_000,
     private val readTimeoutMs: Int = 10_000,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
+    private val log = org.slf4j.LoggerFactory.getLogger("OidcClient")
+
     private class Provider(
         val metadata: OIDCProviderMetadata,
         val validator: IDTokenValidator,
         val clientAuth: ClientAuthentication,
-        val loadedAt: Long,
+        /** Wall-clock ms after which discovery is re-fetched. */
+        val refreshAt: Long,
     )
 
     @Volatile private var provider: Provider? = null
 
-    /** Discovery is resolved lazily (an IdP outage must not stop the service from booting) and refreshed hourly. */
+    /**
+     * Discovery is resolved lazily (an IdP outage must not stop the service from booting) and
+     * refreshed hourly. A failed *refresh* keeps serving the last good metadata/JWKS source (WARN,
+     * retry in a minute) instead of making every login wait for timeouts; only a first-ever failure
+     * surfaces as `unavailable`.
+     */
     private fun provider(): Provider {
-        provider?.takeIf { System.currentTimeMillis() - it.loadedAt < METADATA_TTL_MS }?.let { return it }
+        provider?.takeIf { clock() < it.refreshAt }?.let { return it }
         synchronized(this) {
-            provider?.takeIf { System.currentTimeMillis() - it.loadedAt < METADATA_TTL_MS }?.let { return it }
+            val current = provider
+            if (current != null && clock() < current.refreshAt) return current
             val fresh = try {
                 load()
-            } catch (e: OidcException) {
-                throw e
             } catch (e: Exception) {
+                if (current != null) {
+                    log.warn("OIDC discovery refresh failed ({}); keeping the previous metadata", e.javaClass.simpleName)
+                    return Provider(current.metadata, current.validator, current.clientAuth, clock() + RETRY_MS)
+                        .also { provider = it }
+                }
+                if (e is OidcException) throw e
                 throw OidcException(OidcError.UNAVAILABLE, "OIDC discovery failed: ${e.javaClass.simpleName}", e)
             }
             provider = fresh
@@ -125,7 +140,7 @@ class OidcClient(
         } else {
             error("provider supports neither client_secret_basic nor client_secret_post")
         }
-        return Provider(meta, validator, clientAuth, System.currentTimeMillis())
+        return Provider(meta, validator, clientAuth, clock() + METADATA_TTL_MS)
     }
 
     /** Builds the authorization redirect for a fresh transaction. */
@@ -176,6 +191,14 @@ class OidcClient(
             throw OidcException(OidcError.TOKEN_ERROR, "ID token rejected: ${e.message}", e)
         }
 
+        // Authorized party (OIDC Core §2, §3.1.3.7): with several audiences azp must be present,
+        // and whenever present it must be us. Checked here explicitly rather than relying on the
+        // library's defaults.
+        val audiences = claims.audience.map { it.value }
+        val azp = claims.getStringClaim("azp")
+        if (audiences.size > 1 && azp == null) throw OidcException(OidcError.TOKEN_ERROR, "ID token has multiple audiences but no azp")
+        if (azp != null && azp != config.clientId) throw OidcException(OidcError.TOKEN_ERROR, "ID token azp is not this client")
+
         val subject = claims.subject.value
         var all: Map<String, Any?> = claims.toJSONObject()
         // Some providers keep email/groups out of the ID token. Fill only *missing* claims from
@@ -222,6 +245,7 @@ class OidcClient(
 
     companion object {
         private const val METADATA_TTL_MS = 60L * 60 * 1000
+        private const val RETRY_MS = 60L * 1000
         private const val MAX_CLOCK_SKEW_SECONDS = 60
         private const val JWKS_SIZE_LIMIT = 256 * 1024
         private val ASYMMETRIC_ALGS = setOf(

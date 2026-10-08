@@ -74,9 +74,9 @@ fun Route.adminRoutes(
             call.respond(ModelPriceRepo.list())
         }
         installRoutes(publicBaseUrl)
-        authRoutes(passwordLogin = oidc?.disablePasswordLogin != true)
+        authRoutes(passwordLogin = oidc?.disablePasswordLogin != true, blockLinked = oidc?.blockPasswordForLinked == true)
         oidcRoutes(oidc)
-        userLifecycleRoutes()
+        userLifecycleRoutes(setOfNotNull(publicBaseUrl.takeIf { it.isNotEmpty() }?.let { runCatching { java.net.URI(it).host }.getOrNull() }))
         profileRoutes()
         accountRoutes(pool, probe)
         myAccountRoutes(pool, probe)
@@ -177,7 +177,7 @@ private fun assembleStats(
 
 // ---- auth ----
 
-private fun Route.authRoutes(passwordLogin: Boolean) {
+private fun Route.authRoutes(passwordLogin: Boolean, blockLinked: Boolean) {
     post("/auth/login") {
         // OIDC_DISABLE_PASSWORD_LOGIN: SSO only. Checked before the body is read, so it also
         // stops password guessing. Break-glass = unset the flag and restart.
@@ -186,6 +186,14 @@ private fun Route.authRoutes(passwordLogin: Boolean) {
         val user = UserRepo.authenticate(req.username, req.password)
         if (user == null) {
             call.respond(HttpStatusCode.Unauthorized, MessageResponse("Invalid credentials"))
+            return@post
+        }
+        // OIDC_BLOCK_PASSWORD_FOR_LINKED (default on while OIDC is active): an SSO-linked user must
+        // come through the IdP, or removing them there would not end their access. Only checked
+        // after the password verified, so it reveals nothing to a guesser. If OIDC is off (or its
+        // config is invalid) this is skipped — password login is then the break-glass path.
+        if (blockLinked && org.jetbrains.exposed.sql.transactions.transaction { org.claudeproxy.repo.IdentityRepo.isLinked(user.id) }) {
+            call.respond(HttpStatusCode.Forbidden, MessageResponse("This account signs in with SSO"))
             return@post
         }
         call.setUserSession(user)

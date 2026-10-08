@@ -59,7 +59,10 @@ class OidcLoginTest {
     @Test
     fun `a user already linked to another subject is never re-pointed`() {
         transaction { IdentityRepo.link(alice, iss, "sub-original") }
-        assertEquals(OidcError.NO_ACCOUNT, denied(login(oidcConfig(linkByEmail = true, jit = true), id(sub = "sub-attacker"))))
+        val r = assertIs<Denied>(login(oidcConfig(linkByEmail = true, jit = true, jitRole = "user"), id(sub = "sub-attacker")))
+        assertEquals(OidcError.NO_ACCOUNT, r.error)
+        // Refused by the explicit check, not merely by the unique index catching the INSERT.
+        assertTrue("already linked" in r.reason, r.reason)
         assertEquals(alice, linkedTo("sub-original"))
         assertNull(linkedTo("sub-attacker"))
     }
@@ -77,16 +80,38 @@ class OidcLoginTest {
     fun `username is never used for matching`() {
         // IdP user claims the admin's username; without JIT that is simply no account.
         assertEquals(OidcError.NO_ACCOUNT, denied(login(oidcConfig(), id(sub = "x", email = null, username = "admin"))))
-        // With JIT they get a fresh least-privileged account next to it, never the admin.
-        val r = assertIs<Success>(login(oidcConfig(jit = true), id(sub = "x", email = null, username = "admin")))
+        // With JIT they get a fresh account next to it, never the admin.
+        val r = assertIs<Success>(login(oidcConfig(jit = true, jitRole = "user"), id(sub = "x", email = null, username = "admin")))
         assertNotEquals(1, r.user.id)
         assertEquals("admin-2", r.user.username)
     }
 
     @Test
-    fun `JIT is off by default and creates a least-privileged user without group access`() {
+    fun `JIT default creates a disabled, role-less pending account that can do nothing`() {
+        val r = assertIs<Denied>(login(oidcConfig(jit = true), id(sub = "new", email = "bob@example.com", username = "bob")))
+        assertEquals(OidcError.PENDING, r.error)
+        val uid = transaction { IdentityRepo.userIdFor(iss, "new") }!!
+        val dto = UserRepo.get(uid)!!
+        assertFalse(dto.enabled)
+        assertTrue(dto.roles.isEmpty() && dto.permissions.isEmpty() && dto.allowedGroups.isEmpty())
+        assertTrue(UserRepo.permissionsOf(uid).isEmpty())
+        // Logging in again before approval is refused; an admin enabling + assigning a role lets them in.
+        assertEquals(OidcError.FORBIDDEN, denied(login(oidcConfig(jit = true), id(sub = "new", email = "bob@example.com"))))
+        UserRepo.update(uid, null, true, listOf("user"), null, null, false)
+        assertIs<Success>(login(oidcConfig(jit = true), id(sub = "new", email = "bob@example.com")))
+    }
+
+    @Test
+    fun `JIT with an unknown role creates nothing`() {
+        assertEquals(OidcError.NO_ACCOUNT, denied(login(oidcConfig(jit = true, jitRole = "nope"), id(sub = "n9", email = null, username = "zed"))))
+        assertNull(linkedTo("n9"))
+        assertFalse(UserRepo.list().any { it.username == "zed" })
+    }
+
+    @Test
+    fun `JIT is off by default, with OIDC_JIT_ROLE the account gets exactly that role and no group access`() {
         assertEquals(OidcError.NO_ACCOUNT, denied(login(oidcConfig(), id(sub = "new", email = "bob@example.com", username = "bob"))))
-        val r = assertIs<Success>(login(oidcConfig(jit = true), id(sub = "new", email = "bob@example.com", username = "bob")))
+        val r = assertIs<Success>(login(oidcConfig(jit = true, jitRole = "user"), id(sub = "new", email = "bob@example.com", username = "bob")))
         assertEquals(How.PROVISIONED, r.how)
         val dto = UserRepo.get(r.user.id)!!
         assertEquals(listOf("user"), dto.roles)
@@ -100,11 +125,11 @@ class OidcLoginTest {
 
     @Test
     fun `JIT keeps only a verified, unused email and sanitizes the username`() {
-        val r = assertIs<Success>(login(oidcConfig(jit = true), id(sub = "n2", email = "alice@example.com", username = "Мallory <x>")))
+        val r = assertIs<Success>(login(oidcConfig(jit = true, jitRole = "user"), id(sub = "n2", email = "alice@example.com", username = "Мallory <x>")))
         val dto = UserRepo.get(r.user.id)!!
         assertNull(dto.email, "alice's email stays alice's")
         assertEquals("alloryx", dto.username)
-        val u = assertIs<Success>(login(oidcConfig(jit = true), id(sub = "n3", email = "carol@example.com", verified = false, username = "carol")))
+        val u = assertIs<Success>(login(oidcConfig(jit = true, jitRole = "user"), id(sub = "n3", email = "carol@example.com", verified = false, username = "carol")))
         assertNull(UserRepo.get(u.user.id)!!.email)
     }
 
@@ -128,6 +153,21 @@ class OidcLoginTest {
         assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(email = "a@evil-example.com"))))
         assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(email = "a@sub.example.com"))))
         assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(email = "a@example.com@evil.com"))))
+    }
+
+    @Test
+    fun `deleting an SSO-linked user works, also the way the previous release deletes (FK cascade)`() {
+        transaction { IdentityRepo.link(alice, iss, "sub-alice") }
+        UserRepo.delete(alice)
+        assertNull(linkedTo("sub-alice"))
+        // Previous release: knows nothing about user_identities, deletes role rows then the user.
+        val dave = UserRepo.create("dave", "pw", listOf("user"), emptyList(), null)
+        transaction { IdentityRepo.link(dave, iss, "sub-dave") }
+        transaction {
+            exec("DELETE FROM user_roles WHERE user_id = $dave")
+            exec("DELETE FROM users WHERE id = $dave")
+        }
+        assertNull(linkedTo("sub-dave"))
     }
 
     @Test

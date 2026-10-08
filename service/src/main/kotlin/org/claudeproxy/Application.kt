@@ -111,6 +111,7 @@ fun Application.module(
         allowHeader("x-api-key")
         allowHeader("anthropic-version")
         allowHeader("anthropic-beta")
+        allowHeader("X-Requested-With")
         anyMethod()
         // Dev: SPA served by Vite on a different port. In production the SPA is same-origin.
         config.publicDomain?.let { allowHost(it, schemes = listOf("http", "https")) }
@@ -137,7 +138,7 @@ fun Application.module(
         }
     }
 
-    installSecurity(config.sessionSecret)
+    installSecurity(config.sessionSecret, config.sessionSameSite)
 
     // Load accounts and start the background token refresher + limit scheduler.
     kotlinx.coroutines.runBlocking { pool.reload() }

@@ -23,7 +23,8 @@ sealed interface OidcLoginResult {
  *  2. A returning identity is matched on (issuer, sub) only. Never on username, never on email.
  *  3. Only an *unlinked* identity may be linked by email, only when enabled, only with
  *     `email_verified=true`, only to an enabled local user that has no identity for this issuer.
- *  4. Otherwise JIT provisioning (when enabled) creates a least-privileged `user`.
+ *  4. Otherwise JIT provisioning (when enabled) creates an account — by default disabled and
+ *     role-less until an admin approves it, or with the configured `OIDC_JIT_ROLE`.
  * A disabled local user is refused at every step.
  */
 class OidcLogin(private val config: OidcConfig) {
@@ -86,12 +87,19 @@ class OidcLogin(private val config: OidcConfig) {
         }
 
         if (config.jitProvisioning) {
+            if (config.jitRole != null && !UserRepo.roleExists(config.jitRole)) {
+                return OidcLoginResult.Denied(OidcError.NO_ACCOUNT, "OIDC_JIT_ROLE '${config.jitRole}' does not exist")
+            }
             val username = uniqueUsername(id)
             // Keep the verified email only if no other user holds it (with linking off it may still match one).
             val email = verifiedEmail?.takeIf { UserRepo.userIdByEmail(it) == null }
-            val uid = UserRepo.createProvisioned(username, email)
+            val uid = UserRepo.createProvisioned(username, email, config.jitRole)
             IdentityRepo.link(uid, id.issuer, id.subject)
-            log.info("OIDC: provisioned user id={} username={}", uid, username)
+            if (config.jitRole == null) {
+                log.info("OIDC: provisioned PENDING user id={} username={} (disabled until an admin enables it)", uid, username)
+                return OidcLoginResult.Denied(OidcError.PENDING, "provisioned user $uid awaits approval")
+            }
+            log.info("OIDC: provisioned user id={} username={} role={}", uid, username, config.jitRole)
             return OidcLoginResult.Success(UserRepo.findAuth(uid)!!, OidcLoginResult.How.PROVISIONED)
         }
 

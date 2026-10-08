@@ -1,6 +1,11 @@
 package org.claudeproxy.auth
 
+import io.ktor.client.request.get
 import io.ktor.client.request.post
+import io.ktor.server.response.respondText
+import io.ktor.server.routing.get as routeGet
+import io.ktor.server.sessions.sessions
+import io.ktor.server.sessions.set
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
@@ -78,6 +83,43 @@ class OidcConfigTest {
     }
 
     @Test
+    fun `invalid OIDC config disables OIDC instead of failing the service`() {
+        val errors = mutableListOf<String>()
+        assertNull(OidcConfig.loadOrDisable({ (base - "OIDC_CLIENT_ID")[it] }, errors::add))
+        assertTrue(errors.single().contains("DISABLED") && errors.single().contains("OIDC_CLIENT_ID"))
+        assertFalse(errors.single().contains("s3cret-value"))
+        assertNotNull(OidcConfig.loadOrDisable({ base[it] }, errors::add))
+        assertEquals(1, errors.size)
+    }
+
+    @Test
+    fun `JIT needs a group gate, role and password-block flags parse`() {
+        assertFails { load(base + ("OIDC_JIT_PROVISIONING" to "true")) }
+        val c = load(base + mapOf("OIDC_JIT_PROVISIONING" to "true", "OIDC_ALLOWED_GROUPS" to "g", "OIDC_JIT_ROLE" to "viewer"))!!
+        assertEquals("viewer", c.jitRole)
+        assertTrue(c.blockPasswordForLinked, "on by default")
+        assertNull(load(base + mapOf("OIDC_JIT_PROVISIONING" to "true", "OIDC_ALLOWED_GROUPS" to "g"))!!.jitRole, "default = pending")
+        assertFalse(load(base + ("OIDC_BLOCK_PASSWORD_FOR_LINKED" to "false"))!!.blockPasswordForLinked)
+    }
+
+    @Test
+    fun `session cookie SameSite is configurable, Lax by default, never None`() {
+        assertEquals(SameSitePolicy.LAX, SameSitePolicy.parse(null))
+        assertEquals(SameSitePolicy.STRICT, SameSitePolicy.parse(" Strict "))
+        val warnings = mutableListOf<String>()
+        assertEquals(SameSitePolicy.LAX, SameSitePolicy.parse("none", warnings::add))
+        assertEquals(1, warnings.size)
+        for (policy in SameSitePolicy.entries) testApplication {
+            application {
+                installSecurity(TEST_SECRET, policy)
+                routing { routeGet("/s") { call.sessions.set(UserSession(1, 0, 1)); call.respondText("") } }
+            }
+            val sc = client.get("/s").headers[io.ktor.http.HttpHeaders.SetCookie]!!
+            assertTrue("SameSite=${policy.attr}" in sc, sc)
+        }
+    }
+
+    @Test
     fun `misconfiguration fails the boot`() {
         listOf("OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URI").forEach { k ->
             assertFails("missing $k") { load(base - k) }
@@ -109,6 +151,38 @@ class OidcConfigTest {
         assertNotNull(store.begin(), "expired entries are swept to make room")
         assertNull(store.take(id3, txn3.state))
         assertNull(store.take(null, "x"))
+    }
+
+    @Test
+    fun `password login is refused for SSO-linked users while OIDC is active, kept for unlinked ones`() {
+        val db = freshDb()
+        try {
+            val svc = org.claudeproxy.repo.UserRepo.create("svc", "svc-pw", listOf("admin"), emptyList(), null)
+            org.jetbrains.exposed.sql.transactions.transaction { org.claudeproxy.repo.IdentityRepo.link(1, "https://idp.example.com", "sub-admin") }
+            data class Case(val oidc: OidcConfig?, val user: String, val pw: String, val expected: HttpStatusCode)
+            val cases = listOf(
+                Case(oidcConfig(), "admin", "admin", HttpStatusCode.Forbidden),            // linked → SSO only
+                Case(oidcConfig(), "svc", "svc-pw", HttpStatusCode.OK),                    // unlinked service/break-glass user
+                Case(oidcConfig(blockPasswordForLinked = false), "admin", "admin", HttpStatusCode.OK),
+                Case(null, "admin", "admin", HttpStatusCode.OK),                           // OIDC off/broken → break-glass
+                Case(oidcConfig(), "admin", "wrong", HttpStatusCode.Unauthorized),         // no oracle before the password
+            )
+            for (c in cases) testApplication {
+                application {
+                    install(ContentNegotiation) { json() }
+                    installSecurity(TEST_SECRET)
+                    val pool = AccountPool()
+                    val datapath = DatapathService(pool)
+                    routing {
+                        adminRoutes(pool, LimitProbe(pool, "http://127.0.0.1:1"), "", ChatEngine(pool, "http://127.0.0.1:1", datapath),
+                            datapath, "http://127.0.0.1:1", c.oidc)
+                    }
+                }
+                val r = client.post("/api/auth/login") { contentType(ContentType.Application.Json); setBody("""{"username":"${c.user}","password":"${c.pw}"}""") }
+                assertEquals(c.expected, r.status, "$c ${r.bodyAsText()}")
+            }
+            assertTrue(svc > 1)
+        } finally { MemoryCache.clear(); db.delete() }
     }
 
     @Test

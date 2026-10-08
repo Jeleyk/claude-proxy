@@ -11,6 +11,7 @@ import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
@@ -49,14 +50,16 @@ class OidcFlowTest {
 
     private fun scenario(
         config: OidcConfig = oidcConfig(issuer = idp.issuer),
+        transactions: OidcTransactions = OidcTransactions(),
         block: suspend ApplicationTestBuilder.(HttpClient) -> Unit,
     ) = testApplication {
         application {
             install(ContentNegotiation) { json() }
             installSecurity(TEST_SECRET)
             routing {
-                route("/api") { oidcRoutes(config) }
+                route("/api") { oidcRoutes(config, transactions = transactions) }
                 get("/whoami") { call.respond(if (call.currentUser() == null) HttpStatusCode.Unauthorized else HttpStatusCode.OK) }
+                get("/expires") { call.respondText((call.userSession()?.expiresAt ?: 0L).toString()) }
             }
         }
         val c = createClient { followRedirects = false }
@@ -105,6 +108,84 @@ class OidcFlowTest {
         assertEquals("/", r.headers[HttpHeaders.Location])
         val session = r.sessionCookie()!!
         assertEquals(HttpStatusCode.OK, c.get("/whoami") { header(HttpHeaders.Cookie, session) }.status)
+    }
+
+    @Test
+    fun `SSO session carries the shorter OIDC TTL, not the 30-day password TTL`() = scenario { c ->
+        val session = login(c, FakeIdp.Grant(goodClaims())).sessionCookie()!!
+        val expiresAt = c.get("/expires") { header(HttpHeaders.Cookie, session) }.bodyAsText().toLong()
+        val now = java.time.Instant.now().epochSecond
+        assertTrue(expiresAt in (now + 3600 - 30)..(now + 3600 + 5), "expiresAt=$expiresAt now=$now") // oidcConfig(): 3600s
+    }
+
+    @Test
+    fun `callback always clears the transaction cookie`() = scenario { c ->
+        for (r in listOf(
+            login(c, FakeIdp.Grant(goodClaims())),
+            login(c, FakeIdp.Grant(goodClaims())) { code, _, ck -> Triple(code, "forged", ck) },
+        )) {
+            val cleared = r.headers.getAll(HttpHeaders.SetCookie)!!.single { it.startsWith("CLAUDE_PROXY_OIDC=") }
+            assertTrue("Max-Age=0" in cleared && cleared.startsWith("CLAUDE_PROXY_OIDC=;"), cleared)
+        }
+    }
+
+    @Test
+    fun `IdP outage at start leaves no transaction behind`() {
+        val store = OidcTransactions()
+        scenario(oidcConfig(issuer = "http://127.0.0.1:1"), store) { c ->
+            repeat(3) { assertEquals("/?sso_error=unavailable", c.get("/api/auth/oidc/start").headers[HttpHeaders.Location]) }
+        }
+        assertEquals(0, store.size())
+    }
+
+    @Test fun `multiple audiences without azp`() = scenario { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims(), audiences = listOf("claude-proxy", "other-client"))), "token_error")
+    }
+    @Test fun `multiple audiences with azp of another client`() = scenario { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims(), audiences = listOf("claude-proxy", "other-client"), azp = "other-client")), "token_error")
+    }
+    @Test fun `single audience with a foreign azp`() = scenario { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims(), azp = "other-client")), "token_error")
+    }
+    @Test fun `multiple audiences with our azp is accepted`() = scenario { c ->
+        assertNotNull(login(c, FakeIdp.Grant(goodClaims(), audiences = listOf("claude-proxy", "other-client"), azp = "claude-proxy")).sessionCookie())
+    }
+
+    @Test
+    fun `HS256 token is rejected even when the IdP advertises HS256 and publishes an oct key`() {
+        FakeIdp(advertisedAlgs = listOf("RS256", "HS256"), publishOctKey = true).use { hostile ->
+            transaction { IdentityRepo.link(1, hostile.issuer, sub) }
+            scenario(oidcConfig(issuer = hostile.issuer, clientSecret = hostile.clientSecret)) { c ->
+                val start = c.get("/api/auth/oidc/start")
+                val cookie = start.headers.getAll(HttpHeaders.SetCookie)!!.single { it.startsWith("CLAUDE_PROXY_OIDC=") }.substringBefore(';')
+                val (code, state) = hostile.authorize(URI(start.headers[HttpHeaders.Location]!!), FakeIdp.Grant(goodClaims(), signer = FakeIdp.Signer.HMAC_CLIENT_SECRET))
+                assertDenied(c.get("/api/auth/oidc/callback?code=$code&state=$state") { header(HttpHeaders.Cookie, cookie) }, "token_error")
+            }
+        }
+    }
+
+    @Test
+    fun `IdP advertising only symmetric algorithms is refused`() {
+        FakeIdp(advertisedAlgs = listOf("HS256"), publishOctKey = true).use { hostile ->
+            scenario(oidcConfig(issuer = hostile.issuer)) { c ->
+                assertEquals("/?sso_error=unavailable", c.get("/api/auth/oidc/start").headers[HttpHeaders.Location])
+            }
+        }
+    }
+
+    @Test
+    fun `failed metadata refresh keeps serving the last good provider`() {
+        var now = 0L
+        val client = OidcClient(oidcConfig(issuer = idp.issuer), clock = { now })
+        val txn = OidcTransactions().begin()!!.second
+        client.authorizationUri(txn)
+        idp.close() // IdP goes away
+        now += 2 * 60 * 60 * 1000 // past the hourly refresh
+        val started = System.nanoTime()
+        assertNotNull(client.authorizationUri(txn), "stale metadata still serves")
+        now += 1000
+        assertNotNull(client.authorizationUri(txn), "within the retry backoff: no new fetch")
+        assertTrue(System.nanoTime() - started < 30_000_000_000L)
     }
 
     @Test

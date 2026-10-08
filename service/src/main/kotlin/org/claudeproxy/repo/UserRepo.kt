@@ -213,7 +213,7 @@ object UserRepo {
         username: String, password: String, roleNames: List<String>, groupIds: List<Int>,
         dailyCostLimit: Double?, dailyRoutingCostLimit: Double? = null, dailyChatCostLimit: Double? = null,
         email: String? = null,
-    ): Int = transaction {
+    ): Int = emailRace(email) { transaction {
         checkEmailFree(email, null)
         val uid = Users.insert {
             it[Users.email] = email
@@ -228,6 +228,17 @@ object UserRepo {
         setRoles(uid, roleNames)
         setAllowedGroups(uid, groupIds)
         uid
+    } }
+
+    /**
+     * The pre-check in [checkEmailFree] can race a concurrent write; the unique index is the real
+     * guard. Turn that violation into [EmailTakenException] (→ 409, no SQL text to the client).
+     */
+    private fun <T> emailRace(email: String?, block: () -> T): T = try {
+        block()
+    } catch (e: org.jetbrains.exposed.exceptions.ExposedSQLException) {
+        if (email != null && transaction { userIdByEmail(email) } != null) throw EmailTakenException()
+        throw e
     }
 
     fun update(
@@ -237,7 +248,7 @@ object UserRepo {
         dailyChatCostLimit: Double? = null, clearChatLimit: Boolean = false,
         email: String? = null, clearEmail: Boolean = false,
     ) {
-        transaction {
+        emailRace(email.takeUnless { clearEmail }) { transaction {
             if (!clearEmail) checkEmailFree(email, userId)
             Users.update({ Users.id eq userId }) {
                 if (clearEmail) it[Users.email] = null else if (email != null) it[Users.email] = email
@@ -250,7 +261,7 @@ object UserRepo {
             }
             if (roleNames != null) setRoles(userId, roleNames)
             if (groupIds != null) setAllowedGroups(userId, groupIds)
-        }
+        } }
         // Token resolves are cached for 60s; a disable has to bite on the very next request.
         // Evicted after the commit, or a concurrent resolve could re-cache the old state.
         if (enabled == false) tokenCacheKeys(userId).forEach(MemoryCache::evict)
@@ -296,39 +307,48 @@ object UserRepo {
      * link is the audit trail of who the account belonged to. Null when the user does not exist.
      */
     fun offboard(userId: Int): OffboardResult? {
-        val cacheKeys = tokenCacheKeys(userId)
-        val result = transaction {
+        val (result, cacheKeys) = transaction {
+            // Disable first, then collect the keys of exactly the rows deleted below, in the same
+            // transaction — a token minted concurrently cannot slip between collect and delete.
             val n = Users.update({ Users.id eq userId }) {
                 it[enabled] = false
                 it[sessionVersion] = Users.sessionVersion + 1L
             }
-            if (n == 0) return@transaction null
+            if (n == 0) return@transaction null to emptyList()
+            val keys = tokenCacheKeys(userId)
             OffboardResult(
                 proxyTokensRevoked = org.claudeproxy.db.ProxyTokens.deleteWhere { org.claudeproxy.db.ProxyTokens.userId eq userId },
                 routingTokensRevoked = org.claudeproxy.db.RoutingTokens.deleteWhere { org.claudeproxy.db.RoutingTokens.userId eq userId },
-            )
+            ) to keys
         }
         // After the commit, or a concurrent resolve could re-cache a token that is about to vanish.
+        // A resolve that still hits a stale entry is refused anyway: every datapath re-checks the
+        // owner's live enabled state/permissions (DatapathService, ProxyRoutes, TokenUsageRoutes).
         cacheKeys.forEach(MemoryCache::evict)
         return result
     }
 
     /**
-     * Just-in-time account for a first SSO login: the least-privileged built-in role `user`, no
-     * account-group access (an admin grants that deliberately), and an unusable random password —
-     * the account can only sign in through SSO until an admin sets one. Caller's transaction.
+     * Just-in-time account for a first SSO login. [role] null = a pending request: created
+     * **disabled with no roles**, so it can do nothing (no panel, no tokens, no pool) until an admin
+     * enables it and picks a role. Never any account-group access, and an unusable random password
+     * — the account can only sign in through SSO unless an admin sets one. Caller's transaction.
      */
-    internal fun createProvisioned(username: String, email: String?): Int {
+    internal fun createProvisioned(username: String, email: String?, role: String?): Int {
         val uid = Users.insert {
             it[Users.username] = username
             it[passwordHash] = Passwords.hash(org.claudeproxy.db.Crypto.randomToken(32))
-            it[enabled] = true
+            it[enabled] = role != null
             it[Users.email] = email
             it[createdAt] = Instant.now()
         }[Users.id]
-        setRoles(uid, listOf("user"))
+        if (role != null) setRoles(uid, listOf(role))
         return uid
     }
+
+    /** Caller's transaction. */
+    internal fun roleExists(name: String): Boolean =
+        Roles.selectAll().where { Roles.name eq name }.any()
 
     /** Caller's transaction. */
     internal fun usernameExists(username: String): Boolean =

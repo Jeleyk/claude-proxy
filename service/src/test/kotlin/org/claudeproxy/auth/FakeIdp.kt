@@ -28,7 +28,12 @@ import java.util.concurrent.ConcurrentHashMap
 class FakeIdp(
     val clientId: String = "claude-proxy",
     val clientSecret: String = "test-client-secret",
+    /** What discovery advertises in id_token_signing_alg_values_supported. */
+    private val advertisedAlgs: List<String> = listOf("RS256"),
+    /** Also publish the client secret as a symmetric (oct) key in the JWKS — a hostile/misconfigured IdP. */
+    private val publishOctKey: Boolean = false,
 ) : AutoCloseable {
+    private val octKey = com.nimbusds.jose.jwk.OctetSequenceKey.Builder(clientSecret.padEnd(32, 'x').toByteArray()).keyID("hs").build()
     val signingKey: RSAKey = RSAKeyGenerator(2048).keyID("k1").generate()
     private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     val issuer: String get() = "http://127.0.0.1:${server.address.port}"
@@ -38,6 +43,8 @@ class FakeIdp(
         val claims: Map<String, Any?>,
         val nonceOverride: String? = null,
         val audience: String? = null,
+        val audiences: List<String>? = null,
+        val azp: String? = null,
         val issuerOverride: String? = null,
         val expiresInSeconds: Long = 300,
         val signer: Signer = Signer.GOOD,
@@ -58,11 +65,14 @@ class FakeIdp(
             ex.json(
                 """{"issuer":"$issuer","authorization_endpoint":"$issuer/authorize","token_endpoint":"$issuer/token",
                 "jwks_uri":"$issuer/jwks","userinfo_endpoint":"$issuer/userinfo","response_types_supported":["code"],
-                "subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"],
+                "subject_types_supported":["public"],"id_token_signing_alg_values_supported":${advertisedAlgs.joinToString(",", "[", "]") { "\"$it\"" }},
                 "code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["client_secret_basic"]}""",
             )
         }
-        server.createContext("/jwks") { ex -> ex.json(JWKSet(signingKey.toPublicJWK()).toString()) }
+        server.createContext("/jwks") { ex ->
+            val keys = listOfNotNull(signingKey.toPublicJWK(), octKey.takeIf { publishOctKey })
+            ex.json(JWKSet(keys).toString(false))
+        }
         server.createContext("/token") { ex -> token(ex) }
         server.createContext("/userinfo") { ex ->
             val bearer = ex.requestHeaders.getFirst("Authorization")?.removePrefix("Bearer ")
@@ -103,7 +113,8 @@ class FakeIdp(
         val now = System.currentTimeMillis()
         val claims = JWTClaimsSet.Builder()
             .issuer(p.grant.issuerOverride ?: issuer)
-            .audience(p.grant.audience ?: clientId)
+            .audience(p.grant.audiences ?: listOf(p.grant.audience ?: clientId))
+            .apply { p.grant.azp?.let { claim("azp", it) } }
             .issueTime(Date(now))
             .expirationTime(Date(now + p.grant.expiresInSeconds * 1000))
             .claim("nonce", p.grant.nonceOverride ?: p.nonce)
@@ -116,8 +127,8 @@ class FakeIdp(
                 SignedJWT(JWSHeader.Builder(JWSAlgorithm.RS256).keyID("k1").build(), claims).apply { sign(RSASSASigner(other)) }.serialize()
             }
             Signer.NONE -> PlainJWT(claims).serialize()
-            Signer.HMAC_CLIENT_SECRET -> SignedJWT(JWSHeader(JWSAlgorithm.HS256), claims)
-                .apply { sign(MACSigner(clientSecret.padEnd(32, 'x').toByteArray())) }.serialize()
+            Signer.HMAC_CLIENT_SECRET -> SignedJWT(JWSHeader.Builder(JWSAlgorithm.HS256).keyID("hs").build(), claims)
+                .apply { sign(MACSigner(octKey)) }.serialize()
         }
         val at = "at-" + java.util.UUID.randomUUID()
         p.grant.userinfo?.let { accessTokens[at] = it }

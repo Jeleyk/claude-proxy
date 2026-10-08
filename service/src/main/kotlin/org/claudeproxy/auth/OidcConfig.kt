@@ -25,8 +25,18 @@ data class OidcConfig(
     val disablePasswordLogin: Boolean,
     /** First login may claim an unlinked local user whose admin-set email equals the verified email. */
     val linkByEmail: Boolean,
-    /** First login with no matching account creates a least-privileged `user` (no account groups). */
+    /**
+     * First login with no matching account creates a local user. With [jitRole] null (default) the
+     * account is created **disabled and without roles** — a pending request an admin approves by
+     * enabling it and assigning a role. A non-null role makes it usable immediately.
+     */
     val jitProvisioning: Boolean,
+    val jitRole: String? = null,
+    /**
+     * Refuse password login for users with a linked SSO identity, so removing them at the IdP
+     * really ends their access. Unlinked users (e.g. a break-glass admin, service accounts) keep it.
+     */
+    val blockPasswordForLinked: Boolean = true,
     /** Server-enforced lifetime of a panel session established through OIDC. */
     val sessionTtlSeconds: Long,
 ) {
@@ -40,12 +50,25 @@ data class OidcConfig(
         "OidcConfig(issuer=$issuer, clientId=$clientId, clientSecret=<redacted>, redirectUri=$redirectUri, " +
             "scopes=$scopes, groupsClaim=$groupsClaim, allowedGroups=$allowedGroups, " +
             "allowedEmailDomains=$allowedEmailDomains, disablePasswordLogin=$disablePasswordLogin, " +
-            "linkByEmail=$linkByEmail, jitProvisioning=$jitProvisioning, sessionTtlSeconds=$sessionTtlSeconds)"
+            "linkByEmail=$linkByEmail, jitProvisioning=$jitProvisioning, jitRole=$jitRole, " +
+            "blockPasswordForLinked=$blockPasswordForLinked, sessionTtlSeconds=$sessionTtlSeconds)"
 
     companion object {
         const val START_PATH = "/api/auth/oidc/start"
         const val CALLBACK_PATH = "/api/auth/oidc/callback"
         const val DEFAULT_SESSION_TTL_HOURS = 12L
+
+        /**
+         * Like [load], but an invalid OIDC configuration disables OIDC (logged at ERROR) instead of
+         * failing the boot: the same process serves the datapath control API, and a typo in an
+         * optional login feature must not take inference down. Password login stays available.
+         */
+        fun loadOrDisable(env: (String) -> String?, onError: (String) -> Unit): OidcConfig? = try {
+            load(env)
+        } catch (e: Exception) {
+            onError("OIDC is DISABLED because its configuration is invalid: ${e.message}")
+            null
+        }
 
         /**
          * Reads `OIDC_*` settings. Returns null when OIDC is not enabled; throws when it is enabled
@@ -91,6 +114,12 @@ data class OidcConfig(
                 "OIDC_SESSION_TTL_HOURS must be between 1 and ${SESSION_TTL_SECONDS / 3600}"
             }
 
+            val allowedGroups = env("OIDC_ALLOWED_GROUPS").csv().toSet()
+            val jit = env("OIDC_JIT_PROVISIONING").toBool()
+            require(!jit || allowedGroups.isNotEmpty()) {
+                "OIDC_JIT_PROVISIONING needs OIDC_ALLOWED_GROUPS: otherwise every identity the IdP authenticates gets an account"
+            }
+
             return OidcConfig(
                 issuer = issuer,
                 clientId = required("OIDC_CLIENT_ID"),
@@ -98,12 +127,14 @@ data class OidcConfig(
                 redirectUri = redirect,
                 scopes = scopes,
                 groupsClaim = env("OIDC_GROUPS_CLAIM")?.trim()?.takeIf { it.isNotEmpty() } ?: "groups",
-                allowedGroups = env("OIDC_ALLOWED_GROUPS").csv().toSet(),
+                allowedGroups = allowedGroups,
                 allowedEmailDomains = env("OIDC_ALLOWED_EMAIL_DOMAINS").csv().map { it.lowercase().removePrefix("@") }.toSet(),
                 buttonLabel = env("OIDC_BUTTON_LABEL")?.trim()?.takeIf { it.isNotEmpty() }?.take(64) ?: "Sign in with SSO",
                 disablePasswordLogin = env("OIDC_DISABLE_PASSWORD_LOGIN").toBool(),
                 linkByEmail = env("OIDC_LINK_BY_EMAIL").toBool(),
-                jitProvisioning = env("OIDC_JIT_PROVISIONING").toBool(),
+                jitProvisioning = jit,
+                jitRole = env("OIDC_JIT_ROLE")?.trim()?.takeIf { it.isNotEmpty() },
+                blockPasswordForLinked = env("OIDC_BLOCK_PASSWORD_FOR_LINKED")?.let { it.toBool() } ?: true,
                 sessionTtlSeconds = ttlHours * 3600,
             )
         }

@@ -31,7 +31,9 @@ object Users : Table("users") {
  */
 object UserIdentities : Table("user_identities") {
     val id = integer("id").autoIncrement()
-    val userId = integer("user_id").references(Users.id)
+    // CASCADE, like the other per-user tables: a release that does not know this table can still
+    // delete a user (rollback safety). UserRepo.delete also removes the rows explicitly.
+    val userId = integer("user_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
     val issuer = varchar("issuer", 512)
     val subject = varchar("subject", 255)
     val createdAt = timestamp("created_at")

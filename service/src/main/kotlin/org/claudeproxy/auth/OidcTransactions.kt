@@ -57,6 +57,8 @@ class OidcTransactions(
         return txn
     }
 
+    fun discard(id: String) { entries.remove(id) }
+
     internal fun size() = entries.size
 
     private fun sweep() {

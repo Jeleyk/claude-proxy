@@ -21,11 +21,30 @@ data class UserSession(val userId: Int, val sessionVersion: Long = -1L, val expi
 
 internal const val SESSION_TTL_SECONDS = 60L * 60 * 24 * 30
 
-fun Application.installSecurity(sessionSecret: String) {
+/**
+ * SameSite policy of the session cookie. Lax (default) keeps the cookie off cross-site POSTs and
+ * subrequests while still allowing it on top-level navigation — which the OIDC callback's redirect
+ * to `/` needs. Strict is stricter still and works too (the SPA's own API calls are same-site).
+ * `None` is deliberately not offered.
+ */
+enum class SameSitePolicy(val attr: String) {
+    LAX("Lax"), STRICT("Strict");
+
+    companion object {
+        fun parse(raw: String?, onInvalid: (String) -> Unit = {}): SameSitePolicy = when (raw?.trim()?.lowercase()) {
+            null, "", "lax" -> LAX
+            "strict" -> STRICT
+            else -> LAX.also { onInvalid("SESSION_COOKIE_SAMESITE=$raw is not lax|strict; using Lax") }
+        }
+    }
+}
+
+fun Application.installSecurity(sessionSecret: String, sameSite: SameSitePolicy = SameSitePolicy.LAX) {
     install(Sessions) {
         cookie<UserSession>("CLAUDE_PROXY_SESSION") {
             cookie.path = "/"
             cookie.httpOnly = true
+            cookie.extensions["SameSite"] = sameSite.attr
             cookie.maxAgeInSeconds = SESSION_TTL_SECONDS
             transform(SessionTransportTransformerMessageAuthentication(sessionSecret.toByteArray()))
         }
@@ -52,6 +71,25 @@ fun ApplicationCall.currentUser(): UserAuth? {
     return UserRepo.findAuth(session.userId)?.takeIf {
         it.enabled && it.sessionVersion == session.sessionVersion
     }
+}
+
+/**
+ * CSRF guard for cookie-authenticated, body-less state changes (offboard, unlink). JSON endpoints
+ * are already covered by the content type (a cross-site form cannot send application/json without
+ * a CORS preflight); these have no body, so they demand:
+ *  - `X-Requested-With` — a custom header, which a cross-site page can only send after a CORS
+ *    preflight that the service's CORS policy refuses for foreign origins; and
+ *  - when the browser sends `Origin`, its host must be the request's own host (port ignored: the
+ *    router may drop it from `Host`) or one of [trustedHosts].
+ */
+fun ApplicationCall.requireSameOriginWrite(trustedHosts: Set<String> = emptySet()) {
+    if (request.headers["X-Requested-With"].isNullOrBlank()) throw ForbiddenException("Missing X-Requested-With header")
+    val origin = request.headers["Origin"] ?: return
+    val originHost = runCatching { java.net.URI(origin).host?.lowercase() }.getOrNull()
+        ?: throw ForbiddenException("Cross-origin request refused")
+    // The raw Host header (what nginx forwards), not X-Forwarded-*-derived values.
+    val ownHost = (request.headers["Host"]?.substringBefore(':') ?: request.local.serverHost).lowercase()
+    if (originHost != ownHost && originHost !in trustedHosts) throw ForbiddenException("Cross-origin request refused")
 }
 
 class UnauthorizedException(message: String) : RuntimeException(message)

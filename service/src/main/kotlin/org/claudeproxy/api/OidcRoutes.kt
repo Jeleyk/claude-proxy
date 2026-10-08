@@ -64,6 +64,7 @@ fun Route.oidcRoutes(
         val authorize = try {
             withContext(Dispatchers.IO) { client.authorizationUri(txn) }
         } catch (e: OidcException) {
+            transactions.discard(id) // never sent to the browser; don't let an outage fill the store
             log.warn("OIDC start failed: {}", e.message)
             return@get call.respondRedirect(errorTarget(e.code))
         }
