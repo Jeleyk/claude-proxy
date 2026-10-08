@@ -369,10 +369,14 @@ export function localTz(): string {
 }
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  // X-Requested-With: the server's CSRF guard on body-less state changes (offboard, unlink)
+  // requires it; a cross-site page cannot send it without a CORS preflight the server refuses.
+  const headers: Record<string, string> = { 'X-Requested-With': 'claude-proxy' };
+  if (body) headers['Content-Type'] = 'application/json';
   const res = await fetch(path, {
     method,
     credentials: 'include',
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();

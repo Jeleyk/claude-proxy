@@ -48,7 +48,16 @@ export function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.me().then(setUser).catch(() => setUser(null)).finally(() => setLoading(false));
+    api.me().then((u) => {
+      // An SSO error from an abandoned attempt is moot once a session exists: drop it from the URL.
+      const params = new URLSearchParams(window.location.search);
+      if (params.has('sso_error')) {
+        params.delete('sso_error');
+        const rest = params.toString();
+        window.history.replaceState(null, '', window.location.pathname + (rest ? `?${rest}` : ''));
+      }
+      setUser(u);
+    }).catch(() => setUser(null)).finally(() => setLoading(false));
   }, []);
 
   // session probe: neutral card placeholder — we don't yet know whether this lands on the
@@ -173,7 +182,7 @@ function Shell({ user, setUser }: { user: UserDto; setUser: (u: UserDto | null) 
             <Route path="/routing" element={<RequirePerm user={user} perm="ROUTING_USE"><RoutingTokens /></RequirePerm>} />
             <Route path="/pricing" element={<RequirePerm user={user} perm="ADMIN"><ModelPricing /></RequirePerm>} />
             <Route path="/user-stats/:id" element={<RequirePerm user={user} perm="USERS_MANAGE"><UserStats /></RequirePerm>} />
-            <Route path="/users" element={<RequirePerm user={user} perm="USERS_MANAGE"><Users isAdmin={has(user, 'ADMIN')} /></RequirePerm>} />
+            <Route path="/users" element={<RequirePerm user={user} perm="USERS_MANAGE"><Users isAdmin={has(user, 'ADMIN')} meId={user.id} /></RequirePerm>} />
             <Route path="*" element={<Navigate to={landing} replace />} />
           </Routes>
         </div>

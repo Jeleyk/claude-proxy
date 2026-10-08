@@ -8,6 +8,7 @@ const SSO_ERRORS: Record<string, string> = {
   token_error: 'The identity provider response could not be verified.',
   forbidden: 'Your account is not allowed to use this panel.',
   no_account: 'No panel account is linked to this identity. Ask an administrator.',
+  pending: 'Your account was created and is waiting for an administrator to approve it.',
   unavailable: 'The identity provider is unreachable. Try again later.',
 };
 
@@ -44,7 +45,9 @@ export function Login({ onLogin }: { onLogin: (u: UserDto) => void }) {
     }
   }
 
-  const passwordLogin = sso?.passwordLogin ?? true;
+  // Until the SSO config arrives, show neither form nor button — avoids flashing a password form
+  // that SSO-only deployments then hide.
+  const passwordLogin = sso !== null && sso.passwordLogin;
 
   return (
     <div className="login-wrap">

@@ -5,7 +5,7 @@ import { AccountEditModal } from '../accounts';
 import { Check, Modal, NumberInput, Switch } from '../ui';
 import { SkeletonLine, SkeletonTable } from '../Skeleton';
 
-export function Users({ isAdmin }: { isAdmin: boolean }) {
+export function Users({ isAdmin, meId }: { isAdmin: boolean; meId?: number }) {
   const navigate = useNavigate();
   const [users, setUsers] = useState<UserDto[] | null>(null);
   const [roles, setRoles] = useState<RoleDto[]>([]);
@@ -62,9 +62,9 @@ export function Users({ isAdmin }: { isAdmin: boolean }) {
                     <button className="sm ghost" onClick={() => navigate(`/user-stats/${u.id}`)}>Stats</button>
                     <button className="sm ghost" onClick={() => setAccountsFor(u)}>Accounts</button>
                     <button className="sm ghost" onClick={async () => { if (confirm(`Reset ${u.username}'s statistics?`)) { const r = await api.resetUserStats(u.id); alert(r.message); load(); } }}>Reset stats</button>
-                    <button className="sm ghost" title="Disable the user, end all panel sessions and delete every proxy/routing token"
-                      onClick={async () => { if (confirm(`Offboard ${u.username}? This disables the user, signs them out everywhere and permanently revokes all their proxy and routing tokens.`)) { try { const r = await api.offboardUser(u.id); alert(`Offboarded: ${r.proxyTokensRevoked} proxy and ${r.routingTokensRevoked} routing tokens revoked.`); } catch (e: any) { alert(e.message); } load(); } }}>Offboard</button>
-                    {u.ssoLinked && <button className="sm ghost" onClick={async () => { if (confirm(`Unlink ${u.username}'s SSO identity? Their next SSO sign-in goes through the linking rules again.`)) { await api.unlinkUserSso(u.id); load(); } }}>Unlink SSO</button>}
+                    {u.id !== meId && u.enabled && <button className="sm ghost" title="Disable the user, end all panel sessions and delete every proxy/routing token"
+                      onClick={async () => { if (confirm(`Offboard ${u.username}? This disables the user, signs them out everywhere and permanently revokes all their proxy and routing tokens.`)) { try { const r = await api.offboardUser(u.id); alert(`Offboarded: ${r.proxyTokensRevoked} proxy and ${r.routingTokensRevoked} routing tokens revoked.`); } catch (e: any) { alert(e.message); } load(); } }}>Offboard</button>}
+                    {u.ssoLinked && <button className="sm ghost" onClick={async () => { if (confirm(`Unlink ${u.username}'s SSO identity? Their next SSO sign-in goes through the linking rules again.`)) { try { await api.unlinkUserSso(u.id); } catch (e: any) { alert(e.message); } load(); } }}>Unlink SSO</button>}
                     <button className="sm danger" onClick={async () => { if (confirm(`Delete ${u.username}?`)) { await api.deleteUser(u.id); load(); } }}>Delete</button>
                   </div>
                 </td>
