@@ -29,6 +29,8 @@ data class Config(
     // Null during rollout — the datapath still works without it.
     val internalToken: String?,
     val anthropicProxy: AnthropicProxy? = null,
+    // Opt-in OIDC panel login; null = disabled (see auth/OidcConfig).
+    val oidc: org.claudeproxy.auth.OidcConfig? = null,
 ) {
     companion object {
         fun load(): Config {
@@ -60,6 +62,7 @@ data class Config(
                 databasePassword = env("DATABASE_PASSWORD", "")!!,
                 internalToken = env("INTERNAL_TOKEN"),
                 anthropicProxy = AnthropicProxy.parse(System.getenv("ANTHROPIC_PROXY_URL") ?: System.getProperty("ANTHROPIC_PROXY_URL")),
+                oidc = org.claudeproxy.auth.OidcConfig.load(::envOrProp),
             )
         }
 

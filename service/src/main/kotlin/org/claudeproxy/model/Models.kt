@@ -74,6 +74,10 @@ data class UserDto(
     val dailyChatCostLimit: Double? = null,
     // routing preference: true = try the global pool before personal accounts (default false = personal first)
     val preferGlobalPool: Boolean = false,
+    // admin-set, lower-cased; only used to link a first SSO login (OIDC_LINK_BY_EMAIL)
+    val email: String? = null,
+    // true once an external (OIDC) identity is linked to this user
+    val ssoLinked: Boolean = false,
     // usage since the start of the current UTC day
     val todayCost: Double = 0.0,
     // routing spend (source=routing) since the start of the current UTC day

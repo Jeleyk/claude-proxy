@@ -32,8 +32,12 @@ fun Application.installSecurity(sessionSecret: String) {
     }
 }
 
-fun ApplicationCall.setUserSession(user: UserAuth) = sessions.set(
-    UserSession(user.id, user.sessionVersion, Instant.now().epochSecond + SESSION_TTL_SECONDS),
+/**
+ * [ttlSeconds] is the server-enforced lifetime (signed into the cookie). SSO logins pass a shorter
+ * one, so an IdP-side removal also ends an open panel session within that bound.
+ */
+fun ApplicationCall.setUserSession(user: UserAuth, ttlSeconds: Long = SESSION_TTL_SECONDS) = sessions.set(
+    UserSession(user.id, user.sessionVersion, Instant.now().epochSecond + ttlSeconds.coerceIn(1L, SESSION_TTL_SECONDS)),
 )
 fun ApplicationCall.clearUserSession() {
     currentUser()?.let { UserRepo.revokeSessions(it.id, it.sessionVersion) }

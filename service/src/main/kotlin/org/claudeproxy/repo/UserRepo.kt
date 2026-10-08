@@ -23,6 +23,11 @@ import java.time.Instant
 
 data class UserAuth(val id: Int, val username: String, val enabled: Boolean, val permissions: Set<Permission>, val sessionVersion: Long = 0L)
 
+/** What an offboarding removed. Tokens are deleted (not just disabled), so a re-enabled user starts with none. */
+data class OffboardResult(val proxyTokensRevoked: Int, val routingTokensRevoked: Int)
+
+class EmailTakenException : RuntimeException("Email already used by another user")
+
 object UserRepo {
 
     fun authenticate(username: String, password: String): UserAuth? = transaction {
@@ -145,6 +150,8 @@ object UserRepo {
             dailyRoutingCostLimit = row[Users.dailyRoutingCostLimit],
             dailyChatCostLimit = row[Users.dailyChatCostLimit],
             preferGlobalPool = row[Users.preferGlobalPool],
+            email = row[Users.email],
+            ssoLinked = IdentityRepo.isLinked(uid),
             todayCost = today.cost,
             todayRoutingCost = todayRouting.cost,
             todayChatCost = todayChat.cost,
@@ -181,11 +188,35 @@ object UserRepo {
         }
     }
 
+    /**
+     * Normalizes an admin-entered email for [Users.email]: trimmed, lower-cased, null when blank.
+     * Shape check only — the address is never mailed, it just has to compare equal to an IdP claim.
+     */
+    fun normalizeEmail(raw: String?): String? {
+        val e = raw?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+        require(e.length <= 320 && e.count { it == '@' } == 1 && !e.startsWith('@') && !e.endsWith('@') &&
+            e.none { it.isWhitespace() || it.isISOControl() }) { "invalid email" }
+        return e
+    }
+
+    /** Caller's transaction. Lookup by normalized email. */
+    internal fun userIdByEmail(email: String): Int? =
+        Users.selectAll().where { Users.email eq email }.firstOrNull()?.get(Users.id)
+
+    private fun checkEmailFree(email: String?, exceptUserId: Int?) {
+        if (email == null) return
+        val owner = userIdByEmail(email)
+        if (owner != null && owner != exceptUserId) throw EmailTakenException()
+    }
+
     fun create(
         username: String, password: String, roleNames: List<String>, groupIds: List<Int>,
         dailyCostLimit: Double?, dailyRoutingCostLimit: Double? = null, dailyChatCostLimit: Double? = null,
+        email: String? = null,
     ): Int = transaction {
+        checkEmailFree(email, null)
         val uid = Users.insert {
+            it[Users.email] = email
             it[Users.username] = username
             it[passwordHash] = Passwords.hash(password)
             it[enabled] = true
@@ -204,9 +235,12 @@ object UserRepo {
         dailyCostLimit: Double?, clearDailyLimit: Boolean,
         dailyRoutingCostLimit: Double? = null, clearRoutingLimit: Boolean = false,
         dailyChatCostLimit: Double? = null, clearChatLimit: Boolean = false,
+        email: String? = null, clearEmail: Boolean = false,
     ) {
         transaction {
+            if (!clearEmail) checkEmailFree(email, userId)
             Users.update({ Users.id eq userId }) {
+                if (clearEmail) it[Users.email] = null else if (email != null) it[Users.email] = email
                 if (password != null) it[passwordHash] = Passwords.hash(password)
                 if (password != null || enabled == false) it[sessionVersion] = Users.sessionVersion + 1L
                 if (enabled != null) it[Users.enabled] = enabled
@@ -248,11 +282,57 @@ object UserRepo {
             }
             UserGroupAccess.deleteWhere { UserGroupAccess.userId eq userId }
             UserRoles.deleteWhere { UserRoles.userId eq userId }
+            IdentityRepo.unlinkAll(userId)
             Users.deleteWhere { Users.id eq userId }
         }
         // a deleted user's tokens are gone from the DB; their cached resolves must go too
         cacheKeys.forEach(MemoryCache::evict)
     }
+
+    /**
+     * Offboarding in one step: disable the user, end every panel session (session generation bump)
+     * and delete all of their `cxp_`/`cxr_` tokens, so nothing they hold keeps working on any
+     * datapath. Linked SSO identities are kept — the disabled flag already refuses them, and the
+     * link is the audit trail of who the account belonged to. Null when the user does not exist.
+     */
+    fun offboard(userId: Int): OffboardResult? {
+        val cacheKeys = tokenCacheKeys(userId)
+        val result = transaction {
+            val n = Users.update({ Users.id eq userId }) {
+                it[enabled] = false
+                it[sessionVersion] = Users.sessionVersion + 1L
+            }
+            if (n == 0) return@transaction null
+            OffboardResult(
+                proxyTokensRevoked = org.claudeproxy.db.ProxyTokens.deleteWhere { org.claudeproxy.db.ProxyTokens.userId eq userId },
+                routingTokensRevoked = org.claudeproxy.db.RoutingTokens.deleteWhere { org.claudeproxy.db.RoutingTokens.userId eq userId },
+            )
+        }
+        // After the commit, or a concurrent resolve could re-cache a token that is about to vanish.
+        cacheKeys.forEach(MemoryCache::evict)
+        return result
+    }
+
+    /**
+     * Just-in-time account for a first SSO login: the least-privileged built-in role `user`, no
+     * account-group access (an admin grants that deliberately), and an unusable random password —
+     * the account can only sign in through SSO until an admin sets one. Caller's transaction.
+     */
+    internal fun createProvisioned(username: String, email: String?): Int {
+        val uid = Users.insert {
+            it[Users.username] = username
+            it[passwordHash] = Passwords.hash(org.claudeproxy.db.Crypto.randomToken(32))
+            it[enabled] = true
+            it[Users.email] = email
+            it[createdAt] = Instant.now()
+        }[Users.id]
+        setRoles(uid, listOf("user"))
+        return uid
+    }
+
+    /** Caller's transaction. */
+    internal fun usernameExists(username: String): Boolean =
+        Users.selectAll().where { Users.username eq username }.any()
 
     private fun setRoles(userId: Int, roleNames: List<String>) {
         UserRoles.deleteWhere { UserRoles.userId eq userId }

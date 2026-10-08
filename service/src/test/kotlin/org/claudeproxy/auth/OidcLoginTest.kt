@@ -1,0 +1,144 @@
+package org.claudeproxy.auth
+
+import org.claudeproxy.auth.OidcLoginResult.Denied
+import org.claudeproxy.auth.OidcLoginResult.How
+import org.claudeproxy.auth.OidcLoginResult.Success
+import org.claudeproxy.cache.MemoryCache
+import org.claudeproxy.model.Permission
+import org.claudeproxy.repo.IdentityRepo
+import org.claudeproxy.repo.UserRepo
+import org.jetbrains.exposed.sql.transactions.transaction
+import java.io.File
+import kotlin.test.*
+
+/** Linking rules, JIT provisioning and the claim gates — the policy behind a *validated* ID token. */
+class OidcLoginTest {
+    private lateinit var dbFile: File
+    private val iss = "https://idp.example.com"
+    private var alice = 0
+
+    @BeforeTest
+    fun setup() {
+        dbFile = freshDb()
+        alice = UserRepo.create("alice", "pw-alice", listOf("user"), emptyList(), null, email = "alice@example.com")
+    }
+
+    @AfterTest
+    fun cleanup() { MemoryCache.clear(); dbFile.delete() }
+
+    private fun id(
+        sub: String = "sub-alice", email: String? = "alice@example.com", verified: Boolean = true,
+        groups: List<String>? = listOf("panel"), username: String? = null,
+    ) = OidcIdentity(iss, sub, email, verified, groups, username)
+
+    private fun login(cfg: OidcConfig, identity: OidcIdentity) = OidcLogin(cfg).resolve(identity)
+    private fun denied(r: OidcLoginResult) = assertIs<Denied>(r).error
+    private fun linkedTo(sub: String) = transaction { IdentityRepo.userIdFor(iss, sub) }
+
+    @Test
+    fun `no linking by email unless enabled`() {
+        assertEquals(OidcError.NO_ACCOUNT, denied(login(oidcConfig(), id())))
+        assertNull(linkedTo("sub-alice"))
+    }
+
+    @Test
+    fun `verified email links an unlinked user once, then sub alone matches`() {
+        val first = assertIs<Success>(login(oidcConfig(linkByEmail = true), id()))
+        assertEquals(alice to How.LINKED_BY_EMAIL, first.user.id to first.how)
+        // Later logins match on (iss, sub) even if the email claim changed.
+        val again = assertIs<Success>(login(oidcConfig(linkByEmail = true), id(email = "renamed@example.com")))
+        assertEquals(alice to How.LINKED, again.user.id to again.how)
+    }
+
+    @Test
+    fun `unverified email never links`() {
+        assertEquals(OidcError.NO_ACCOUNT, denied(login(oidcConfig(linkByEmail = true), id(verified = false))))
+        assertNull(linkedTo("sub-alice"))
+    }
+
+    @Test
+    fun `a user already linked to another subject is never re-pointed`() {
+        transaction { IdentityRepo.link(alice, iss, "sub-original") }
+        assertEquals(OidcError.NO_ACCOUNT, denied(login(oidcConfig(linkByEmail = true, jit = true), id(sub = "sub-attacker"))))
+        assertEquals(alice, linkedTo("sub-original"))
+        assertNull(linkedTo("sub-attacker"))
+    }
+
+    @Test
+    fun `disabled users are refused whether linked or email-matched`() {
+        UserRepo.update(alice, null, false, null, null, null, false)
+        assertEquals(OidcError.FORBIDDEN, denied(login(oidcConfig(linkByEmail = true), id())))
+        assertNull(linkedTo("sub-alice"))
+        transaction { IdentityRepo.link(alice, iss, "sub-alice") }
+        assertEquals(OidcError.FORBIDDEN, denied(login(oidcConfig(), id())))
+    }
+
+    @Test
+    fun `username is never used for matching`() {
+        // IdP user claims the admin's username; without JIT that is simply no account.
+        assertEquals(OidcError.NO_ACCOUNT, denied(login(oidcConfig(), id(sub = "x", email = null, username = "admin"))))
+        // With JIT they get a fresh least-privileged account next to it, never the admin.
+        val r = assertIs<Success>(login(oidcConfig(jit = true), id(sub = "x", email = null, username = "admin")))
+        assertNotEquals(1, r.user.id)
+        assertEquals("admin-2", r.user.username)
+    }
+
+    @Test
+    fun `JIT is off by default and creates a least-privileged user without group access`() {
+        assertEquals(OidcError.NO_ACCOUNT, denied(login(oidcConfig(), id(sub = "new", email = "bob@example.com", username = "bob"))))
+        val r = assertIs<Success>(login(oidcConfig(jit = true), id(sub = "new", email = "bob@example.com", username = "bob")))
+        assertEquals(How.PROVISIONED, r.how)
+        val dto = UserRepo.get(r.user.id)!!
+        assertEquals(listOf("user"), dto.roles)
+        assertTrue(dto.allowedGroups.isEmpty() && !dto.allGroups)
+        assertFalse(Permission.ADMIN in r.user.permissions || Permission.USERS_MANAGE in r.user.permissions)
+        assertEquals("bob@example.com", dto.email)
+        assertTrue(dto.ssoLinked)
+        // The random password is unknown to everyone.
+        assertNull(UserRepo.authenticate("bob", ""))
+    }
+
+    @Test
+    fun `JIT keeps only a verified, unused email and sanitizes the username`() {
+        val r = assertIs<Success>(login(oidcConfig(jit = true), id(sub = "n2", email = "alice@example.com", username = "Мallory <x>")))
+        val dto = UserRepo.get(r.user.id)!!
+        assertNull(dto.email, "alice's email stays alice's")
+        assertEquals("alloryx", dto.username)
+        val u = assertIs<Success>(login(oidcConfig(jit = true), id(sub = "n3", email = "carol@example.com", verified = false, username = "carol")))
+        assertNull(UserRepo.get(u.user.id)!!.email)
+    }
+
+    @Test
+    fun `group gate applies to every login and needs the claim`() {
+        transaction { IdentityRepo.link(alice, iss, "sub-alice") }
+        val cfg = oidcConfig(allowedGroups = setOf("claude-proxy-user", "admin"))
+        assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(groups = null))))
+        assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(groups = emptyList()))))
+        assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(groups = listOf("Claude-Proxy-User")))), "exact, case-sensitive")
+        assertIs<Success>(login(cfg, id(groups = listOf("x", "claude-proxy-user"))))
+    }
+
+    @Test
+    fun `email domain allowlist is exact and needs a verified email`() {
+        transaction { IdentityRepo.link(alice, iss, "sub-alice") }
+        val cfg = oidcConfig(allowedEmailDomains = setOf("example.com"))
+        assertIs<Success>(login(cfg, id()))
+        assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(verified = false))))
+        assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(email = null))))
+        assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(email = "a@evil-example.com"))))
+        assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(email = "a@sub.example.com"))))
+        assertEquals(OidcError.FORBIDDEN, denied(login(cfg, id(email = "a@example.com@evil.com"))))
+    }
+
+    @Test
+    fun `admin-set emails are normalized and unique`() {
+        assertEquals("bob@example.com", UserRepo.normalizeEmail("  Bob@Example.COM "))
+        assertNull(UserRepo.normalizeEmail("  "))
+        assertFails { UserRepo.normalizeEmail("no-at-sign") }
+        assertFails { UserRepo.normalizeEmail("a@b@c") }
+        val bob = UserRepo.create("bob", "pw", listOf("user"), emptyList(), null)
+        assertFailsWith<org.claudeproxy.repo.EmailTakenException> {
+            UserRepo.update(bob, null, null, null, null, null, false, email = "alice@example.com")
+        }
+    }
+}

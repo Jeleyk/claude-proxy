@@ -45,6 +45,7 @@ fun Route.adminRoutes(
     chatEngine: org.claudeproxy.chat.ChatEngine,
     datapath: org.claudeproxy.datapath.DatapathService,
     upstreamBaseUrl: String,
+    oidc: org.claudeproxy.auth.OidcConfig? = null,
 ) {
     route("/api") {
         get("/config") {
@@ -73,7 +74,9 @@ fun Route.adminRoutes(
             call.respond(ModelPriceRepo.list())
         }
         installRoutes(publicBaseUrl)
-        authRoutes()
+        authRoutes(passwordLogin = oidc?.disablePasswordLogin != true)
+        oidcRoutes(oidc)
+        userLifecycleRoutes()
         profileRoutes()
         accountRoutes(pool, probe)
         myAccountRoutes(pool, probe)
@@ -174,8 +177,11 @@ private fun assembleStats(
 
 // ---- auth ----
 
-private fun Route.authRoutes() {
+private fun Route.authRoutes(passwordLogin: Boolean) {
     post("/auth/login") {
+        // OIDC_DISABLE_PASSWORD_LOGIN: SSO only. Checked before the body is read, so it also
+        // stops password guessing. Break-glass = unset the flag and restart.
+        if (!passwordLogin) return@post call.respond(HttpStatusCode.Forbidden, MessageResponse("Password login is disabled; use SSO"))
         val req = call.receive<LoginRequest>()
         val user = UserRepo.authenticate(req.username, req.password)
         if (user == null) {
@@ -495,7 +501,14 @@ private fun Route.userRoutes() {
     post("/users") {
         call.requirePermission(Permission.USERS_MANAGE)
         val req = call.receive<CreateUserRequest>()
-        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyCostLimit, req.dailyRoutingCostLimit, req.dailyChatCostLimit)
+        val email = runCatching { UserRepo.normalizeEmail(req.email) }.getOrElse {
+            return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("invalid email"))
+        }
+        val id = try {
+            UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyCostLimit, req.dailyRoutingCostLimit, req.dailyChatCostLimit, email)
+        } catch (e: org.claudeproxy.repo.EmailTakenException) {
+            return@post call.respond(HttpStatusCode.Conflict, MessageResponse(e.message!!))
+        }
         call.respond(UserRepo.get(id) ?: MessageResponse("created"))
     }
     patch("/users/{id}") {
@@ -503,7 +516,14 @@ private fun Route.userRoutes() {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateUserRequest>()
-        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyCostLimit, req.clearDailyLimit, req.dailyRoutingCostLimit, req.clearRoutingLimit, req.dailyChatCostLimit, req.clearChatLimit)
+        val email = runCatching { UserRepo.normalizeEmail(req.email) }.getOrElse {
+            return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("invalid email"))
+        }
+        try {
+            UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyCostLimit, req.clearDailyLimit, req.dailyRoutingCostLimit, req.clearRoutingLimit, req.dailyChatCostLimit, req.clearChatLimit, email, req.clearEmail)
+        } catch (e: org.claudeproxy.repo.EmailTakenException) {
+            return@patch call.respond(HttpStatusCode.Conflict, MessageResponse(e.message!!))
+        }
         call.respond(UserRepo.get(id) ?: MessageResponse("updated"))
     }
     delete("/users/{id}") {

@@ -63,6 +63,7 @@ data class CreateUserRequest(
     val dailyCostLimit: Double? = null,
     val dailyRoutingCostLimit: Double? = null,
     val dailyChatCostLimit: Double? = null,
+    val email: String? = null,
 )
 
 @Serializable
@@ -77,6 +78,8 @@ data class UpdateUserRequest(
     val clearRoutingLimit: Boolean = false,
     val dailyChatCostLimit: Double? = null,
     val clearChatLimit: Boolean = false,
+    val email: String? = null,
+    val clearEmail: Boolean = false,
 )
 
 @Serializable

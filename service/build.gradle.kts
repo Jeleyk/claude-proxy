@@ -44,6 +44,9 @@ dependencies {
 
     // Security
     implementation("at.favre.lib:bcrypt:0.10.2")
+    // OpenID Connect login (opt-in): discovery, PKCE, ID-token/JWKS validation. Maintained
+    // library on purpose — no hand-rolled JOSE.
+    implementation("com.nimbusds:oauth2-oidc-sdk:11.38.2")
 
     // Serialization / util
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
