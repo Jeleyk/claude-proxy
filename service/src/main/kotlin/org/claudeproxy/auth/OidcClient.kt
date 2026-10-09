@@ -122,6 +122,10 @@ class OidcClient(
     private fun refresh(): Provider? = synchronized(this) {
         val current = provider
         if (current != null && clock() < current.refreshAt) return current // someone else just refreshed
+        // Logins that queued on the lock behind a failed synchronous load must not each wait out
+        // the timeouts again: honour the backoff that load set (background refreshes, which only
+        // run while the current metadata is still servable, are not affected).
+        if ((current == null || !servable(current, clock())) && clock() < failedUntil) return null
         try {
             load().also { provider = it; failedUntil = 0L }
         } catch (e: Exception) {

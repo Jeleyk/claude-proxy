@@ -219,6 +219,62 @@ class OidcFlowTest {
     }
 
     @Test
+    fun `logins queued behind a hanging IdP fail fast instead of each waiting out the timeout`() {
+        val hits = java.util.concurrent.atomic.AtomicInteger()
+        val hang = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        hang.executor = java.util.concurrent.Executors.newCachedThreadPool()
+        hang.createContext("/") { ex -> hits.incrementAndGet(); Thread.sleep(2_000); ex.close() }
+        hang.start()
+        try {
+            val issuer = "http://127.0.0.1:${hang.address.port}"
+            val client = OidcClient(oidcConfig(issuer = issuer), connectTimeoutMs = 500, readTimeoutMs = 400, clock = { 0L })
+            val txn = OidcTransactions().begin()!!.second
+            val n = 4
+            val start = java.util.concurrent.CountDownLatch(1)
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(n)
+            val results = (1..n).map { pool.submit<OidcError?> { start.await(); runCatching { client.authorizationUri(txn) }.exceptionOrNull()?.let { (it as OidcException).code } } }
+            val t0 = System.nanoTime()
+            start.countDown()
+            results.forEach { assertEquals(OidcError.UNAVAILABLE, it.get(10, java.util.concurrent.TimeUnit.SECONDS)) }
+            val elapsedMs = (System.nanoTime() - t0) / 1_000_000
+            pool.shutdown()
+            assertEquals(1, hits.get(), "one discovery attempt; the queued logins used the backoff")
+            assertTrue(elapsedMs < 2 * 400 + 600, "no login waited for a second timeout ($elapsedMs ms)")
+            // Still inside the backoff: no new attempt at all.
+            assertEquals(OidcError.UNAVAILABLE, assertFailsWith<OidcException> { client.authorizationUri(txn) }.code)
+            assertEquals(1, hits.get())
+        } finally { hang.stop(0) }
+    }
+
+    @Test
+    fun `background refresh can run again after it finished or failed to start`() {
+        var now = 0L
+        val queued = mutableListOf<Runnable>()
+        var failSchedule = false
+        val client = OidcClient(oidcConfig(issuer = idp.issuer), clock = { now }, refreshInBackground = {
+            if (failSchedule) throw java.util.concurrent.RejectedExecutionException("no threads")
+            queued += it
+        })
+        val txn = OidcTransactions().begin()!!.second
+        client.authorizationUri(txn)
+        idp.close()
+        now += 61 * 60 * 1000
+        client.authorizationUri(txn)
+        assertEquals(1, queued.size)
+        queued.removeAt(0).run() // fails, retry in a minute
+        now += 2 * 60 * 1000
+        client.authorizationUri(txn)
+        assertEquals(1, queued.size, "the flag was reset after the first run")
+        queued.removeAt(0).run()
+        now += 2 * 60 * 1000
+        failSchedule = true
+        assertNotNull(client.authorizationUri(txn), "scheduling failure still serves the current metadata")
+        failSchedule = false
+        client.authorizationUri(txn)
+        assertEquals(1, queued.size, "the flag was reset after the scheduling failure")
+    }
+
+    @Test
     fun `max stale 0 never serves expired metadata`() {
         var now = 0L
         val client = OidcClient(oidcConfig(issuer = idp.issuer, metadataMaxStaleSeconds = 0), clock = { now }, refreshInBackground = { error("no background refresh expected") })

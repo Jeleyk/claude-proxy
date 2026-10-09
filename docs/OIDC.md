@@ -11,7 +11,8 @@ Present even with OIDC off: the `users.email` column and `user_identities` table
 schema), the optional Email field on users, the **Offboard** action
 (`POST /api/users/{id}/offboard`), SSO unlink (`DELETE /api/users/{id}/identities`),
 `GET /api/auth/oidc/config` (answers `enabled:false`), `SESSION_COOKIE_SAMESITE` (default `Lax`,
-which is what current browsers already assume for a cookie without the attribute) and
+which Chromium-based browsers already assume for a cookie without the attribute; Firefox and
+Safari treat a missing attribute as `None`, so for them the explicit `Lax` is a tightening) and
 `OIDC_BLOCK_PASSWORD_FOR_LINKED` (default on; it only affects users that have an SSO link, so it
 changes nothing until someone has signed in through SSO).
 
