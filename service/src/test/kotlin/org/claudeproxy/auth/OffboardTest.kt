@@ -138,7 +138,10 @@ class OffboardTest {
         assertFalse(UserRepo.findAuth(bob)!!.enabled)
 
         transaction { IdentityRepo.link(carol, "https://idp.example.com", "sub-carol") }
-        assertEquals(HttpStatusCode.Forbidden, client.delete("/api/users/$carol/identities") { header(HttpHeaders.Cookie, asCarol); header(xhr.first, xhr.second) }.status)
+        // Linking ended carol's pre-link session.
+        assertEquals(HttpStatusCode.Unauthorized, client.delete("/api/users/$carol/identities") { header(HttpHeaders.Cookie, asCarol); header(xhr.first, xhr.second) }.status)
+        val asCarolNow = client.post("/as/$carol").headers[HttpHeaders.SetCookie]!!.substringBefore(';')
+        assertEquals(HttpStatusCode.Forbidden, client.delete("/api/users/$carol/identities") { header(HttpHeaders.Cookie, asCarolNow); header(xhr.first, xhr.second) }.status)
         assertEquals(HttpStatusCode.NotFound, client.delete("/api/users/9999/identities") { header(HttpHeaders.Cookie, asAdmin); header(xhr.first, xhr.second) }.status)
         assertEquals(HttpStatusCode.OK, client.delete("/api/users/$carol/identities") { header(HttpHeaders.Cookie, asAdmin); header(xhr.first, xhr.second) }.status)
         assertFalse(transaction { IdentityRepo.isLinked(carol) })

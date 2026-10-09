@@ -32,13 +32,15 @@ data class OidcConfig(
      */
     val jitProvisioning: Boolean,
     val jitRole: String? = null,
-    /**
-     * Refuse password login for users with a linked SSO identity, so removing them at the IdP
-     * really ends their access. Unlinked users (e.g. a break-glass admin, service accounts) keep it.
-     */
-    val blockPasswordForLinked: Boolean = true,
     /** Server-enforced lifetime of a panel session established through OIDC. */
     val sessionTtlSeconds: Long,
+    /**
+     * How long the last good discovery document/JWKS source may keep serving logins after refreshes
+     * start failing (IdP or network outage). Past this, logins fail with `unavailable` until a
+     * refresh succeeds — so a key or endpoint the IdP has since rotated away is not trusted forever.
+     * 0 = never serve stale metadata.
+     */
+    val metadataMaxStaleSeconds: Long = DEFAULT_METADATA_MAX_STALE_HOURS * 3600,
 ) {
     /** Where the browser has to start the flow: cookies are host-bound, so start on the callback's origin. */
     val startUrl: String get() = originOf(redirectUri) + START_PATH
@@ -51,12 +53,14 @@ data class OidcConfig(
             "scopes=$scopes, groupsClaim=$groupsClaim, allowedGroups=$allowedGroups, " +
             "allowedEmailDomains=$allowedEmailDomains, disablePasswordLogin=$disablePasswordLogin, " +
             "linkByEmail=$linkByEmail, jitProvisioning=$jitProvisioning, jitRole=$jitRole, " +
-            "blockPasswordForLinked=$blockPasswordForLinked, sessionTtlSeconds=$sessionTtlSeconds)"
+            "sessionTtlSeconds=$sessionTtlSeconds, metadataMaxStaleSeconds=$metadataMaxStaleSeconds)"
 
     companion object {
         const val START_PATH = "/api/auth/oidc/start"
         const val CALLBACK_PATH = "/api/auth/oidc/callback"
         const val DEFAULT_SESSION_TTL_HOURS = 12L
+        const val DEFAULT_METADATA_MAX_STALE_HOURS = 24L
+        const val MAX_METADATA_MAX_STALE_HOURS = 168L
 
         /**
          * Like [load], but an invalid OIDC configuration disables OIDC (logged at ERROR) instead of
@@ -114,6 +118,13 @@ data class OidcConfig(
                 "OIDC_SESSION_TTL_HOURS must be between 1 and ${SESSION_TTL_SECONDS / 3600}"
             }
 
+            val maxStaleHours = env("OIDC_METADATA_MAX_STALE_HOURS")?.trim()?.takeIf { it.isNotEmpty() }
+                ?.let { it.toLongOrNull() ?: error("OIDC_METADATA_MAX_STALE_HOURS must be a whole number of hours") }
+                ?: DEFAULT_METADATA_MAX_STALE_HOURS
+            require(maxStaleHours in 0..MAX_METADATA_MAX_STALE_HOURS) {
+                "OIDC_METADATA_MAX_STALE_HOURS must be between 0 and $MAX_METADATA_MAX_STALE_HOURS"
+            }
+
             val allowedGroups = env("OIDC_ALLOWED_GROUPS").csv().toSet()
             val jit = env("OIDC_JIT_PROVISIONING").toBool()
             require(!jit || allowedGroups.isNotEmpty()) {
@@ -134,10 +145,23 @@ data class OidcConfig(
                 linkByEmail = env("OIDC_LINK_BY_EMAIL").toBool(),
                 jitProvisioning = jit,
                 jitRole = env("OIDC_JIT_ROLE")?.trim()?.takeIf { it.isNotEmpty() },
-                blockPasswordForLinked = env("OIDC_BLOCK_PASSWORD_FOR_LINKED")?.let { it.toBool() } ?: true,
                 sessionTtlSeconds = ttlHours * 3600,
+                metadataMaxStaleSeconds = maxStaleHours * 3600,
             )
         }
+
+        /**
+         * `OIDC_BLOCK_PASSWORD_FOR_LINKED` (default true): refuse password login for users that have a
+         * linked SSO identity, so removing them at the IdP really ends their access.
+         *
+         * Read straight from the environment, deliberately independent of `OIDC_ENABLED` and of
+         * whether the rest of the OIDC config is valid: a typo in `OIDC_*` (which disables OIDC, see
+         * [loadOrDisable]) or switching OIDC off must not quietly hand linked users their password
+         * back. Break-glass is an *unlinked* user (e.g. a dedicated admin); only an explicit
+         * `OIDC_BLOCK_PASSWORD_FOR_LINKED=false` re-opens password login for linked users.
+         */
+        fun blockPasswordForLinked(env: (String) -> String?): Boolean =
+            env("OIDC_BLOCK_PASSWORD_FOR_LINKED")?.trim()?.takeIf { it.isNotEmpty() }?.toBool() ?: true
 
         private fun String?.toBool(): Boolean = this?.trim()?.lowercase() in setOf("1", "true", "yes", "on")
 

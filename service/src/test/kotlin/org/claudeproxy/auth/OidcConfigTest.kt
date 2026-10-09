@@ -53,6 +53,7 @@ class OidcConfigTest {
         assertEquals(listOf("openid", "email", "profile"), c.scopes)
         assertEquals("groups", c.groupsClaim)
         assertEquals(12 * 3600L, c.sessionTtlSeconds)
+        assertEquals(24 * 3600L, c.metadataMaxStaleSeconds)
         assertEquals("https://panel.example.com/api/auth/oidc/start", c.startUrl)
         assertTrue(c.secureCookies)
     }
@@ -69,6 +70,8 @@ class OidcConfigTest {
         assertEquals(setOf("example.com", "b.org"), c.allowedEmailDomains)
         assertTrue(c.linkByEmail && c.jitProvisioning && c.disablePasswordLogin)
         assertEquals(8 * 3600L, c.sessionTtlSeconds)
+        assertEquals(0L, load(base + ("OIDC_METADATA_MAX_STALE_HOURS" to "0"))!!.metadataMaxStaleSeconds)
+        assertEquals(6 * 3600L, load(base + ("OIDC_METADATA_MAX_STALE_HOURS" to "6"))!!.metadataMaxStaleSeconds)
         assertEquals("http://claude.internal:8080/api/auth/oidc/start", c.startUrl)
         assertFalse(c.secureCookies)
     }
@@ -97,18 +100,33 @@ class OidcConfigTest {
         assertFails { load(base + ("OIDC_JIT_PROVISIONING" to "true")) }
         val c = load(base + mapOf("OIDC_JIT_PROVISIONING" to "true", "OIDC_ALLOWED_GROUPS" to "g", "OIDC_JIT_ROLE" to "viewer"))!!
         assertEquals("viewer", c.jitRole)
-        assertTrue(c.blockPasswordForLinked, "on by default")
         assertNull(load(base + mapOf("OIDC_JIT_PROVISIONING" to "true", "OIDC_ALLOWED_GROUPS" to "g"))!!.jitRole, "default = pending")
-        assertFalse(load(base + ("OIDC_BLOCK_PASSWORD_FOR_LINKED" to "false"))!!.blockPasswordForLinked)
     }
 
     @Test
-    fun `session cookie SameSite is configurable, Lax by default, never None`() {
+    fun `password block for linked users does not depend on OIDC being enabled or valid`() {
+        fun block(env: Map<String, String?>) = OidcConfig.blockPasswordForLinked { env[it] }
+        assertTrue(block(emptyMap()), "on by default, even with OIDC never configured")
+        assertTrue(block(base), "on by default with OIDC enabled")
+        assertTrue(block(base + ("OIDC_ENABLED" to "false")), "OIDC switched off keeps the block")
+        val broken = base - "OIDC_CLIENT_ID"
+        assertNull(OidcConfig.loadOrDisable({ broken[it] }) {})
+        assertTrue(block(broken), "an invalid OIDC config keeps the block")
+        assertTrue(block(base + ("OIDC_BLOCK_PASSWORD_FOR_LINKED" to " ")), "blank = default")
+        assertFalse(block(base + ("OIDC_BLOCK_PASSWORD_FOR_LINKED" to "false")))
+        assertFalse(block(mapOf("OIDC_BLOCK_PASSWORD_FOR_LINKED" to "false")), "explicit opt-out works without OIDC too")
+    }
+
+    @Test
+    fun `session cookie SameSite is configurable, Lax by default, never None, typo fails safe to Strict`() {
         assertEquals(SameSitePolicy.LAX, SameSitePolicy.parse(null))
+        assertEquals(SameSitePolicy.LAX, SameSitePolicy.parse(""))
         assertEquals(SameSitePolicy.STRICT, SameSitePolicy.parse(" Strict "))
         val warnings = mutableListOf<String>()
-        assertEquals(SameSitePolicy.LAX, SameSitePolicy.parse("none", warnings::add))
-        assertEquals(1, warnings.size)
+        assertEquals(SameSitePolicy.STRICT, SameSitePolicy.parse("none", warnings::add))
+        assertEquals(SameSitePolicy.STRICT, SameSitePolicy.parse("stirct", warnings::add))
+        assertEquals(2, warnings.size)
+        assertTrue(warnings.all { "Strict" in it })
         for (policy in SameSitePolicy.entries) testApplication {
             application {
                 installSecurity(TEST_SECRET, policy)
@@ -131,6 +149,9 @@ class OidcConfigTest {
         assertFails { load(base + ("OIDC_SCOPES" to "email profile")) }
         assertFails { load(base + ("OIDC_SESSION_TTL_HOURS" to "0")) }
         assertFails { load(base + ("OIDC_SESSION_TTL_HOURS" to "100000")) }
+        assertFails { load(base + ("OIDC_METADATA_MAX_STALE_HOURS" to "-1")) }
+        assertFails { load(base + ("OIDC_METADATA_MAX_STALE_HOURS" to "169")) }
+        assertFails { load(base + ("OIDC_METADATA_MAX_STALE_HOURS" to "1.5")) }
         assertFails { load(base + ("OIDC_CLIENT_SECRET_FILE" to "/nonexistent/secret")) }
     }
 
@@ -154,18 +175,20 @@ class OidcConfigTest {
     }
 
     @Test
-    fun `password login is refused for SSO-linked users while OIDC is active, kept for unlinked ones`() {
+    fun `password login is refused for SSO-linked users whether or not OIDC is active, kept for unlinked ones`() {
         val db = freshDb()
         try {
             val svc = org.claudeproxy.repo.UserRepo.create("svc", "svc-pw", listOf("admin"), emptyList(), null)
             org.jetbrains.exposed.sql.transactions.transaction { org.claudeproxy.repo.IdentityRepo.link(1, "https://idp.example.com", "sub-admin") }
-            data class Case(val oidc: OidcConfig?, val user: String, val pw: String, val expected: HttpStatusCode)
+            data class Case(val oidc: OidcConfig?, val block: Boolean, val user: String, val pw: String, val expected: HttpStatusCode)
             val cases = listOf(
-                Case(oidcConfig(), "admin", "admin", HttpStatusCode.Forbidden),            // linked → SSO only
-                Case(oidcConfig(), "svc", "svc-pw", HttpStatusCode.OK),                    // unlinked service/break-glass user
-                Case(oidcConfig(blockPasswordForLinked = false), "admin", "admin", HttpStatusCode.OK),
-                Case(null, "admin", "admin", HttpStatusCode.OK),                           // OIDC off/broken → break-glass
-                Case(oidcConfig(), "admin", "wrong", HttpStatusCode.Unauthorized),         // no oracle before the password
+                Case(oidcConfig(), true, "admin", "admin", HttpStatusCode.Forbidden),      // linked → SSO only
+                Case(oidcConfig(), true, "svc", "svc-pw", HttpStatusCode.OK),              // unlinked service/break-glass user
+                Case(oidcConfig(), false, "admin", "admin", HttpStatusCode.OK),            // explicit opt-out
+                Case(null, true, "admin", "admin", HttpStatusCode.Forbidden),              // OIDC off/broken: still SSO only
+                Case(null, true, "svc", "svc-pw", HttpStatusCode.OK),                      // …break-glass = an unlinked user
+                Case(null, false, "admin", "admin", HttpStatusCode.OK),
+                Case(oidcConfig(), true, "admin", "wrong", HttpStatusCode.Unauthorized),   // no oracle before the password
             )
             for (c in cases) testApplication {
                 application {
@@ -175,7 +198,7 @@ class OidcConfigTest {
                     val datapath = DatapathService(pool)
                     routing {
                         adminRoutes(pool, LimitProbe(pool, "http://127.0.0.1:1"), "", ChatEngine(pool, "http://127.0.0.1:1", datapath),
-                            datapath, "http://127.0.0.1:1", c.oidc)
+                            datapath, "http://127.0.0.1:1", c.oidc, c.block)
                     }
                 }
                 val r = client.post("/api/auth/login") { contentType(ContentType.Application.Json); setBody("""{"username":"${c.user}","password":"${c.pw}"}""") }

@@ -67,6 +67,8 @@ class OidcClient(
     private val connectTimeoutMs: Int = 5_000,
     private val readTimeoutMs: Int = 10_000,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** Runs a due metadata refresh off the login path. Tests pass a synchronous or capturing executor. */
+    private val refreshInBackground: (Runnable) -> Unit = { r -> Thread(r, "oidc-metadata-refresh").apply { isDaemon = true }.start() },
 ) {
     private val log = org.slf4j.LoggerFactory.getLogger("OidcClient")
 
@@ -74,36 +76,66 @@ class OidcClient(
         val metadata: OIDCProviderMetadata,
         val validator: IDTokenValidator,
         val clientAuth: ClientAuthentication,
+        /** Wall-clock ms of the successful discovery this provider came from. */
+        val loadedAt: Long,
         /** Wall-clock ms after which discovery is re-fetched. */
         val refreshAt: Long,
     )
 
     @Volatile private var provider: Provider? = null
+    /** After a failed synchronous load: fail fast until then instead of queueing every login behind timeouts. */
+    @Volatile private var failedUntil: Long = 0L
+    private val refreshing = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Last good metadata may serve until it is this old (hourly refresh + `OIDC_METADATA_MAX_STALE_HOURS`). */
+    private fun servable(p: Provider, now: Long) = now - p.loadedAt <= METADATA_TTL_MS + config.metadataMaxStaleSeconds * 1000
 
     /**
      * Discovery is resolved lazily (an IdP outage must not stop the service from booting) and
-     * refreshed hourly. A failed *refresh* keeps serving the last good metadata/JWKS source (WARN,
-     * retry in a minute) instead of making every login wait for timeouts; only a first-ever failure
-     * surfaces as `unavailable`.
+     * refreshed hourly. A due refresh runs in the background while logins keep using the current
+     * metadata/JWKS source; a failed refresh is retried a minute later (WARN). The last good
+     * metadata is served for at most `OIDC_METADATA_MAX_STALE_HOURS` past its refresh time — after
+     * that, or before the first successful discovery, a login loads it synchronously and fails with
+     * `unavailable` if the IdP is unreachable.
      */
     private fun provider(): Provider {
-        provider?.takeIf { clock() < it.refreshAt }?.let { return it }
-        synchronized(this) {
-            val current = provider
-            if (current != null && clock() < current.refreshAt) return current
-            val fresh = try {
-                load()
-            } catch (e: Exception) {
-                if (current != null) {
-                    log.warn("OIDC discovery refresh failed ({}); keeping the previous metadata", e.javaClass.simpleName)
-                    return Provider(current.metadata, current.validator, current.clientAuth, clock() + RETRY_MS)
-                        .also { provider = it }
+        val now = clock()
+        val current = provider
+        if (current != null && now < current.refreshAt) return current
+        if (current != null && servable(current, now)) {
+            if (refreshing.compareAndSet(false, true)) {
+                try {
+                    refreshInBackground(Runnable { try { refresh() } finally { refreshing.set(false) } })
+                } catch (e: Exception) {
+                    refreshing.set(false)
+                    log.warn("OIDC metadata refresh could not be scheduled ({})", e.javaClass.simpleName)
                 }
-                if (e is OidcException) throw e
-                throw OidcException(OidcError.UNAVAILABLE, "OIDC discovery failed: ${e.javaClass.simpleName}", e)
             }
-            provider = fresh
-            return fresh
+            return current
+        }
+        if (now < failedUntil) throw OidcException(OidcError.UNAVAILABLE, "OIDC discovery failed recently; retrying after a short backoff")
+        return refresh()
+            ?: throw OidcException(OidcError.UNAVAILABLE, "OIDC discovery failed and no usable metadata is cached")
+    }
+
+    /** Loads discovery under the lock. Null when it failed (the reason is logged). */
+    private fun refresh(): Provider? = synchronized(this) {
+        val current = provider
+        if (current != null && clock() < current.refreshAt) return current // someone else just refreshed
+        try {
+            load().also { provider = it; failedUntil = 0L }
+        } catch (e: Exception) {
+            val now = clock()
+            if (current != null && servable(current, now)) {
+                log.warn("OIDC discovery refresh failed ({}); keeping the previous metadata (loaded {} s ago)",
+                    e.javaClass.simpleName, (now - current.loadedAt) / 1000)
+                provider = Provider(current.metadata, current.validator, current.clientAuth, current.loadedAt, now + RETRY_MS)
+            } else {
+                log.error("OIDC discovery failed ({}){}", e.javaClass.simpleName,
+                    if (current != null) "; cached metadata is older than OIDC_METADATA_MAX_STALE_HOURS and no longer used" else "")
+                failedUntil = now + FAILURE_BACKOFF_MS
+            }
+            null
         }
     }
 
@@ -140,7 +172,8 @@ class OidcClient(
         } else {
             error("provider supports neither client_secret_basic nor client_secret_post")
         }
-        return Provider(meta, validator, clientAuth, clock() + METADATA_TTL_MS)
+        val now = clock()
+        return Provider(meta, validator, clientAuth, now, now + METADATA_TTL_MS)
     }
 
     /** Builds the authorization redirect for a fresh transaction. */
@@ -246,6 +279,7 @@ class OidcClient(
     companion object {
         private const val METADATA_TTL_MS = 60L * 60 * 1000
         private const val RETRY_MS = 60L * 1000
+        private const val FAILURE_BACKOFF_MS = 10L * 1000
         private const val MAX_CLOCK_SKEW_SECONDS = 60
         private const val JWKS_SIZE_LIMIT = 256 * 1024
         private val ASYMMETRIC_ALGS = setOf(

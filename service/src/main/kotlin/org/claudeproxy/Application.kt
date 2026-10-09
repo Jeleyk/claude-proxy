@@ -56,6 +56,7 @@ fun main() {
     val scheduler = LimitScheduler(pool, probe)
 
     log.info("Starting claude-proxy on {}:{} (upstream {})", config.bindHost, config.port, config.upstreamBaseUrl)
+    if (!config.blockPasswordForLinked) log.warn("OIDC_BLOCK_PASSWORD_FOR_LINKED=false: SSO-linked users may also sign in with a password")
     config.oidc?.let {
         log.info("OIDC login enabled: {}", it)
         if (it.allowedGroups.isEmpty()) log.warn("OIDC_ALLOWED_GROUPS is empty: every identity the IdP authenticates for this client passes the group gate")
@@ -157,7 +158,7 @@ fun Application.module(
         proxyRoutes(engine)
 
         // Management REST API (the chat UI's own API is mounted under /api by adminRoutes).
-        adminRoutes(pool, probe, config.publicBaseUrl, chatEngine, datapath, config.upstreamBaseUrl, config.oidc)
+        adminRoutes(pool, probe, config.publicBaseUrl, chatEngine, datapath, config.upstreamBaseUrl, config.oidc, config.blockPasswordForLinked)
 
         // Private control API for the Go gateway (never routed publicly by nginx).
         internalRoutes(datapath, config.internalToken)

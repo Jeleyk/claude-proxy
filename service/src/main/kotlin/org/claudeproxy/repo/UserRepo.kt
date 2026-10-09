@@ -14,6 +14,7 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.deleteReturning
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -203,8 +204,14 @@ object UserRepo {
     internal fun userIdByEmail(email: String): Int? =
         Users.selectAll().where { Users.email eq email }.firstOrNull()?.get(Users.id)
 
+    /**
+     * Test seam: false skips the pre-check, reproducing the case where a concurrent writer takes the
+     * email between [checkEmailFree] and the insert/update (only the unique index catches it then).
+     */
+    @Volatile internal var emailPrecheck: Boolean = true
+
     private fun checkEmailFree(email: String?, exceptUserId: Int?) {
-        if (email == null) return
+        if (email == null || !emailPrecheck) return
         val owner = userIdByEmail(email)
         if (owner != null && owner != exceptUserId) throw EmailTakenException()
     }
@@ -308,21 +315,25 @@ object UserRepo {
      */
     fun offboard(userId: Int): OffboardResult? {
         val (result, cacheKeys) = transaction {
-            // Disable first, then collect the keys of exactly the rows deleted below, in the same
-            // transaction — a token minted concurrently cannot slip between collect and delete.
             val n = Users.update({ Users.id eq userId }) {
                 it[enabled] = false
                 it[sessionVersion] = Users.sessionVersion + 1L
             }
             if (n == 0) return@transaction null to emptyList()
-            val keys = tokenCacheKeys(userId)
-            OffboardResult(
-                proxyTokensRevoked = org.claudeproxy.db.ProxyTokens.deleteWhere { org.claudeproxy.db.ProxyTokens.userId eq userId },
-                routingTokensRevoked = org.claudeproxy.db.RoutingTokens.deleteWhere { org.claudeproxy.db.RoutingTokens.userId eq userId },
-            ) to keys
+            // DELETE … RETURNING: the cache keys are taken from exactly the rows this statement
+            // deleted, including a token committed by a concurrent request after the transaction
+            // began (Postgres READ COMMITTED would delete it, but a separate SELECT would miss it).
+            val proxy = org.claudeproxy.db.ProxyTokens.deleteReturning(listOf(org.claudeproxy.db.ProxyTokens.tokenHash)) {
+                org.claudeproxy.db.ProxyTokens.userId eq userId
+            }.map { "cp:tok:${it[org.claudeproxy.db.ProxyTokens.tokenHash]}" }
+            val routing = org.claudeproxy.db.RoutingTokens.deleteReturning(listOf(org.claudeproxy.db.RoutingTokens.tokenHash)) {
+                org.claudeproxy.db.RoutingTokens.userId eq userId
+            }.map { "cp:rtok:${it[org.claudeproxy.db.RoutingTokens.tokenHash]}" }
+            OffboardResult(proxyTokensRevoked = proxy.size, routingTokensRevoked = routing.size) to (proxy + routing)
         }
         // After the commit, or a concurrent resolve could re-cache a token that is about to vanish.
-        // A resolve that still hits a stale entry is refused anyway: every datapath re-checks the
+        // A token minted after this commit by a request that was already past its auth check is not
+        // deleted here — but it, like any stale cache entry, is refused: every datapath re-checks the
         // owner's live enabled state/permissions (DatapathService, ProxyRoutes, TokenUsageRoutes).
         cacheKeys.forEach(MemoryCache::evict)
         return result

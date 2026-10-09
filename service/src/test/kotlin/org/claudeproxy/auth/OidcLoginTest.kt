@@ -95,10 +95,34 @@ class OidcLoginTest {
         assertFalse(dto.enabled)
         assertTrue(dto.roles.isEmpty() && dto.permissions.isEmpty() && dto.allowedGroups.isEmpty())
         assertTrue(UserRepo.permissionsOf(uid).isEmpty())
-        // Logging in again before approval is refused; an admin enabling + assigning a role lets them in.
-        assertEquals(OidcError.FORBIDDEN, denied(login(oidcConfig(jit = true), id(sub = "new", email = "bob@example.com"))))
+        // Logging in again before approval still says "pending"; an admin enabling + assigning a role lets them in.
+        assertEquals(OidcError.PENDING, denied(login(oidcConfig(jit = true), id(sub = "new", email = "bob@example.com"))))
+        assertEquals(OidcError.PENDING, denied(login(oidcConfig(), id(sub = "new", email = "bob@example.com"))), "also once JIT is switched off")
         UserRepo.update(uid, null, true, listOf("user"), null, null, false)
         assertIs<Success>(login(oidcConfig(jit = true), id(sub = "new", email = "bob@example.com")))
+        // Approved, then switched off (or offboarded): that is "forbidden", not "pending".
+        UserRepo.update(uid, null, false, null, null, null, false)
+        assertEquals(OidcError.FORBIDDEN, denied(login(oidcConfig(jit = true), id(sub = "new", email = "bob@example.com"))))
+        UserRepo.update(uid, null, true, null, null, null, false)
+        UserRepo.offboard(uid)
+        assertEquals(OidcError.FORBIDDEN, denied(login(oidcConfig(jit = true), id(sub = "new", email = "bob@example.com"))))
+    }
+
+    @Test
+    fun `linking ends the user's existing panel sessions, the SSO session gets the new generation`() {
+        val before = UserRepo.findAuth(alice)!!.sessionVersion
+        val r = assertIs<Success>(login(oidcConfig(linkByEmail = true), id()))
+        val after = UserRepo.findAuth(alice)!!.sessionVersion
+        assertTrue(after > before, "pre-link (password) sessions are revoked")
+        assertEquals(after, r.user.sessionVersion, "the session issued for this login is valid")
+        // A returning login does not revoke anything.
+        assertEquals(after, assertIs<Success>(login(oidcConfig(linkByEmail = true), id())).user.sessionVersion)
+        assertEquals(after, UserRepo.findAuth(alice)!!.sessionVersion)
+        // Any link (also an admin/test-side one) bumps the generation.
+        val bob = UserRepo.create("bob", "pw", listOf("user"), emptyList(), null)
+        val v = UserRepo.findAuth(bob)!!.sessionVersion
+        transaction { IdentityRepo.link(bob, iss, "sub-bob") }
+        assertEquals(v + 1, UserRepo.findAuth(bob)!!.sessionVersion)
     }
 
     @Test
@@ -180,5 +204,25 @@ class OidcLoginTest {
         assertFailsWith<org.claudeproxy.repo.EmailTakenException> {
             UserRepo.update(bob, null, null, null, null, null, false, email = "alice@example.com")
         }
+    }
+
+    @Test
+    fun `losing the check-then-write race on an email still reports EmailTaken, not a SQL error`() {
+        val bob = UserRepo.create("bob", "pw", listOf("user"), emptyList(), null)
+        UserRepo.emailPrecheck = false // the concurrent writer got in after the pre-check
+        try {
+            assertFailsWith<org.claudeproxy.repo.EmailTakenException> {
+                UserRepo.update(bob, null, null, null, null, null, false, email = "alice@example.com")
+            }
+            assertFailsWith<org.claudeproxy.repo.EmailTakenException> {
+                UserRepo.create("carol", "pw", listOf("user"), emptyList(), null, email = "alice@example.com")
+            }
+            // A constraint violation that is not about the email is not disguised as one.
+            assertFailsWith<org.jetbrains.exposed.exceptions.ExposedSQLException> {
+                UserRepo.create("bob", "pw", listOf("user"), emptyList(), null, email = "new@example.com")
+            }
+        } finally { UserRepo.emailPrecheck = true }
+        assertNull(UserRepo.get(bob)!!.email)
+        assertFalse(UserRepo.list().any { it.username == "carol" })
     }
 }

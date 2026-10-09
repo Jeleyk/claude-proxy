@@ -1,6 +1,8 @@
 package org.claudeproxy.repo
 
 import org.claudeproxy.db.UserIdentities
+import org.claudeproxy.db.Users
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
@@ -25,7 +27,13 @@ object IdentityRepo {
             .where { (UserIdentities.userId eq userId) and (UserIdentities.issuer eq issuer) }
             .any()
 
+    /**
+     * Links and ends every existing panel session of [userId] (session generation bump): sessions
+     * opened with the password before the link would otherwise outlive it by up to 30 days and
+     * survive an IdP-side removal. Callers that go on to open a session must re-read the user.
+     */
     fun link(userId: Int, issuer: String, subject: String) {
+        Users.update({ Users.id eq userId }) { it[Users.sessionVersion] = Users.sessionVersion + 1L }
         val now = Instant.now()
         UserIdentities.insert {
             it[UserIdentities.userId] = userId

@@ -176,7 +176,7 @@ class OidcFlowTest {
     @Test
     fun `failed metadata refresh keeps serving the last good provider`() {
         var now = 0L
-        val client = OidcClient(oidcConfig(issuer = idp.issuer), clock = { now })
+        val client = OidcClient(oidcConfig(issuer = idp.issuer), clock = { now }, refreshInBackground = { it.run() })
         val txn = OidcTransactions().begin()!!.second
         client.authorizationUri(txn)
         idp.close() // IdP goes away
@@ -186,6 +186,47 @@ class OidcFlowTest {
         now += 1000
         assertNotNull(client.authorizationUri(txn), "within the retry backoff: no new fetch")
         assertTrue(System.nanoTime() - started < 30_000_000_000L)
+    }
+
+    @Test
+    fun `due refresh runs off the login path, stale metadata is bounded by OIDC_METADATA_MAX_STALE_HOURS`() {
+        var now = 0L
+        val queued = mutableListOf<Runnable>()
+        val client = OidcClient(oidcConfig(issuer = idp.issuer, metadataMaxStaleSeconds = 3600), clock = { now }, refreshInBackground = { queued += it })
+        val txn = OidcTransactions().begin()!!.second
+        client.authorizationUri(txn)
+        assertTrue(queued.isEmpty(), "first discovery is synchronous")
+        idp.close()
+
+        now += 61 * 60 * 1000 // refresh due
+        assertNotNull(client.authorizationUri(txn), "served from the current metadata while the refresh is pending")
+        assertNotNull(client.authorizationUri(txn))
+        assertEquals(1, queued.size, "a single refresh is scheduled, nobody waits for it")
+        queued.removeAt(0).run() // fails: IdP is gone
+        assertNotNull(client.authorizationUri(txn), "within max stale: still served")
+
+        now += 59 * 60 * 1000 // 2h after load: TTL (1h) + max stale (1h) not yet exceeded
+        assertNotNull(client.authorizationUri(txn))
+        queued.forEach { it.run() }; queued.clear()
+
+        now += 2 * 60 * 1000 // past TTL + max stale
+        val e = assertFailsWith<OidcException> { client.authorizationUri(txn) }
+        assertEquals(OidcError.UNAVAILABLE, e.code)
+        assertTrue(queued.isEmpty(), "expired metadata is never served, no background refresh either")
+        val started = System.nanoTime()
+        assertFailsWith<OidcException> { client.authorizationUri(txn) }
+        assertTrue(System.nanoTime() - started < 1_000_000_000L, "short failure backoff: no new fetch, no wait")
+    }
+
+    @Test
+    fun `max stale 0 never serves expired metadata`() {
+        var now = 0L
+        val client = OidcClient(oidcConfig(issuer = idp.issuer, metadataMaxStaleSeconds = 0), clock = { now }, refreshInBackground = { error("no background refresh expected") })
+        val txn = OidcTransactions().begin()!!.second
+        client.authorizationUri(txn)
+        idp.close()
+        now += 60 * 60 * 1000 + 1
+        assertEquals(OidcError.UNAVAILABLE, assertFailsWith<OidcException> { client.authorizationUri(txn) }.code)
     }
 
     @Test

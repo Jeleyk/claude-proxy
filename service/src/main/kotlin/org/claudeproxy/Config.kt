@@ -36,6 +36,8 @@ data class Config(
     val oidc: OidcConfig? = null,
     // SameSite attribute of the panel session cookie (SESSION_COOKIE_SAMESITE=lax|strict).
     val sessionSameSite: SameSitePolicy = SameSitePolicy.LAX,
+    // OIDC_BLOCK_PASSWORD_FOR_LINKED; independent of whether OIDC is enabled/valid (see OidcConfig).
+    val blockPasswordForLinked: Boolean = true,
 ) {
     companion object {
         fun load(): Config {
@@ -69,6 +71,7 @@ data class Config(
                 anthropicProxy = AnthropicProxy.parse(System.getenv("ANTHROPIC_PROXY_URL") ?: System.getProperty("ANTHROPIC_PROXY_URL")),
                 oidc = OidcConfig.loadOrDisable(::envOrProp) { LoggerFactory.getLogger("Config").error(it) },
                 sessionSameSite = SameSitePolicy.parse(env("SESSION_COOKIE_SAMESITE")) { LoggerFactory.getLogger("Config").warn(it) },
+                blockPasswordForLinked = OidcConfig.blockPasswordForLinked(::envOrProp),
             )
         }
 

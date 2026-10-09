@@ -35,9 +35,9 @@ internal fun oidcConfig(
     linkByEmail: Boolean = false,
     jit: Boolean = false,
     jitRole: String? = null,
-    blockPasswordForLinked: Boolean = true,
     disablePasswordLogin: Boolean = false,
     clientSecret: String = "test-client-secret",
+    metadataMaxStaleSeconds: Long = OidcConfig.DEFAULT_METADATA_MAX_STALE_HOURS * 3600,
 ) = OidcConfig(
     issuer = issuer,
     clientId = "claude-proxy",
@@ -52,6 +52,6 @@ internal fun oidcConfig(
     linkByEmail = linkByEmail,
     jitProvisioning = jit,
     jitRole = jitRole,
-    blockPasswordForLinked = blockPasswordForLinked,
     sessionTtlSeconds = 3600,
+    metadataMaxStaleSeconds = metadataMaxStaleSeconds,
 )

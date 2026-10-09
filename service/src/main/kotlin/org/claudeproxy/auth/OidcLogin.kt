@@ -25,7 +25,8 @@ sealed interface OidcLoginResult {
  *     `email_verified=true`, only to an enabled local user that has no identity for this issuer.
  *  4. Otherwise JIT provisioning (when enabled) creates an account — by default disabled and
  *     role-less until an admin approves it, or with the configured `OIDC_JIT_ROLE`.
- * A disabled local user is refused at every step.
+ * A disabled local user is refused at every step (as `pending` while it is an unapproved JIT
+ * request, i.e. disabled without any role). Linking ends the user's existing panel sessions.
  */
 class OidcLogin(private val config: OidcConfig) {
     private val log = LoggerFactory.getLogger("OidcLogin")
@@ -64,7 +65,13 @@ class OidcLogin(private val config: OidcConfig) {
     private fun resolveInTx(id: OidcIdentity): OidcLoginResult {
         IdentityRepo.userIdFor(id.issuer, id.subject)?.let { uid ->
             val user = UserRepo.findAuth(uid)
-            if (user == null || !user.enabled) return OidcLoginResult.Denied(OidcError.FORBIDDEN, "linked user $uid is disabled")
+            if (user == null) return OidcLoginResult.Denied(OidcError.FORBIDDEN, "linked user $uid is gone")
+            if (!user.enabled) {
+                // A JIT request nobody approved yet (disabled, no role) keeps saying "pending" on
+                // every retry; a disabled user that has a role was switched off deliberately.
+                return if (UserRepo.rolesOf(uid).isEmpty()) OidcLoginResult.Denied(OidcError.PENDING, "linked user $uid awaits approval")
+                else OidcLoginResult.Denied(OidcError.FORBIDDEN, "linked user $uid is disabled")
+            }
             IdentityRepo.touch(id.issuer, id.subject)
             return OidcLoginResult.Success(user, OidcLoginResult.How.LINKED)
         }
@@ -82,7 +89,8 @@ class OidcLogin(private val config: OidcConfig) {
                 }
                 IdentityRepo.link(uid, id.issuer, id.subject)
                 log.info("OIDC: linked subject to existing user id={} by verified email", uid)
-                return OidcLoginResult.Success(user, OidcLoginResult.How.LINKED_BY_EMAIL)
+                // Re-read: link() bumped the session generation (ends pre-link password sessions).
+                return OidcLoginResult.Success(UserRepo.findAuth(uid)!!, OidcLoginResult.How.LINKED_BY_EMAIL)
             }
         }
 

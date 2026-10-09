@@ -25,7 +25,7 @@ internal const val SESSION_TTL_SECONDS = 60L * 60 * 24 * 30
  * SameSite policy of the session cookie. Lax (default) keeps the cookie off cross-site POSTs and
  * subrequests while still allowing it on top-level navigation — which the OIDC callback's redirect
  * to `/` needs. Strict is stricter still and works too (the SPA's own API calls are same-site).
- * `None` is deliberately not offered.
+ * `None` is deliberately not offered; an unrecognised value falls back to Strict (with a WARN).
  */
 enum class SameSitePolicy(val attr: String) {
     LAX("Lax"), STRICT("Strict");
@@ -34,7 +34,8 @@ enum class SameSitePolicy(val attr: String) {
         fun parse(raw: String?, onInvalid: (String) -> Unit = {}): SameSitePolicy = when (raw?.trim()?.lowercase()) {
             null, "", "lax" -> LAX
             "strict" -> STRICT
-            else -> LAX.also { onInvalid("SESSION_COOKIE_SAMESITE=$raw is not lax|strict; using Lax") }
+            // Fail safe: a typo must not weaken the cookie below what the operator was aiming for.
+            else -> STRICT.also { onInvalid("SESSION_COOKIE_SAMESITE=$raw is not lax|strict; using Strict") }
         }
     }
 }
