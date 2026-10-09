@@ -10,8 +10,10 @@ Unchanged by this feature: `cxp_`/`cxr_` API token authentication, the gateways 
 Present even with OIDC off: the `users.email` column and `user_identities` table (additive
 schema), the optional Email field on users, the **Offboard** action
 (`POST /api/users/{id}/offboard`), SSO unlink (`DELETE /api/users/{id}/identities`),
-`GET /api/auth/oidc/config` (answers `enabled:false`) and `SESSION_COOKIE_SAMESITE` (default `Lax`,
-which is what current browsers already assume for a cookie without the attribute).
+`GET /api/auth/oidc/config` (answers `enabled:false`), `SESSION_COOKIE_SAMESITE` (default `Lax`,
+which is what current browsers already assume for a cookie without the attribute) and
+`OIDC_BLOCK_PASSWORD_FOR_LINKED` (default on; it only affects users that have an SSO link, so it
+changes nothing until someone has signed in through SSO).
 
 ## How it works
 
@@ -46,22 +48,27 @@ no hand-rolled crypto.
 | `OIDC_LINK_BY_EMAIL` | `false` | Allow a first login to claim an existing local user by verified email (rules below). |
 | `OIDC_JIT_PROVISIONING` | `false` | Create local accounts for unknown identities. Requires a non-empty `OIDC_ALLOWED_GROUPS`. |
 | `OIDC_JIT_ROLE` | empty | Empty = JIT accounts are created **disabled and without any role** (a pending request; the user sees "waiting for approval" and an admin enables it and picks a role). Set to an existing role name to make JIT accounts usable at once — note that the built-in `user` role can mint `cxp_`/`cxr_` tokens and spend the shared pool (ungrouped accounts are open to every user with `POOL_GLOBAL_USE`), so create a narrower role if that is not intended. |
-| `OIDC_BLOCK_PASSWORD_FOR_LINKED` | `true` | While OIDC is active, users with a linked SSO identity cannot use password login (403 after a correct password) — otherwise removing them at the IdP would not end their access. Unlinked users (break-glass admin, service accounts) keep password login. |
+| `OIDC_BLOCK_PASSWORD_FOR_LINKED` | `true` | Users with a linked SSO identity cannot use password login (403 after a correct password) — otherwise removing them at the IdP would not end their access. Read on its own: it applies **also when OIDC is disabled or its configuration is invalid**, so an `OIDC_*` typo or switching OIDC off does not give linked users their password back. Unlinked users (break-glass admin, service accounts) keep password login. Only `false` turns it off. |
 | `OIDC_SESSION_TTL_HOURS` | `12` | Server-enforced lifetime of SSO sessions (1…720). Password sessions keep 30 days. |
+| `OIDC_METADATA_MAX_STALE_HOURS` | `24` | How long past its hourly refresh the last good discovery document / JWKS source may keep serving logins while refreshes fail (0…168; 0 = never). Beyond that, logins fail with `sso_error=unavailable` until the IdP answers again. |
 | `OIDC_BUTTON_LABEL` | `Sign in with SSO` | Login button text. |
 | `OIDC_DISABLE_PASSWORD_LOGIN` | `false` | `POST /api/auth/login` answers 403. Break-glass = unset and restart. |
 
 An invalid OIDC configuration (missing value, http issuer, wrong callback path, unreadable secret
 file, JIT without a group gate) **disables OIDC** and logs an ERROR at startup — it does not stop
 the service, because the same process serves the datapath control API. With OIDC disabled the
-button disappears and password login works for everyone (including linked users): that is the
-break-glass path. An unreachable IdP doesn't stop startup either — discovery is lazy, the button
-ends on `sso_error=unavailable`, and an hourly metadata refresh that fails keeps using the last good
-metadata/JWKS.
+button disappears and password login works again — for **unlinked** users only while
+`OIDC_BLOCK_PASSWORD_FOR_LINKED` is on (default). The break-glass path is therefore a dedicated
+admin user that is never linked to an SSO identity (keep its password in your secret store);
+`OIDC_BLOCK_PASSWORD_FOR_LINKED=false` + restart is the last resort for linked users. An
+unreachable IdP doesn't stop startup either — discovery is lazy and the button ends on
+`sso_error=unavailable`. The hourly metadata refresh runs in the background (logins don't wait for
+it); if it fails, the last good metadata/JWKS keeps serving for up to
+`OIDC_METADATA_MAX_STALE_HOURS`, retried every minute, then logins fail until the IdP is back.
 
 Related core setting: `SESSION_COOKIE_SAMESITE` = `lax` (default) or `strict` for the panel session
 cookie. Both work with SSO — the post-login redirect is a top-level navigation and the SPA's API
-calls are same-site.
+calls are same-site. Any other value (a typo, or `none`) falls back to `Strict` with a WARN.
 
 The redirect URI's origin is what the browser must use: cookies are host-bound, so the button
 starts the flow on that origin (`/api/auth/oidc/config` returns it as `startUrl`). The callback is
@@ -92,10 +99,13 @@ Applied in this order on every login:
    `sub`) says `email_verified: true`, and exactly one local user has that admin-set email
    (Users → Edit → Email, stored lower-case, unique), that user is enabled and has no identity for
    this issuer yet — link and log in. A user already linked to another subject is never re-pointed.
+   Linking ends every panel session the user already had (session generation bump), so a
+   password session opened before the link does not outlive it.
 4. **JIT** (`OIDC_JIT_PROVISIONING=true` only): create a user with **no account-group access**, a
    random unusable password, the verified email if unused, and a sanitised ASCII username
    (suffixed on collision — an IdP `preferred_username` of `admin` becomes `admin-2`). By default
-   the account is disabled and role-less until an admin approves it (`sso_error=pending`); with
+   the account is disabled and role-less until an admin approves it (`sso_error=pending`, also on
+   every retry until then; a linked user that is disabled *and has a role* gets `forbidden`); with
    `OIDC_JIT_ROLE` it gets that role and is usable immediately.
 5. Otherwise: `sso_error=no_account`.
 
@@ -128,8 +138,9 @@ e.g. after a wrong link; the next SSO login goes through steps 3–5 again.
 
 API tokens are independent of the IdP: an IdP-side removal alone does **not** revoke them. Run
 the offboard action as part of your leaver process. Password login is not a back door for linked
-users while `OIDC_BLOCK_PASSWORD_FOR_LINKED` is on (default); if you turn it off, or the user was
-never linked, an IdP removal leaves their password working — Offboard is then mandatory. (Disabling a user via the regular user edit
+users while `OIDC_BLOCK_PASSWORD_FOR_LINKED` is on (default, independent of OIDC being enabled);
+if you turn it off, or the user was never linked, an IdP removal leaves their password working —
+Offboard is then mandatory. (Disabling a user via the regular user edit
 also stops their tokens — a disabled owner's tokens never resolve — but leaves them in place.)
 
 ## Example: Authentik
@@ -169,14 +180,16 @@ leaving email linking off and relying on JIT provisioning.
 | CSRF on new admin actions | Offboard/unlink require `X-Requested-With` plus a same-host `Origin`; the session cookie is SameSite=Lax (configurable Strict). Existing JSON endpoints were already protected by their content type. |
 | Open redirect | Success always redirects to `/`; failures to `/?sso_error=<fixed code>`; no return-to parameter. |
 | Token / secret leakage | No codes or tokens in logs or URLs the app builds; IdP error text is not reflected; callback responses send `Cache-Control: no-store` and `Referrer-Policy: no-referrer`; client secret redacted from config logging, readable from a 0600 file. |
-| Leaver keeps access | IdP gates run on every login; linked users cannot fall back to password login; SSO sessions are short-lived; Offboard revokes sessions and all API tokens at once; disabled owners' tokens are rejected on every datapath. |
+| Leaver keeps access | IdP gates run on every login; linked users cannot fall back to password login while `OIDC_BLOCK_PASSWORD_FOR_LINKED` is on (default — also with OIDC disabled or misconfigured); linking ends pre-link panel sessions; SSO sessions are short-lived (`OIDC_SESSION_TTL_HOURS`). Residual: API tokens are not tied to the IdP, and an *unlinked* user (or any user with the block turned off) keeps their password — run Offboard, which revokes sessions and all API tokens at once; disabled owners' tokens are rejected on every datapath. |
 | DoS on `/start` | In-memory transaction store bounded to 10 000 live entries (503 beyond); a transaction is dropped at once when discovery fails. Rate-limit per client at the reverse proxy, e.g. `limit_req_zone $binary_remote_addr zone=oidc:1m rate=10r/m;` and `location /api/auth/oidc/ { limit_req zone=oidc burst=10 nodelay; proxy_pass …; }`. |
-| IdP outage | Lazy discovery (service still boots); password login remains available unless explicitly disabled. |
+| IdP outage | Lazy discovery (service still boots); background refresh with bounded stale metadata (`OIDC_METADATA_MAX_STALE_HOURS`); password login remains available for unlinked users (break-glass admin) unless explicitly disabled. |
 
 Cookie details: the transaction cookie is `HttpOnly; SameSite=Lax; Path=/api/auth/oidc;
 Max-Age=600` and `Secure` when the redirect URI is HTTPS. It is Lax rather than Strict on
 purpose — the callback is a cross-site top-level navigation from the IdP and a Strict cookie would
-not be sent on it. The panel session cookie itself is unchanged.
+not be sent on it. The panel session cookie keeps its name, format and signing; what changed is an
+explicit `SameSite` attribute (`SESSION_COOKIE_SAMESITE`, default `Lax`) and, for SSO logins, a
+shorter server-enforced lifetime (`OIDC_SESSION_TTL_HOURS`) signed into the session.
 
 Rollback: the schema is additive and `user_identities.user_id` is `ON DELETE CASCADE`, so the
 previous release boots on the upgraded database and can still delete users that have SSO links.
