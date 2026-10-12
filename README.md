@@ -199,7 +199,7 @@ a "Sign in with SSO" button to the panel (Authorization Code + PKCE, ID token va
 Nimbus SDK against the provider's JWKS). Identities link to local users by `(issuer, sub)`;
 email linking, JIT provisioning (pending admin approval by default), group and email-domain gates
 are opt-in. Admins can **offboard** a user (disable, end sessions, revoke every `cxp_`/`cxr_`
-token) in one action — available with or without OIDC. API token authentication is unchanged. Setup, an Authentik example and the threat model:
+token) in one action — available with or without OIDC. API token authentication is unchanged. Setup and operational notes:
 [`docs/OIDC.md`](docs/OIDC.md).
 
 ## Security notes
