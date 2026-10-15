@@ -14,6 +14,7 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.deleteReturning
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -22,6 +23,11 @@ import org.jetbrains.exposed.sql.update
 import java.time.Instant
 
 data class UserAuth(val id: Int, val username: String, val enabled: Boolean, val permissions: Set<Permission>, val sessionVersion: Long = 0L)
+
+/** What an offboarding removed. Tokens are deleted (not just disabled), so a re-enabled user starts with none. */
+data class OffboardResult(val proxyTokensRevoked: Int, val routingTokensRevoked: Int)
+
+class EmailTakenException : RuntimeException("Email already used by another user")
 
 object UserRepo {
 
@@ -145,6 +151,8 @@ object UserRepo {
             dailyRoutingCostLimit = row[Users.dailyRoutingCostLimit],
             dailyChatCostLimit = row[Users.dailyChatCostLimit],
             preferGlobalPool = row[Users.preferGlobalPool],
+            email = row[Users.email],
+            ssoLinked = IdentityRepo.isLinked(uid),
             todayCost = today.cost,
             todayRoutingCost = todayRouting.cost,
             todayChatCost = todayChat.cost,
@@ -181,11 +189,41 @@ object UserRepo {
         }
     }
 
+    /**
+     * Normalizes an admin-entered email for [Users.email]: trimmed, lower-cased, null when blank.
+     * Shape check only — the address is never mailed, it just has to compare equal to an IdP claim.
+     */
+    fun normalizeEmail(raw: String?): String? {
+        val e = raw?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+        require(e.length <= 320 && e.count { it == '@' } == 1 && !e.startsWith('@') && !e.endsWith('@') &&
+            e.none { it.isWhitespace() || it.isISOControl() }) { "invalid email" }
+        return e
+    }
+
+    /** Caller's transaction. Lookup by normalized email. */
+    internal fun userIdByEmail(email: String): Int? =
+        Users.selectAll().where { Users.email eq email }.firstOrNull()?.get(Users.id)
+
+    /**
+     * Test seam: false skips the pre-check, reproducing the case where a concurrent writer takes the
+     * email between [checkEmailFree] and the insert/update (only the unique index catches it then).
+     */
+    @Volatile internal var emailPrecheck: Boolean = true
+
+    private fun checkEmailFree(email: String?, exceptUserId: Int?) {
+        if (email == null || !emailPrecheck) return
+        val owner = userIdByEmail(email)
+        if (owner != null && owner != exceptUserId) throw EmailTakenException()
+    }
+
     fun create(
         username: String, password: String, roleNames: List<String>, groupIds: List<Int>,
         dailyCostLimit: Double?, dailyRoutingCostLimit: Double? = null, dailyChatCostLimit: Double? = null,
-    ): Int = transaction {
+        email: String? = null,
+    ): Int = emailRace(email) { transaction {
+        checkEmailFree(email, null)
         val uid = Users.insert {
+            it[Users.email] = email
             it[Users.username] = username
             it[passwordHash] = Passwords.hash(password)
             it[enabled] = true
@@ -197,6 +235,17 @@ object UserRepo {
         setRoles(uid, roleNames)
         setAllowedGroups(uid, groupIds)
         uid
+    } }
+
+    /**
+     * The pre-check in [checkEmailFree] can race a concurrent write; the unique index is the real
+     * guard. Turn that violation into [EmailTakenException] (→ 409, no SQL text to the client).
+     */
+    private fun <T> emailRace(email: String?, block: () -> T): T = try {
+        block()
+    } catch (e: org.jetbrains.exposed.exceptions.ExposedSQLException) {
+        if (email != null && transaction { userIdByEmail(email) } != null) throw EmailTakenException()
+        throw e
     }
 
     fun update(
@@ -204,9 +253,12 @@ object UserRepo {
         dailyCostLimit: Double?, clearDailyLimit: Boolean,
         dailyRoutingCostLimit: Double? = null, clearRoutingLimit: Boolean = false,
         dailyChatCostLimit: Double? = null, clearChatLimit: Boolean = false,
+        email: String? = null, clearEmail: Boolean = false,
     ) {
-        transaction {
+        emailRace(email.takeUnless { clearEmail }) { transaction {
+            if (!clearEmail) checkEmailFree(email, userId)
             Users.update({ Users.id eq userId }) {
+                if (clearEmail) it[Users.email] = null else if (email != null) it[Users.email] = email
                 if (password != null) it[passwordHash] = Passwords.hash(password)
                 if (password != null || enabled == false) it[sessionVersion] = Users.sessionVersion + 1L
                 if (enabled != null) it[Users.enabled] = enabled
@@ -216,7 +268,7 @@ object UserRepo {
             }
             if (roleNames != null) setRoles(userId, roleNames)
             if (groupIds != null) setAllowedGroups(userId, groupIds)
-        }
+        } }
         // Token resolves are cached for 60s; a disable has to bite on the very next request.
         // Evicted after the commit, or a concurrent resolve could re-cache the old state.
         if (enabled == false) tokenCacheKeys(userId).forEach(MemoryCache::evict)
@@ -248,11 +300,70 @@ object UserRepo {
             }
             UserGroupAccess.deleteWhere { UserGroupAccess.userId eq userId }
             UserRoles.deleteWhere { UserRoles.userId eq userId }
+            IdentityRepo.unlinkAll(userId)
             Users.deleteWhere { Users.id eq userId }
         }
         // a deleted user's tokens are gone from the DB; their cached resolves must go too
         cacheKeys.forEach(MemoryCache::evict)
     }
+
+    /**
+     * Offboarding in one step: disable the user, end every panel session (session generation bump)
+     * and delete all of their `cxp_`/`cxr_` tokens, so nothing they hold keeps working on any
+     * datapath. Linked SSO identities are kept — the disabled flag already refuses them, and the
+     * link is the audit trail of who the account belonged to. Null when the user does not exist.
+     */
+    fun offboard(userId: Int): OffboardResult? {
+        val (result, cacheKeys) = transaction {
+            val n = Users.update({ Users.id eq userId }) {
+                it[enabled] = false
+                it[sessionVersion] = Users.sessionVersion + 1L
+            }
+            if (n == 0) return@transaction null to emptyList()
+            // DELETE … RETURNING: the cache keys are taken from exactly the rows this statement
+            // deleted, including a token committed by a concurrent request after the transaction
+            // began (Postgres READ COMMITTED would delete it, but a separate SELECT would miss it).
+            val proxy = org.claudeproxy.db.ProxyTokens.deleteReturning(listOf(org.claudeproxy.db.ProxyTokens.tokenHash)) {
+                org.claudeproxy.db.ProxyTokens.userId eq userId
+            }.map { "cp:tok:${it[org.claudeproxy.db.ProxyTokens.tokenHash]}" }
+            val routing = org.claudeproxy.db.RoutingTokens.deleteReturning(listOf(org.claudeproxy.db.RoutingTokens.tokenHash)) {
+                org.claudeproxy.db.RoutingTokens.userId eq userId
+            }.map { "cp:rtok:${it[org.claudeproxy.db.RoutingTokens.tokenHash]}" }
+            OffboardResult(proxyTokensRevoked = proxy.size, routingTokensRevoked = routing.size) to (proxy + routing)
+        }
+        // After the commit, or a concurrent resolve could re-cache a token that is about to vanish.
+        // A token minted after this commit by a request that was already past its auth check is not
+        // deleted here — but it, like any stale cache entry, is refused: every datapath re-checks the
+        // owner's live enabled state/permissions (DatapathService, ProxyRoutes, TokenUsageRoutes).
+        cacheKeys.forEach(MemoryCache::evict)
+        return result
+    }
+
+    /**
+     * Just-in-time account for a first SSO login. [role] null = a pending request: created
+     * **disabled with no roles**, so it can do nothing (no panel, no tokens, no pool) until an admin
+     * enables it and picks a role. Never any account-group access, and an unusable random password
+     * — the account can only sign in through SSO unless an admin sets one. Caller's transaction.
+     */
+    internal fun createProvisioned(username: String, email: String?, role: String?): Int {
+        val uid = Users.insert {
+            it[Users.username] = username
+            it[passwordHash] = Passwords.hash(org.claudeproxy.db.Crypto.randomToken(32))
+            it[enabled] = role != null
+            it[Users.email] = email
+            it[createdAt] = Instant.now()
+        }[Users.id]
+        if (role != null) setRoles(uid, listOf(role))
+        return uid
+    }
+
+    /** Caller's transaction. */
+    internal fun roleExists(name: String): Boolean =
+        Roles.selectAll().where { Roles.name eq name }.any()
+
+    /** Caller's transaction. */
+    internal fun usernameExists(username: String): Boolean =
+        Users.selectAll().where { Users.username eq username }.any()
 
     private fun setRoles(userId: Int, roleNames: List<String>) {
         UserRoles.deleteWhere { UserRoles.userId eq userId }

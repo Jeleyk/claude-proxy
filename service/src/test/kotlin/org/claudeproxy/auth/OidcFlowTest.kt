@@ -1,0 +1,357 @@
+package org.claudeproxy.auth
+
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.application.install
+import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.response.respond
+import io.ktor.server.response.respondText
+import io.ktor.server.routing.get
+import io.ktor.server.routing.route
+import io.ktor.server.routing.routing
+import io.ktor.server.testing.ApplicationTestBuilder
+import io.ktor.server.testing.testApplication
+import org.claudeproxy.api.oidcRoutes
+import org.claudeproxy.cache.MemoryCache
+import org.claudeproxy.repo.IdentityRepo
+import org.jetbrains.exposed.sql.transactions.transaction
+import java.io.File
+import java.net.URI
+import kotlin.test.*
+
+/**
+ * End-to-end callback validation against [FakeIdp] through the real routes and the real Nimbus
+ * client. Every failure must end on `/?sso_error=<code>` with no panel session issued.
+ */
+class OidcFlowTest {
+    private lateinit var dbFile: File
+    private lateinit var idp: FakeIdp
+    private val sub = "subject-123"
+
+    @BeforeTest
+    fun setup() {
+        dbFile = freshDb()
+        idp = FakeIdp()
+        // The bootstrap admin (id 1) is pre-linked; linking rules are covered in OidcLoginTest.
+        transaction { IdentityRepo.link(1, idp.issuer, sub) }
+    }
+
+    @AfterTest
+    fun cleanup() { idp.close(); MemoryCache.clear(); dbFile.delete() }
+
+    private fun goodClaims(extra: Map<String, Any?> = emptyMap()) =
+        mapOf("sub" to sub, "email" to "admin@example.com", "email_verified" to true, "groups" to listOf("panel")) + extra
+
+    private fun scenario(
+        config: OidcConfig = oidcConfig(issuer = idp.issuer),
+        transactions: OidcTransactions = OidcTransactions(),
+        block: suspend ApplicationTestBuilder.(HttpClient) -> Unit,
+    ) = testApplication {
+        application {
+            install(ContentNegotiation) { json() }
+            installSecurity(TEST_SECRET)
+            routing {
+                route("/api") { oidcRoutes(config, transactions = transactions) }
+                get("/whoami") { call.respond(if (call.currentUser() == null) HttpStatusCode.Unauthorized else HttpStatusCode.OK) }
+                get("/expires") { call.respondText((call.userSession()?.expiresAt ?: 0L).toString()) }
+            }
+        }
+        val c = createClient { followRedirects = false }
+        block(c)
+    }
+
+    /** /start → (IdP) → callback. Returns the callback response; [tamper] may rewrite code/state/cookie. */
+    private suspend fun login(
+        c: HttpClient,
+        grant: FakeIdp.Grant,
+        tamper: (code: String, state: String, cookie: String?) -> Triple<String?, String?, String?> = { a, b, d -> Triple(a, b, d) },
+    ): HttpResponse {
+        val start = c.get("/api/auth/oidc/start")
+        assertEquals(HttpStatusCode.Found, start.status)
+        val setCookie = start.headers.getAll(HttpHeaders.SetCookie)!!.single { it.startsWith("CLAUDE_PROXY_OIDC=") }
+        assertTrue("HttpOnly" in setCookie && "SameSite=Lax" in setCookie && "Path=/api/auth/oidc" in setCookie, setCookie)
+        val (code, state) = idp.authorize(URI(start.headers[HttpHeaders.Location]!!), grant)
+        val (c2, s2, ck) = tamper(code, state, setCookie.substringBefore(';'))
+        val qs = listOfNotNull(c2?.let { "code=$it" }, s2?.let { "state=$it" }).joinToString("&")
+        return c.get("/api/auth/oidc/callback?$qs") { ck?.let { header(HttpHeaders.Cookie, it) } }
+    }
+
+    private fun HttpResponse.sessionCookie(): String? =
+        headers.getAll(HttpHeaders.SetCookie)?.firstOrNull { it.startsWith("CLAUDE_PROXY_SESSION=") }?.substringBefore(';')
+
+    private suspend fun assertDenied(r: HttpResponse, code: String) {
+        assertEquals(HttpStatusCode.Found, r.status)
+        assertEquals("/?sso_error=$code", r.headers[HttpHeaders.Location])
+        assertNull(r.sessionCookie(), "no session on failure")
+    }
+
+    @Test
+    fun `authorize request uses PKCE S256, state and nonce`() = scenario { c ->
+        val loc = URI(c.get("/api/auth/oidc/start").headers[HttpHeaders.Location]!!)
+        val q = FakeIdp.query(loc.rawQuery)
+        assertEquals("S256", q["code_challenge_method"])
+        assertTrue(q["state"]!!.length >= 43 && q["nonce"]!!.length >= 43 && q["code_challenge"]!!.isNotEmpty())
+        assertEquals("http://localhost/api/auth/oidc/callback", q["redirect_uri"])
+        assertEquals("openid email profile", q["scope"])
+    }
+
+    @Test
+    fun `happy path issues the normal panel session`() = scenario { c ->
+        val r = login(c, FakeIdp.Grant(goodClaims()))
+        assertEquals(HttpStatusCode.Found, r.status)
+        assertEquals("/", r.headers[HttpHeaders.Location])
+        val session = r.sessionCookie()!!
+        assertEquals(HttpStatusCode.OK, c.get("/whoami") { header(HttpHeaders.Cookie, session) }.status)
+    }
+
+    @Test
+    fun `SSO session carries the shorter OIDC TTL, not the 30-day password TTL`() = scenario { c ->
+        val session = login(c, FakeIdp.Grant(goodClaims())).sessionCookie()!!
+        val expiresAt = c.get("/expires") { header(HttpHeaders.Cookie, session) }.bodyAsText().toLong()
+        val now = java.time.Instant.now().epochSecond
+        assertTrue(expiresAt in (now + 3600 - 30)..(now + 3600 + 5), "expiresAt=$expiresAt now=$now") // oidcConfig(): 3600s
+    }
+
+    @Test
+    fun `callback always clears the transaction cookie`() = scenario { c ->
+        for (r in listOf(
+            login(c, FakeIdp.Grant(goodClaims())),
+            login(c, FakeIdp.Grant(goodClaims())) { code, _, ck -> Triple(code, "forged", ck) },
+        )) {
+            val cleared = r.headers.getAll(HttpHeaders.SetCookie)!!.single { it.startsWith("CLAUDE_PROXY_OIDC=") }
+            assertTrue("Max-Age=0" in cleared && cleared.startsWith("CLAUDE_PROXY_OIDC=;"), cleared)
+        }
+    }
+
+    @Test
+    fun `IdP outage at start leaves no transaction behind`() {
+        val store = OidcTransactions()
+        scenario(oidcConfig(issuer = "http://127.0.0.1:1"), store) { c ->
+            repeat(3) { assertEquals("/?sso_error=unavailable", c.get("/api/auth/oidc/start").headers[HttpHeaders.Location]) }
+        }
+        assertEquals(0, store.size())
+    }
+
+    @Test fun `multiple audiences without azp`() = scenario { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims(), audiences = listOf("claude-proxy", "other-client"))), "token_error")
+    }
+    @Test fun `multiple audiences with azp of another client`() = scenario { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims(), audiences = listOf("claude-proxy", "other-client"), azp = "other-client")), "token_error")
+    }
+    @Test fun `single audience with a foreign azp`() = scenario { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims(), azp = "other-client")), "token_error")
+    }
+    @Test fun `multiple audiences with our azp is accepted`() = scenario { c ->
+        assertNotNull(login(c, FakeIdp.Grant(goodClaims(), audiences = listOf("claude-proxy", "other-client"), azp = "claude-proxy")).sessionCookie())
+    }
+
+    @Test
+    fun `HS256 token is rejected even when the IdP advertises HS256 and publishes an oct key`() {
+        FakeIdp(advertisedAlgs = listOf("RS256", "HS256"), publishOctKey = true).use { hostile ->
+            transaction { IdentityRepo.link(1, hostile.issuer, sub) }
+            scenario(oidcConfig(issuer = hostile.issuer, clientSecret = hostile.clientSecret)) { c ->
+                val start = c.get("/api/auth/oidc/start")
+                val cookie = start.headers.getAll(HttpHeaders.SetCookie)!!.single { it.startsWith("CLAUDE_PROXY_OIDC=") }.substringBefore(';')
+                val (code, state) = hostile.authorize(URI(start.headers[HttpHeaders.Location]!!), FakeIdp.Grant(goodClaims(), signer = FakeIdp.Signer.HMAC_CLIENT_SECRET))
+                assertDenied(c.get("/api/auth/oidc/callback?code=$code&state=$state") { header(HttpHeaders.Cookie, cookie) }, "token_error")
+            }
+        }
+    }
+
+    @Test
+    fun `IdP advertising only symmetric algorithms is refused`() {
+        FakeIdp(advertisedAlgs = listOf("HS256"), publishOctKey = true).use { hostile ->
+            scenario(oidcConfig(issuer = hostile.issuer)) { c ->
+                assertEquals("/?sso_error=unavailable", c.get("/api/auth/oidc/start").headers[HttpHeaders.Location])
+            }
+        }
+    }
+
+    @Test
+    fun `failed metadata refresh keeps serving the last good provider`() {
+        var now = 0L
+        val client = OidcClient(oidcConfig(issuer = idp.issuer), clock = { now }, refreshInBackground = { it.run() })
+        val txn = OidcTransactions().begin()!!.second
+        client.authorizationUri(txn)
+        idp.close() // IdP goes away
+        now += 2 * 60 * 60 * 1000 // past the hourly refresh
+        val started = System.nanoTime()
+        assertNotNull(client.authorizationUri(txn), "stale metadata still serves")
+        now += 1000
+        assertNotNull(client.authorizationUri(txn), "within the retry backoff: no new fetch")
+        assertTrue(System.nanoTime() - started < 30_000_000_000L)
+    }
+
+    @Test
+    fun `due refresh runs off the login path, stale metadata is bounded by OIDC_METADATA_MAX_STALE_HOURS`() {
+        var now = 0L
+        val queued = mutableListOf<Runnable>()
+        val client = OidcClient(oidcConfig(issuer = idp.issuer, metadataMaxStaleSeconds = 3600), clock = { now }, refreshInBackground = { queued += it })
+        val txn = OidcTransactions().begin()!!.second
+        client.authorizationUri(txn)
+        assertTrue(queued.isEmpty(), "first discovery is synchronous")
+        idp.close()
+
+        now += 61 * 60 * 1000 // refresh due
+        assertNotNull(client.authorizationUri(txn), "served from the current metadata while the refresh is pending")
+        assertNotNull(client.authorizationUri(txn))
+        assertEquals(1, queued.size, "a single refresh is scheduled, nobody waits for it")
+        queued.removeAt(0).run() // fails: IdP is gone
+        assertNotNull(client.authorizationUri(txn), "within max stale: still served")
+
+        now += 59 * 60 * 1000 // 2h after load: TTL (1h) + max stale (1h) not yet exceeded
+        assertNotNull(client.authorizationUri(txn))
+        queued.forEach { it.run() }; queued.clear()
+
+        now += 2 * 60 * 1000 // past TTL + max stale
+        val e = assertFailsWith<OidcException> { client.authorizationUri(txn) }
+        assertEquals(OidcError.UNAVAILABLE, e.code)
+        assertTrue(queued.isEmpty(), "expired metadata is never served, no background refresh either")
+        val started = System.nanoTime()
+        assertFailsWith<OidcException> { client.authorizationUri(txn) }
+        assertTrue(System.nanoTime() - started < 1_000_000_000L, "short failure backoff: no new fetch, no wait")
+    }
+
+    @Test
+    fun `logins queued behind a hanging IdP fail fast instead of each waiting out the timeout`() {
+        val hits = java.util.concurrent.atomic.AtomicInteger()
+        val hang = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        hang.executor = java.util.concurrent.Executors.newCachedThreadPool()
+        hang.createContext("/") { ex -> hits.incrementAndGet(); Thread.sleep(2_000); ex.close() }
+        hang.start()
+        try {
+            val issuer = "http://127.0.0.1:${hang.address.port}"
+            val client = OidcClient(oidcConfig(issuer = issuer), connectTimeoutMs = 500, readTimeoutMs = 400, clock = { 0L })
+            val txn = OidcTransactions().begin()!!.second
+            val n = 4
+            val start = java.util.concurrent.CountDownLatch(1)
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(n)
+            val results = (1..n).map { pool.submit<OidcError?> { start.await(); runCatching { client.authorizationUri(txn) }.exceptionOrNull()?.let { (it as OidcException).code } } }
+            val t0 = System.nanoTime()
+            start.countDown()
+            results.forEach { assertEquals(OidcError.UNAVAILABLE, it.get(10, java.util.concurrent.TimeUnit.SECONDS)) }
+            val elapsedMs = (System.nanoTime() - t0) / 1_000_000
+            pool.shutdown()
+            assertEquals(1, hits.get(), "one discovery attempt; the queued logins used the backoff")
+            assertTrue(elapsedMs < 2 * 400 + 600, "no login waited for a second timeout ($elapsedMs ms)")
+            // Still inside the backoff: no new attempt at all.
+            assertEquals(OidcError.UNAVAILABLE, assertFailsWith<OidcException> { client.authorizationUri(txn) }.code)
+            assertEquals(1, hits.get())
+        } finally { hang.stop(0) }
+    }
+
+    @Test
+    fun `background refresh can run again after it finished or failed to start`() {
+        var now = 0L
+        val queued = mutableListOf<Runnable>()
+        var failSchedule = false
+        val client = OidcClient(oidcConfig(issuer = idp.issuer), clock = { now }, refreshInBackground = {
+            if (failSchedule) throw java.util.concurrent.RejectedExecutionException("no threads")
+            queued += it
+        })
+        val txn = OidcTransactions().begin()!!.second
+        client.authorizationUri(txn)
+        idp.close()
+        now += 61 * 60 * 1000
+        client.authorizationUri(txn)
+        assertEquals(1, queued.size)
+        queued.removeAt(0).run() // fails, retry in a minute
+        now += 2 * 60 * 1000
+        client.authorizationUri(txn)
+        assertEquals(1, queued.size, "the flag was reset after the first run")
+        queued.removeAt(0).run()
+        now += 2 * 60 * 1000
+        failSchedule = true
+        assertNotNull(client.authorizationUri(txn), "scheduling failure still serves the current metadata")
+        failSchedule = false
+        client.authorizationUri(txn)
+        assertEquals(1, queued.size, "the flag was reset after the scheduling failure")
+    }
+
+    @Test
+    fun `max stale 0 never serves expired metadata`() {
+        var now = 0L
+        val client = OidcClient(oidcConfig(issuer = idp.issuer, metadataMaxStaleSeconds = 0), clock = { now }, refreshInBackground = { error("no background refresh expected") })
+        val txn = OidcTransactions().begin()!!.second
+        client.authorizationUri(txn)
+        idp.close()
+        now += 60 * 60 * 1000 + 1
+        assertEquals(OidcError.UNAVAILABLE, assertFailsWith<OidcException> { client.authorizationUri(txn) }.code)
+    }
+
+    @Test
+    fun `state mismatch is rejected`() = scenario { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims())) { code, _, ck -> Triple(code, "forged", ck) }, "invalid_request")
+    }
+
+    @Test
+    fun `callback without the transaction cookie is rejected (login CSRF)`() = scenario { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims())) { code, st, _ -> Triple(code, st, null) }, "invalid_request")
+        assertEquals(0, idp.tokenRequests, "no code exchange without a bound transaction")
+    }
+
+    @Test
+    fun `callback cannot be replayed`() = scenario { c ->
+        var replay: Triple<String?, String?, String?>? = null
+        val first = login(c, FakeIdp.Grant(goodClaims())) { a, b, d -> Triple(a, b, d).also { replay = it } }
+        assertNotNull(first.sessionCookie())
+        val (code, state, cookie) = replay!!
+        assertDenied(c.get("/api/auth/oidc/callback?code=$code&state=$state") { header(HttpHeaders.Cookie, cookie!!) }, "invalid_request")
+    }
+
+    @Test
+    fun `missing code is rejected`() = scenario { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims())) { _, st, ck -> Triple(null, st, ck) }, "invalid_request")
+    }
+
+    @Test
+    fun `provider error is reported without echoing it`() = scenario { c ->
+        val start = c.get("/api/auth/oidc/start")
+        val cookie = start.headers.getAll(HttpHeaders.SetCookie)!!.single { it.startsWith("CLAUDE_PROXY_OIDC=") }.substringBefore(';')
+        val state = FakeIdp.query(URI(start.headers[HttpHeaders.Location]!!).rawQuery)["state"]
+        assertDenied(c.get("/api/auth/oidc/callback?error=access_denied&error_description=%3Cscript%3E&state=$state") { header(HttpHeaders.Cookie, cookie) }, "idp_error")
+    }
+
+    @Test fun `token endpoint error`() = scenario { c -> assertDenied(login(c, FakeIdp.Grant(goodClaims(), tokenError = "invalid_grant")), "token_error") }
+    @Test fun `wrong nonce`() = scenario { c -> assertDenied(login(c, FakeIdp.Grant(goodClaims(), nonceOverride = "other")), "token_error") }
+    @Test fun `wrong audience`() = scenario { c -> assertDenied(login(c, FakeIdp.Grant(goodClaims(), audience = "another-client")), "token_error") }
+    @Test fun `wrong issuer`() = scenario { c -> assertDenied(login(c, FakeIdp.Grant(goodClaims(), issuerOverride = "https://evil.example.com")), "token_error") }
+    @Test fun `expired id token`() = scenario { c -> assertDenied(login(c, FakeIdp.Grant(goodClaims(), expiresInSeconds = -600)), "token_error") }
+    @Test fun `signature by a foreign key`() = scenario { c -> assertDenied(login(c, FakeIdp.Grant(goodClaims(), signer = FakeIdp.Signer.FOREIGN_KEY)), "token_error") }
+    @Test fun `unsigned alg none token`() = scenario { c -> assertDenied(login(c, FakeIdp.Grant(goodClaims(), signer = FakeIdp.Signer.NONE)), "token_error") }
+    @Test fun `HS256 token keyed by the client secret`() = scenario(oidcConfig(issuer = idp.issuer, clientSecret = idp.clientSecret)) { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims(), signer = FakeIdp.Signer.HMAC_CLIENT_SECRET)), "token_error")
+    }
+
+    @Test
+    fun `group gate refuses a linked user outside the allowed groups`() = scenario(oidcConfig(issuer = idp.issuer, allowedGroups = setOf("panel"))) { c ->
+        assertDenied(login(c, FakeIdp.Grant(goodClaims(mapOf("groups" to listOf("other"))))), "forbidden")
+        assertNotNull(login(c, FakeIdp.Grant(goodClaims())).sessionCookie())
+    }
+
+    @Test
+    fun `groups missing from the ID token are read from userinfo for the same sub only`() = scenario(oidcConfig(issuer = idp.issuer, allowedGroups = setOf("panel"))) { c ->
+        val noGroups = goodClaims() - "groups"
+        assertNotNull(login(c, FakeIdp.Grant(noGroups, userinfo = mapOf("sub" to sub, "groups" to listOf("panel")))).sessionCookie())
+        assertDenied(login(c, FakeIdp.Grant(noGroups, userinfo = mapOf("sub" to "someone-else", "groups" to listOf("panel")))), "token_error")
+    }
+
+    @Test
+    fun `unreachable IdP gives unavailable`() = scenario(oidcConfig(issuer = "http://127.0.0.1:1")) { c ->
+        val r = c.get("/api/auth/oidc/start")
+        assertEquals("/?sso_error=unavailable", r.headers[HttpHeaders.Location])
+    }
+
+    @Test
+    fun `public config hides nothing secret and reports disabled state`() = scenario(oidcConfig(issuer = idp.issuer, disablePasswordLogin = true)) { c ->
+        val text = c.get("/api/auth/oidc/config").bodyAsText()
+        assertTrue("\"enabled\":true" in text && "\"passwordLogin\":false" in text, text)
+        assertFalse(idp.clientSecret in text)
+    }
+}

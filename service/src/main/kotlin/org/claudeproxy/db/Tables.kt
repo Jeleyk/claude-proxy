@@ -17,8 +17,33 @@ object Users : Table("users") {
     val dailyChatCostLimit = double("daily_chat_cost_limit").nullable()
     // routing preference: true = try the global pool before this user's personal accounts.
     val preferGlobalPool = bool("prefer_global_pool").default(false)
+    // optional, admin-set, stored lower-cased. Only used to link a first OIDC login to this
+    // account (OIDC_LINK_BY_EMAIL); unique so a verified email can never match two users.
+    val email = varchar("email", 320).nullable().uniqueIndex("users_email_unique")
     val createdAt = timestamp("created_at")
     override val primaryKey = PrimaryKey(id)
+}
+
+/**
+ * External OIDC identities linked to a local user. The (issuer, subject) pair is the only stable
+ * identifier OIDC guarantees, so it — never email or username — is what a returning login is
+ * matched on. One identity per issuer per user.
+ */
+object UserIdentities : Table("user_identities") {
+    val id = integer("id").autoIncrement()
+    // CASCADE, like the other per-user tables: a release that does not know this table can still
+    // delete a user (rollback safety). UserRepo.delete also removes the rows explicitly.
+    val userId = integer("user_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    val issuer = varchar("issuer", 512)
+    val subject = varchar("subject", 255)
+    val createdAt = timestamp("created_at")
+    val lastLoginAt = timestamp("last_login_at").nullable()
+    override val primaryKey = PrimaryKey(id)
+
+    init {
+        uniqueIndex("user_identities_iss_sub", issuer, subject)
+        uniqueIndex("user_identities_user_iss", userId, issuer)
+    }
 }
 
 /** Simple key/value settings store (admin-tunable). */
@@ -362,7 +387,7 @@ object OAuthAddSessions : Table("oauth_add_sessions") {
 }
 
 val ALL_TABLES = arrayOf(
-    Users, Settings, ModelPrices, Roles, RolePermissions, UserRoles, ProxyTokens, RoutingTokens,
+    Users, UserIdentities, Settings, ModelPrices, Roles, RolePermissions, UserRoles, ProxyTokens, RoutingTokens,
     AccountGroups, UserGroupAccess,
     Accounts, AccountSecrets, AccountLimits, UsageEvents, McpToolCalls, WindowSnapshots,
     OAuthAddSessions, SessionOwners, SessionMap,

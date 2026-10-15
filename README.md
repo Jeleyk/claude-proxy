@@ -192,6 +192,16 @@ Use a trusted proxy: an HTTP proxy observes destination hosts and carries its ow
 authentication outside the upstream TLS tunnel. Protect its network connection separately
 (e.g. a private network). This feature does not establish a VPN or a host-wide firewall rule.
 
+### Single sign-on (OIDC)
+
+Optional, off by default: `OIDC_ENABLED=true` plus issuer, client id/secret and redirect URI adds
+a "Sign in with SSO" button to the panel (Authorization Code + PKCE, ID token validated by the
+Nimbus SDK against the provider's JWKS). Identities link to local users by `(issuer, sub)`;
+email linking, JIT provisioning (pending admin approval by default), group and email-domain gates
+are opt-in. Admins can **offboard** a user (disable, end sessions, revoke every `cxp_`/`cxr_`
+token) in one action — available with or without OIDC. API token authentication is unchanged. Setup and operational notes:
+[`docs/OIDC.md`](docs/OIDC.md).
+
 ## Security notes
 
 - Never expose `/internal/*` publicly — the bundled nginx config does not route it, and it is

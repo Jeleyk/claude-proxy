@@ -1,7 +1,10 @@
 package org.claudeproxy
 
 import java.io.File
+import org.claudeproxy.auth.OidcConfig
+import org.claudeproxy.auth.SameSitePolicy
 import org.claudeproxy.proxy.AnthropicProxy
+import org.slf4j.LoggerFactory
 
 /**
  * Runtime configuration, read from environment variables with sane defaults.
@@ -29,6 +32,12 @@ data class Config(
     // Null during rollout — the datapath still works without it.
     val internalToken: String?,
     val anthropicProxy: AnthropicProxy? = null,
+    // Opt-in OIDC panel login; null = disabled (see auth/OidcConfig).
+    val oidc: OidcConfig? = null,
+    // SameSite attribute of the panel session cookie (SESSION_COOKIE_SAMESITE=lax|strict).
+    val sessionSameSite: SameSitePolicy = SameSitePolicy.LAX,
+    // OIDC_BLOCK_PASSWORD_FOR_LINKED; independent of whether OIDC is enabled/valid (see OidcConfig).
+    val blockPasswordForLinked: Boolean = true,
 ) {
     companion object {
         fun load(): Config {
@@ -60,6 +69,9 @@ data class Config(
                 databasePassword = env("DATABASE_PASSWORD", "")!!,
                 internalToken = env("INTERNAL_TOKEN"),
                 anthropicProxy = AnthropicProxy.parse(System.getenv("ANTHROPIC_PROXY_URL") ?: System.getProperty("ANTHROPIC_PROXY_URL")),
+                oidc = OidcConfig.loadOrDisable(::envOrProp) { LoggerFactory.getLogger("Config").error(it) },
+                sessionSameSite = SameSitePolicy.parse(env("SESSION_COOKIE_SAMESITE")) { LoggerFactory.getLogger("Config").warn(it) },
+                blockPasswordForLinked = OidcConfig.blockPasswordForLinked(::envOrProp),
             )
         }
 

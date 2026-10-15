@@ -45,6 +45,9 @@ fun Route.adminRoutes(
     chatEngine: org.claudeproxy.chat.ChatEngine,
     datapath: org.claudeproxy.datapath.DatapathService,
     upstreamBaseUrl: String,
+    oidc: org.claudeproxy.auth.OidcConfig? = null,
+    /** OIDC_BLOCK_PASSWORD_FOR_LINKED — deliberately not tied to [oidc] being non-null (see OidcConfig.blockPasswordForLinked). */
+    blockPasswordForLinked: Boolean = true,
 ) {
     route("/api") {
         get("/config") {
@@ -73,7 +76,9 @@ fun Route.adminRoutes(
             call.respond(ModelPriceRepo.list())
         }
         installRoutes(publicBaseUrl)
-        authRoutes()
+        authRoutes(passwordLogin = oidc?.disablePasswordLogin != true, blockLinked = blockPasswordForLinked)
+        oidcRoutes(oidc)
+        userLifecycleRoutes(setOfNotNull(publicBaseUrl.takeIf { it.isNotEmpty() }?.let { runCatching { java.net.URI(it).host }.getOrNull() }))
         profileRoutes()
         accountRoutes(pool, probe)
         myAccountRoutes(pool, probe)
@@ -174,14 +179,32 @@ private fun assembleStats(
 
 // ---- auth ----
 
-private fun Route.authRoutes() {
+private val authLog = org.slf4j.LoggerFactory.getLogger("Auth")
+
+private fun Route.authRoutes(passwordLogin: Boolean, blockLinked: Boolean) {
     post("/auth/login") {
+        // OIDC_DISABLE_PASSWORD_LOGIN: SSO only. Checked before the body is read, so it also
+        // stops password guessing. Break-glass = unset the flag and restart.
+        if (!passwordLogin) return@post call.respond(HttpStatusCode.Forbidden, MessageResponse("Password login is disabled; use SSO"))
         val req = call.receive<LoginRequest>()
         val user = UserRepo.authenticate(req.username, req.password)
         if (user == null) {
+            // No username in the log: a mistyped password is often pasted into the username field.
+            authLog.info("password login failed")
             call.respond(HttpStatusCode.Unauthorized, MessageResponse("Invalid credentials"))
             return@post
         }
+        // OIDC_BLOCK_PASSWORD_FOR_LINKED (default on): an SSO-linked user must come through the
+        // IdP, or removing them there would not end their access. Applies whether or not OIDC is
+        // currently enabled or validly configured, so an OIDC typo/outage does not hand linked users
+        // their password back; break-glass is an unlinked user. Only checked after the password
+        // verified, so it reveals nothing to a guesser.
+        if (blockLinked && org.jetbrains.exposed.sql.transactions.transaction { org.claudeproxy.repo.IdentityRepo.isLinked(user.id) }) {
+            authLog.info("password login refused for SSO-linked user id={}", user.id)
+            call.respond(HttpStatusCode.Forbidden, MessageResponse("This account signs in with SSO"))
+            return@post
+        }
+        authLog.info("password login: user id={}", user.id)
         call.setUserSession(user)
         call.respond(userToDto(user))
     }
@@ -495,7 +518,14 @@ private fun Route.userRoutes() {
     post("/users") {
         call.requirePermission(Permission.USERS_MANAGE)
         val req = call.receive<CreateUserRequest>()
-        val id = UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyCostLimit, req.dailyRoutingCostLimit, req.dailyChatCostLimit)
+        val email = runCatching { UserRepo.normalizeEmail(req.email) }.getOrElse {
+            return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("invalid email"))
+        }
+        val id = try {
+            UserRepo.create(req.username, req.password, req.roles, req.allowedGroups, req.dailyCostLimit, req.dailyRoutingCostLimit, req.dailyChatCostLimit, email)
+        } catch (e: org.claudeproxy.repo.EmailTakenException) {
+            return@post call.respond(HttpStatusCode.Conflict, MessageResponse(e.message!!))
+        }
         call.respond(UserRepo.get(id) ?: MessageResponse("created"))
     }
     patch("/users/{id}") {
@@ -503,7 +533,14 @@ private fun Route.userRoutes() {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateUserRequest>()
-        UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyCostLimit, req.clearDailyLimit, req.dailyRoutingCostLimit, req.clearRoutingLimit, req.dailyChatCostLimit, req.clearChatLimit)
+        val email = runCatching { UserRepo.normalizeEmail(req.email) }.getOrElse {
+            return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("invalid email"))
+        }
+        try {
+            UserRepo.update(id, req.password, req.enabled, req.roles, req.allowedGroups, req.dailyCostLimit, req.clearDailyLimit, req.dailyRoutingCostLimit, req.clearRoutingLimit, req.dailyChatCostLimit, req.clearChatLimit, email, req.clearEmail)
+        } catch (e: org.claudeproxy.repo.EmailTakenException) {
+            return@patch call.respond(HttpStatusCode.Conflict, MessageResponse(e.message!!))
+        }
         call.respond(UserRepo.get(id) ?: MessageResponse("updated"))
     }
     delete("/users/{id}") {
